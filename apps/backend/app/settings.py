@@ -22,5 +22,12 @@ class Settings(BaseSettings):
     gemini_model: str = Field(default="gemini-2.5-pro")
     openai_model: str = Field(default="gpt-5")
 
+    # Deepgram streaming config
+    deepgram_model: str = Field(default="nova-3")
+    deepgram_language: str = Field(default="en-US")
+    deepgram_endpointing_ms: int = Field(default=300)
+    deepgram_sample_rate: int = Field(default=16000)
+    deepgram_channels: int = Field(default=1)
+
 
 settings = Settings()

@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 import { ChatForm } from '@/components/chat-form';
 
 export default function HomePage() {
@@ -8,6 +10,9 @@ export default function HomePage() {
         <p className="text-sm text-neutral-500">
           Smoke test: stream a reply from Gemini or OpenAI through the FastAPI backend.
         </p>
+        <Link href="/session" className="mt-2 text-sm text-blue-600 hover:underline">
+          → live transcription session
+        </Link>
       </header>
       <ChatForm />
     </main>

@@ -5,7 +5,9 @@
   "main": "main.js",
   "scripts": {
     "dev": "wait-on -t 60000 http://127.0.0.1:3333 && cross-env NODE_ENV=development electron .",
-    "build": "echo 'desktop build not implemented yet'",
+    "build": "pnpm run build:swift",
+    "build:swift": "swift build -c release --package-path swift",
+    "postinstall": "pnpm run build:swift || true",
     "lint": "echo 'desktop lint not configured yet'",
     "typecheck": "echo 'desktop typecheck not configured yet'"
   },
