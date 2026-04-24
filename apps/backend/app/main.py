@@ -5,7 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router
+from app.api.ws_transcribe import router as ws_transcribe_router
 from app.logging import configure_logging, log
+from app.redis_client import close_redis
 
 configure_logging()
 
@@ -14,6 +16,7 @@ configure_logging()
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     log.info("backend.startup", host="127.0.0.1", port=8000)
     yield
+    await close_redis()
     log.info("backend.shutdown")
 
 
@@ -28,6 +31,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_router)
+app.include_router(ws_transcribe_router)
 
 
 @app.get("/healthz")
