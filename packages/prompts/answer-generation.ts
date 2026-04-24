@@ -4,7 +4,7 @@
  * Purpose: generate the candidate's response to a detected interview question,
  * streamed in real-time and glanceable in peripheral vision during a live call.
  *
- * Target models: gemini-2.5-pro OR gpt-5 (user-selected per session).
+ * Target models: gemini-2.5-flash OR gpt-5 (user-selected per session).
  *
  * Design philosophy:
  * - GLANCEABLE. The candidate is on a live call and cannot read paragraphs.
@@ -103,7 +103,7 @@ Generate the candidate's response now.`;
  */
 export const ANSWER_GENERATION_CONFIG = {
   gemini: {
-    model: 'gemini-2.5-pro',
+    model: 'gemini-2.5-flash',
     temperature: 0.4,
     max_output_tokens: 1500,
     top_p: 0.9,

@@ -45,3 +45,36 @@ async def append_transcript(session_id: str, payload: dict[str, Any]) -> None:
         return
     key = f"session:{session_id}:transcript"
     await cast(Awaitable[Any], client.rpush(key, json.dumps(payload)))
+
+
+async def recent_transcript_entries(
+    session_id: str, window_seconds: float
+) -> list[dict[str, Any]]:
+    """Return the final-transcript entries from the last `window_seconds`.
+
+    Each entry is the raw dict originally RPUSH'd by ws_transcribe — `text`,
+    `timestamp`, `is_final`, `confidence`. Oldest first.
+    """
+    import time as _time
+
+    client = await get_redis()
+    if client is None:
+        return []
+    key = f"session:{session_id}:transcript"
+    items = await cast(Awaitable[list[str]], client.lrange(key, 0, -1))
+    cutoff = _time.time() - window_seconds
+    out: list[dict[str, Any]] = []
+    for raw in items:
+        try:
+            entry = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if entry.get("timestamp", 0) >= cutoff and entry.get("text"):
+            out.append(entry)
+    return out
+
+
+async def recent_transcript_text(session_id: str, window_seconds: float) -> str:
+    """Concatenate the text of finals from the last `window_seconds`."""
+    entries = await recent_transcript_entries(session_id, window_seconds)
+    return " ".join(str(e["text"]) for e in entries).strip()

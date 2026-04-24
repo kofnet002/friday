@@ -41,6 +41,9 @@ pnpm-debug.log*
 apps/desktop/dist/
 apps/desktop/app/
 
+# SQLite (local session/context data)
+apps/backend/data/
+
 # Coverage
 coverage/
 .nyc_output/

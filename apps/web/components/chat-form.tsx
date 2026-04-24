@@ -59,7 +59,7 @@ export function ChatForm() {
           value={provider}
           onChange={(e) => setProvider(e.target.value as Provider)}
         >
-          <option value="gemini">Gemini (gemini-2.5-pro)</option>
+          <option value="gemini">Gemini (gemini-2.5-flash)</option>
           <option value="openai">OpenAI (gpt-5)</option>
         </Select>
       </div>
