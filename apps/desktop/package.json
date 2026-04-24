@@ -1,0 +1,17 @@
+{
+  "name": "@friday/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "dev": "wait-on -t 60000 http://127.0.0.1:3333 && cross-env NODE_ENV=development electron .",
+    "build": "echo 'desktop build not implemented yet'",
+    "lint": "echo 'desktop lint not configured yet'",
+    "typecheck": "echo 'desktop typecheck not configured yet'"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "wait-on": "^8.0.1"
+  }
+}
