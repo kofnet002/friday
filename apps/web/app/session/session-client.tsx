@@ -1,32 +1,111 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { TranscriptEvent, WsServerMessage } from '@friday/shared-types';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type {
+  AnswerProvider,
+  AnswerServerMessage,
+  TranscriptEvent,
+  WsServerMessage,
+} from '@friday/shared-types';
 
 import { Button } from '@/components/ui/button';
+import { AnswerWs } from '@/lib/answer-ws';
+import {
+  getOrCreateSessionId,
+  getProviderPreference,
+  setProviderPreference,
+} from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
+
+import { AnswerPanel, type AnswerStatus } from './answer-panel';
 
 type Status = 'idle' | 'starting' | 'recording' | 'paused' | 'error';
 
 const AUTOSCROLL_THRESHOLD_PX = 48;
+const RECENT_FINALS_JOIN = 2;
 
 export function SessionClient() {
+  const [sessionId, setSessionIdState] = useState<string>('');
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [finals, setFinals] = useState<string[]>([]);
   const [interim, setInterim] = useState<string>('');
 
-  const wsRef = useRef<TranscribeWs | null>(null);
+  // Answer panel state
+  const [provider, setProvider] = useState<AnswerProvider>('gemini');
+  const [question, setQuestion] = useState<string | null>(null);
+  const [answer, setAnswer] = useState<string>('');
+  const [answerStatus, setAnswerStatus] = useState<AnswerStatus>('idle');
+  const [answerError, setAnswerError] = useState<string | null>(null);
+  const [marked, setMarked] = useState(false);
+  const [answerConnected, setAnswerConnected] = useState(false);
+
+  const transcribeRef = useRef<TranscribeWs | null>(null);
+  const answerRef = useRef<AnswerWs | null>(null);
   const lastSendAtRef = useRef<number>(0);
   const audioUnsubsRef = useRef<Array<() => void>>([]);
+  const finalsRef = useRef<string[]>([]);
+  const providerRef = useRef<AnswerProvider>('gemini');
+
+  finalsRef.current = finals;
+  providerRef.current = provider;
+
   const inElectron = typeof window !== 'undefined' && Boolean(window.friday);
 
-  const onServerMessage = useCallback((msg: WsServerMessage) => {
+  // On mount: resolve session_id and provider pref, then open the answer WS.
+  useEffect(() => {
+    const sid = getOrCreateSessionId();
+    setSessionIdState(sid);
+    setProvider(getProviderPreference());
+
+    const ws = new AnswerWs(sid, {
+      onMessage: onAnswerMessage,
+      onOpen: () => setAnswerConnected(true),
+      onClose: () => setAnswerConnected(false),
+      onError: () => setAnswerConnected(false),
+    });
+    ws.connect();
+    answerRef.current = ws;
+
+    return () => {
+      ws.close();
+      answerRef.current = null;
+    };
+  }, []);
+
+  // ─── answer WS message handling ────────────────────────────────────────────
+  const onAnswerMessage = useCallback((msg: AnswerServerMessage) => {
+    if (msg.type === 'started') {
+      setAnswer('');
+      setAnswerError(null);
+      setMarked(false);
+      setAnswerStatus('streaming');
+      return;
+    }
+    if (msg.type === 'token') {
+      setAnswer((prev) => prev + msg.text);
+      return;
+    }
+    if (msg.type === 'done') {
+      setAnswerStatus('done');
+      return;
+    }
+    if (msg.type === 'cancelled') {
+      setAnswerStatus('cancelled');
+      return;
+    }
+    if (msg.type === 'error') {
+      setAnswerError(msg.message);
+      setAnswerStatus('error');
+    }
+  }, []);
+
+  // ─── transcribe WS message handling ────────────────────────────────────────
+  const onTranscribeMessage = useCallback((msg: WsServerMessage) => {
     if (msg.type === 'ready') {
-      setSessionId(msg.session_id);
+      setSessionIdState(msg.session_id);
       return;
     }
     if (msg.type === 'error') {
@@ -36,6 +115,10 @@ export function SessionClient() {
     }
     if (msg.type === 'transcript') {
       handleTranscript(msg);
+      return;
+    }
+    if (msg.type === 'question_detected') {
+      askAnswer(msg.question);
     }
   }, []);
 
@@ -51,38 +134,43 @@ export function SessionClient() {
     }
   };
 
-  const teardownAudioListeners = () => {
-    for (const off of audioUnsubsRef.current) off();
-    audioUnsubsRef.current = [];
+  const askAnswer = (q: string) => {
+    const ws = answerRef.current;
+    if (!ws || !ws.isOpen()) {
+      setAnswerError('copilot WS not connected');
+      return;
+    }
+    setQuestion(q);
+    setAnswer('');
+    setAnswerError(null);
+    setMarked(false);
+    setAnswerStatus('streaming');
+    ws.send({ type: 'question', question: q, provider: providerRef.current });
   };
 
+  // ─── transcribe lifecycle ──────────────────────────────────────────────────
   const start = async () => {
     setError(null);
     setStatus('starting');
     setLatencyMs(null);
 
     const ws = new TranscribeWs({
-      onMessage: onServerMessage,
-      onOpen: () => {
-        ws.sendControl({ type: 'start' });
-      },
-      onClose: () => {
-        setStatus((prev) => (prev === 'error' ? prev : 'idle'));
-      },
+      onMessage: onTranscribeMessage,
+      onOpen: () => ws.sendControl({ type: 'start' }),
+      onClose: () => setStatus((prev) => (prev === 'error' ? prev : 'idle')),
       onError: () => {
         setError('WebSocket error');
         setStatus('error');
       },
     });
     ws.connect();
-    wsRef.current = ws;
+    transcribeRef.current = ws;
 
     if (!inElectron || !window.friday) {
       setError('Audio capture is only available inside the Friday desktop window.');
       setStatus('error');
       return;
     }
-
     const result = await window.friday.audio.start();
     if (!result.ok) {
       setError(result.error ?? 'audio start failed');
@@ -92,7 +180,7 @@ export function SessionClient() {
 
     const offFrame = window.friday.audio.onFrame((chunk) => {
       lastSendAtRef.current = performance.now();
-      wsRef.current?.sendAudio(chunk);
+      transcribeRef.current?.sendAudio(chunk);
     });
     const offError = window.friday.audio.onError((msg) => {
       setError(msg);
@@ -102,8 +190,12 @@ export function SessionClient() {
       setStatus((prev) => (prev === 'recording' ? 'idle' : prev));
     });
     audioUnsubsRef.current = [offFrame, offError, offExit];
-
     setStatus('recording');
+  };
+
+  const teardownAudioListeners = () => {
+    for (const off of audioUnsubsRef.current) off();
+    audioUnsubsRef.current = [];
   };
 
   const stop = async () => {
@@ -111,38 +203,67 @@ export function SessionClient() {
     if (inElectron && window.friday) {
       await window.friday.audio.stop();
     }
-    wsRef.current?.close();
-    wsRef.current = null;
+    transcribeRef.current?.close();
+    transcribeRef.current = null;
     setStatus('idle');
   };
 
   const pause = async () => {
-    if (inElectron && window.friday) {
-      await window.friday.audio.pause();
-    }
-    wsRef.current?.sendControl({ type: 'pause' });
+    if (inElectron && window.friday) await window.friday.audio.pause();
+    transcribeRef.current?.sendControl({ type: 'pause' });
     setStatus('paused');
   };
 
   const resume = async () => {
-    if (inElectron && window.friday) {
-      await window.friday.audio.resume();
-    }
-    wsRef.current?.sendControl({ type: 'start' });
+    if (inElectron && window.friday) await window.friday.audio.resume();
+    transcribeRef.current?.sendControl({ type: 'start' });
     setStatus('recording');
   };
 
-  const clear = () => {
+  const clearTranscript = () => {
     setFinals([]);
     setInterim('');
     setLatencyMs(null);
   };
 
+  const clearAnswer = () => {
+    setAnswer('');
+    setQuestion(null);
+    setAnswerError(null);
+    setMarked(false);
+    setAnswerStatus('idle');
+  };
+
+  const cancelAnswer = () => {
+    answerRef.current?.cancel();
+  };
+
+  const onProviderChange = (p: AnswerProvider) => {
+    setProvider(p);
+    setProviderPreference(p);
+  };
+
+  const submitCustom = (q: string) => askAnswer(q);
+
+  // ─── Cmd+Shift+Space hotkey: force-generate from recent transcript ────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.metaKey && e.shiftKey && (e.code === 'Space' || e.key === ' ')) {
+        e.preventDefault();
+        const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
+        if (recent) askAnswer(recent);
+        else setAnswerError('no transcript yet');
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   useEffect(() => {
     return () => {
       teardownAudioListeners();
-      wsRef.current?.close();
-      wsRef.current = null;
+      transcribeRef.current?.close();
+      transcribeRef.current = null;
     };
   }, []);
 
@@ -171,11 +292,12 @@ export function SessionClient() {
               Stop
             </Button>
           ) : null}
-          <Button onClick={clear} variant="ghost">
-            Clear
+          <Button onClick={clearTranscript} variant="ghost">
+            Clear transcript
           </Button>
         </div>
         <div className="ml-auto flex items-center gap-3 text-xs">
+          <span className="hidden font-mono text-neutral-500 md:inline">⌘⇧␣ to force-ask</span>
           <LatencyBadge ms={latencyMs} />
           {sessionId ? (
             <span className="font-mono text-neutral-500">session: {sessionId.slice(0, 8)}</span>
@@ -196,7 +318,23 @@ export function SessionClient() {
         </div>
       ) : null}
 
-      <Transcript status={status} finals={finals} interim={interim} />
+      <div className="grid gap-4 lg:grid-cols-[3fr_2fr]">
+        <Transcript status={status} finals={finals} interim={interim} />
+        <AnswerPanel
+          provider={provider}
+          onProviderChange={onProviderChange}
+          question={question}
+          answer={answer}
+          status={answerStatus}
+          error={answerError}
+          marked={marked}
+          onMarkAnswered={() => setMarked((m) => !m)}
+          onCancel={cancelAnswer}
+          onClear={clearAnswer}
+          onSubmitCustom={submitCustom}
+          connected={answerConnected}
+        />
+      </div>
     </div>
   );
 }
@@ -270,11 +408,8 @@ function Transcript({
   interim: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
 
-  // Auto-scroll to the latest line whenever content changes — but only if the
-  // user hasn't scrolled up. If they have, leave them where they are.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || !pinned) return;
@@ -302,20 +437,21 @@ function Transcript({
         ? 'Paused. Hit Resume to keep transcribing.'
         : 'Listening…';
 
+  const glowTone = useMemo(() => {
+    if (status === 'recording') return 'bg-sky-500/10 opacity-100 dark:bg-sky-400/10';
+    if (status === 'paused') return 'bg-amber-400/10 opacity-80';
+    return 'opacity-0';
+  }, [status]);
+
   return (
     <div className="relative overflow-hidden rounded-2xl border border-neutral-200 bg-gradient-to-b from-white via-neutral-50 to-white shadow-inner dark:border-neutral-800 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
       <div
         aria-hidden
         className={cn(
           'pointer-events-none absolute bottom-0 left-1/2 h-72 w-[60rem] -translate-x-1/2 rounded-full blur-3xl transition-opacity duration-500',
-          status === 'recording'
-            ? 'bg-sky-500/10 opacity-100 dark:bg-sky-400/10'
-            : status === 'paused'
-              ? 'bg-amber-400/10 opacity-80'
-              : 'opacity-0',
+          glowTone,
         )}
       />
-
       <div
         ref={scrollRef}
         onScroll={onScroll}
@@ -344,23 +480,15 @@ function Transcript({
               ) : null}
             </>
           )}
-          <div ref={endRef} />
         </div>
       </div>
-
       {!pinned ? (
         <button
           type="button"
           onClick={jumpToLatest}
           className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-neutral-300 bg-white/90 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-md backdrop-blur transition-colors hover:bg-white dark:border-neutral-700 dark:bg-neutral-900/90 dark:text-neutral-200 dark:hover:bg-neutral-900"
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            className="h-3.5 w-3.5"
-            aria-hidden
-          >
+          <svg viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5" aria-hidden>
             <path
               fillRule="evenodd"
               d="M10 3a.75.75 0 0 1 .75.75v10.69l3.97-3.97a.75.75 0 1 1 1.06 1.06l-5.25 5.25a.75.75 0 0 1-1.06 0l-5.25-5.25a.75.75 0 1 1 1.06-1.06l3.97 3.97V3.75A.75.75 0 0 1 10 3Z"

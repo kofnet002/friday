@@ -10,20 +10,22 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.logging import log
 from app.providers.deepgram import DeepgramSession
 from app.redis_client import append_transcript
+from app.services.question_detection import QuestionDetector
 
 router = APIRouter()
 
 
 @router.websocket("/ws/transcribe")
-async def ws_transcribe(websocket: WebSocket) -> None:
+async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> None:
     await websocket.accept()
-    session_id = str(uuid.uuid4())
+    # Accept a client-supplied session_id (from /setup flow); otherwise mint one.
+    effective_session_id = session_id or str(uuid.uuid4())
     paused = False
 
     await websocket.send_text(
-        json.dumps({"type": "ready", "session_id": session_id}),
+        json.dumps({"type": "ready", "session_id": effective_session_id}),
     )
-    log.info("ws.connect", session_id=session_id)
+    log.info("ws.connect", session_id=effective_session_id)
 
     send_lock = asyncio.Lock()
 
@@ -32,12 +34,21 @@ async def ws_transcribe(websocket: WebSocket) -> None:
             try:
                 await websocket.send_text(json.dumps(payload))
             except Exception as exc:  # noqa: BLE001
-                log.warning("ws.send_failed", session_id=session_id, error=str(exc))
+                log.warning("ws.send_failed", session_id=effective_session_id, error=str(exc))
+
+    async def on_question(question: str, confidence: float) -> None:
+        await send_json_safe(
+            {"type": "question_detected", "question": question, "confidence": confidence}
+        )
+
+    detector = QuestionDetector(effective_session_id, on_question)
 
     async def on_transcript(payload: dict[str, Any]) -> None:
         await send_json_safe(payload)
         if payload.get("is_final") and payload.get("text"):
-            await append_transcript(session_id, payload)
+            await append_transcript(effective_session_id, payload)
+            # Arm the silence timer for auto question-detection.
+            detector.notify_final()
 
     async def on_error(message: str) -> None:
         await send_json_safe({"type": "error", "message": message})
@@ -52,7 +63,9 @@ async def ws_transcribe(websocket: WebSocket) -> None:
     try:
         await deepgram.connect()
     except Exception as exc:  # noqa: BLE001
-        log.error("ws.deepgram_connect_failed", session_id=session_id, error=str(exc))
+        log.error(
+            "ws.deepgram_connect_failed", session_id=effective_session_id, error=str(exc)
+        )
         await send_json_safe({"type": "error", "message": f"Deepgram connect failed: {exc}"})
         await websocket.close(code=1011)
         return
@@ -78,22 +91,23 @@ async def ws_transcribe(websocket: WebSocket) -> None:
                 if kind == "start":
                     paused = False
                     await deepgram.stop_keepalive()
-                    log.info("ws.start", session_id=session_id)
+                    log.info("ws.start", session_id=effective_session_id)
                 elif kind == "pause":
                     paused = True
                     await deepgram.start_keepalive()
-                    log.info("ws.pause", session_id=session_id)
+                    log.info("ws.pause", session_id=effective_session_id)
                 elif kind == "stop":
-                    log.info("ws.stop", session_id=session_id)
+                    log.info("ws.stop", session_id=effective_session_id)
                     break
     except WebSocketDisconnect:
-        log.info("ws.disconnect", session_id=session_id)
+        log.info("ws.disconnect", session_id=effective_session_id)
     except Exception as exc:  # noqa: BLE001
-        log.error("ws.error", session_id=session_id, error=str(exc))
+        log.error("ws.error", session_id=effective_session_id, error=str(exc))
     finally:
+        await detector.close()
         await deepgram.finish()
         try:
             await websocket.close()
         except Exception:  # noqa: BLE001
             pass
-        log.info("ws.closed", session_id=session_id)
+        log.info("ws.closed", session_id=effective_session_id)

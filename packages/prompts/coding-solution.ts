@@ -66,6 +66,6 @@ export const CODING_SOLUTION_USER_TEMPLATE = (problem: {
 };
 
 export const CODING_SOLUTION_CONFIG = {
-  gemini: { model: 'gemini-2.5-pro', temperature: 0.2, max_output_tokens: 2500 },
+  gemini: { model: 'gemini-2.5-flash', temperature: 0.2, max_output_tokens: 2500 },
   openai: { model: 'gpt-5', temperature: 0.2, max_output_tokens: 2500 },
 } as const;

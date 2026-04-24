@@ -24,6 +24,7 @@ export type WsControlMessage = { type: 'start' } | { type: 'stop' } | { type: 'p
 export type WsServerMessage =
   | { type: 'ready'; session_id: string }
   | TranscriptEvent
+  | QuestionDetectedEvent
   | { type: 'error'; message: string };
 
 export interface TranscriptEvent {
@@ -33,4 +34,64 @@ export interface TranscriptEvent {
   confidence: number;
   /** Seconds since epoch when the backend received/forwarded the transcript. */
   timestamp: number;
+}
+
+export interface QuestionDetectedEvent {
+  type: 'question_detected';
+  question: string;
+  confidence: number;
+}
+
+// ─── /ws/answer ──────────────────────────────────────────────────────────────
+
+export type AnswerProvider = 'gemini' | 'openai';
+
+export interface AnswerSessionContext {
+  resume_text?: string;
+  extra_instructions?: string;
+  job_title?: string;
+  company?: string;
+  language?: string;
+  recent_transcript?: string;
+}
+
+/** Client → server. */
+export type AnswerClientMessage =
+  | {
+      type: 'question';
+      question: string;
+      provider: AnswerProvider;
+      session_context?: AnswerSessionContext;
+    }
+  | { type: 'cancel' }
+  | { type: 'ping' };
+
+/** Server → client. */
+export type AnswerServerMessage =
+  | { type: 'started'; question: string; provider: AnswerProvider }
+  | { type: 'token'; text: string }
+  | { type: 'done' }
+  | { type: 'cancelled' }
+  | { type: 'pong' }
+  | { type: 'error'; message: string };
+
+// ─── /setup / context API ────────────────────────────────────────────────────
+
+export interface SessionContextPayload {
+  session_id: string;
+  job_title?: string | null;
+  company?: string | null;
+  language?: string | null;
+  extra_instructions?: string | null;
+}
+
+export interface SessionContextResponse {
+  session_id: string;
+  exists: boolean;
+  job_title?: string | null;
+  company?: string | null;
+  language?: string | null;
+  extra_instructions?: string | null;
+  resume_excerpt?: string | null;
+  resume_chars?: number;
 }

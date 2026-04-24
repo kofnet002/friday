@@ -10,9 +10,14 @@ export default function HomePage() {
         <p className="text-sm text-neutral-500">
           Smoke test: stream a reply from Gemini or OpenAI through the FastAPI backend.
         </p>
-        <Link href="/session" className="mt-2 text-sm text-blue-600 hover:underline">
-          → live transcription session
-        </Link>
+        <div className="mt-2 flex flex-col gap-1 text-sm">
+          <Link href="/setup" className="text-sky-600 hover:underline dark:text-sky-400">
+            → configure session context
+          </Link>
+          <Link href="/session" className="text-sky-600 hover:underline dark:text-sky-400">
+            → live transcription + copilot
+          </Link>
+        </div>
       </header>
       <ChatForm />
     </main>
