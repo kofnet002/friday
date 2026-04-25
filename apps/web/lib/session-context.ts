@@ -1,4 +1,11 @@
-import type { AnswerProvider, CodingLanguage, SessionContextResponse } from '@friday/shared-types';
+import type {
+  AnswerProvider,
+  CodingLanguage,
+  InterviewType,
+  QAHistoryRow,
+  SessionContextResponse,
+  SessionRow,
+} from '@friday/shared-types';
 
 const SESSION_ID_KEY = 'friday.session.id';
 const PROVIDER_KEY = 'friday.session.provider';
@@ -76,13 +83,43 @@ export async function saveContext(payload: {
   company?: string;
   language?: string;
   extra_instructions?: string;
+  interview_type?: InterviewType | null;
+  default_provider?: AnswerProvider | null;
 }): Promise<boolean> {
-  const res = await fetch(`${BACKEND_HTTP_URL}/api/context`, {
+  // /api/sessions handles the fuller schema (interview_type, default_provider).
+  const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
   return res.ok;
+}
+
+export async function fetchLatestSession(): Promise<SessionRow | null> {
+  try {
+    const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions/latest`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { session: SessionRow | null };
+    return data.session ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchSessionDetail(
+  sessionId: string,
+): Promise<{ qa: QAHistoryRow[] } | null> {
+  try {
+    const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions/${sessionId}`);
+    if (!res.ok) return null;
+    return (await res.json()) as { qa: QAHistoryRow[] };
+  } catch {
+    return null;
+  }
+}
+
+export function sessionExportUrl(sessionId: string): string {
+  return `${BACKEND_HTTP_URL}/api/sessions/${sessionId}/export`;
 }
 
 export async function uploadResume(

@@ -1,12 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import type {
   AnswerProvider,
   AnswerServerMessage,
   CodingLanguage,
   CodingSolutionServerMessage,
   ExtractedProblem,
+  QAHistoryRow,
   TranscriptEvent,
   WsServerMessage,
 } from '@friday/shared-types';
@@ -15,9 +17,11 @@ import { Button } from '@/components/ui/button';
 import { AnswerWs } from '@/lib/answer-ws';
 import { CodingWs } from '@/lib/coding-ws';
 import {
+  fetchSessionDetail,
   getCodingLanguagePreference,
   getOrCreateSessionId,
   getProviderPreference,
+  sessionExportUrl,
   setCodingLanguagePreference,
   setProviderPreference,
 } from '@/lib/session-context';
@@ -26,6 +30,7 @@ import { cn } from '@/lib/utils';
 
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
 import { CodingPanel, type CodingProblemTab } from './coding-panel';
+import { ConnectionPill, HistoryModal, ShortcutsModal } from './session-modals';
 
 const MAX_CODING_TABS = 3;
 
@@ -61,6 +66,13 @@ export function SessionClient() {
     interval_ms: number;
   } | null>(null);
   const [codingError, setCodingError] = useState<string | null>(null);
+  const [codingConnected, setCodingConnected] = useState(false);
+
+  // Modals + history
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<QAHistoryRow[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const transcribeRef = useRef<TranscribeWs | null>(null);
   const answerRef = useRef<AnswerWs | null>(null);
@@ -98,7 +110,12 @@ export function SessionClient() {
     ws.connect();
     answerRef.current = ws;
 
-    const codingWs = new CodingWs(sid, { onMessage: onCodingSolutionMessage });
+    const codingWs = new CodingWs(sid, {
+      onMessage: onCodingSolutionMessage,
+      onOpen: () => setCodingConnected(true),
+      onClose: () => setCodingConnected(false),
+      onError: () => setCodingConnected(false),
+    });
     codingWs.connect();
     codingWsRef.current = codingWs;
 
@@ -389,10 +406,21 @@ export function SessionClient() {
       if (e.code === 'KeyC' || e.key?.toLowerCase() === 'c') {
         e.preventDefault();
         toggleCodingMode();
+        return;
+      }
+    };
+    const slashHandler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
       }
     };
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('keydown', slashHandler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('keydown', slashHandler);
+    };
   }, []);
 
   const toggleCodingMode = async () => {
@@ -460,6 +488,34 @@ export function SessionClient() {
     codingWsRef.current?.cancel();
   };
 
+  const refreshHistory = useCallback(async () => {
+    if (!sessionId) return;
+    setHistoryLoading(true);
+    try {
+      const data = await fetchSessionDetail(sessionId);
+      setHistory(data?.qa ?? []);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [sessionId]);
+
+  const openHistory = () => {
+    setHistoryOpen(true);
+    refreshHistory();
+  };
+
+  const exportSession = () => {
+    if (!sessionId) return;
+    window.open(sessionExportUrl(sessionId), '_blank');
+  };
+
+  // Refresh history once any answer stream completes (best-effort; small fetch).
+  useEffect(() => {
+    if (answerStatus === 'done') {
+      refreshHistory();
+    }
+  }, [answerStatus, refreshHistory]);
+
   const onCloseCodingTab = (fingerprint: string) => {
     if (activeFingerprintRef.current === fingerprint) {
       // Cancel any in-flight stream for the tab we're closing.
@@ -525,9 +581,28 @@ export function SessionClient() {
           >
             {codingActive ? 'Stop coding' : 'Coding mode'}
           </Button>
+          <Button onClick={openHistory} variant="ghost" size="sm">
+            History
+          </Button>
+          <Button onClick={exportSession} variant="ghost" size="sm">
+            Export
+          </Button>
+          <Button onClick={() => setShortcutsOpen(true)} variant="ghost" size="sm">
+            ⌘/
+          </Button>
         </div>
         <div className="ml-auto flex items-center gap-3 text-xs">
-          <span className="hidden font-mono text-neutral-500 md:inline">⌘⇧␣ ask · ⌘⇧C coding</span>
+          <ConnectionPill
+            transcribe={
+              status === 'recording' || status === 'paused'
+                ? 'live'
+                : status === 'error'
+                  ? 'error'
+                  : 'idle'
+            }
+            answer={answerConnected}
+            coding={codingConnected}
+          />
           <LatencyBadge ms={latencyMs} />
           {sessionId ? (
             <span className="font-mono text-neutral-500">session: {sessionId.slice(0, 8)}</span>
@@ -548,42 +623,58 @@ export function SessionClient() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-[3fr_2fr]">
-        <Transcript status={status} finals={finals} interim={interim} />
-        <div className="flex flex-col gap-4">
-          <AnswerPanel
-            provider={provider}
-            onProviderChange={onProviderChange}
-            question={question}
-            answer={answer}
-            status={answerStatus}
-            error={answerError}
-            marked={marked}
-            onMarkAnswered={() => setMarked((m) => !m)}
-            onCancel={cancelAnswer}
-            onClear={clearAnswer}
-            onSubmitCustom={submitCustom}
-            connected={answerConnected}
-          />
-          <CodingPanel
-            active={codingActive}
-            onToggle={toggleCodingMode}
-            language={codingLanguage}
-            onLanguageChange={onCodingLanguageChange}
-            provider={provider}
-            tabs={codingTabs}
-            activeFingerprint={activeFingerprint}
-            onSelectTab={setActiveFingerprint}
-            onCloseTab={onCloseCodingTab}
-            onClearAll={onClearAllCodingTabs}
-            onRegenerate={onCodingRegenerate}
-            onReExtract={onCodingReExtract}
-            onCancel={onCodingCancel}
-            frameInfo={codingFrame}
-            error={codingError}
-          />
-        </div>
+      <div className="min-h-[60vh] flex-1">
+        <PanelGroup direction="horizontal" autoSaveId="friday-session-layout">
+          <Panel defaultSize={25} minSize={18} className="pr-2">
+            <Transcript status={status} finals={finals} interim={interim} />
+          </Panel>
+          <PanelResizeHandle className="w-1 cursor-col-resize bg-neutral-200 transition-colors hover:bg-sky-400 dark:bg-neutral-800" />
+          <Panel defaultSize={45} minSize={28} className="px-2">
+            <AnswerPanel
+              provider={provider}
+              onProviderChange={onProviderChange}
+              question={question}
+              answer={answer}
+              status={answerStatus}
+              error={answerError}
+              marked={marked}
+              onMarkAnswered={() => setMarked((m) => !m)}
+              onCancel={cancelAnswer}
+              onClear={clearAnswer}
+              onSubmitCustom={submitCustom}
+              connected={answerConnected}
+            />
+          </Panel>
+          <PanelResizeHandle className="w-1 cursor-col-resize bg-neutral-200 transition-colors hover:bg-sky-400 dark:bg-neutral-800" />
+          <Panel defaultSize={30} minSize={0} collapsible collapsedSize={0} className="pl-2">
+            <CodingPanel
+              active={codingActive}
+              onToggle={toggleCodingMode}
+              language={codingLanguage}
+              onLanguageChange={onCodingLanguageChange}
+              provider={provider}
+              tabs={codingTabs}
+              activeFingerprint={activeFingerprint}
+              onSelectTab={setActiveFingerprint}
+              onCloseTab={onCloseCodingTab}
+              onClearAll={onClearAllCodingTabs}
+              onRegenerate={onCodingRegenerate}
+              onReExtract={onCodingReExtract}
+              onCancel={onCodingCancel}
+              frameInfo={codingFrame}
+              error={codingError}
+            />
+          </Panel>
+        </PanelGroup>
       </div>
+
+      <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <HistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        qa={history}
+        loading={historyLoading}
+      />
     </div>
   );
 }
