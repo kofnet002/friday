@@ -14,6 +14,7 @@ import type {
 } from '@friday/shared-types';
 
 import { Button } from '@/components/ui/button';
+import { PanelErrorBoundary } from '@/components/error-boundary';
 import { AnswerWs } from '@/lib/answer-ws';
 import { CodingWs } from '@/lib/coding-ws';
 import {
@@ -626,44 +627,50 @@ export function SessionClient() {
       <div className="min-h-[60vh] flex-1">
         <PanelGroup direction="horizontal" autoSaveId="friday-session-layout">
           <Panel defaultSize={25} minSize={18} className="pr-2">
-            <Transcript status={status} finals={finals} interim={interim} />
+            <PanelErrorBoundary label="Transcript">
+              <Transcript status={status} finals={finals} interim={interim} />
+            </PanelErrorBoundary>
           </Panel>
           <PanelResizeHandle className="w-1 cursor-col-resize bg-neutral-200 transition-colors hover:bg-sky-400 dark:bg-neutral-800" />
           <Panel defaultSize={45} minSize={28} className="px-2">
-            <AnswerPanel
-              provider={provider}
-              onProviderChange={onProviderChange}
-              question={question}
-              answer={answer}
-              status={answerStatus}
-              error={answerError}
-              marked={marked}
-              onMarkAnswered={() => setMarked((m) => !m)}
-              onCancel={cancelAnswer}
-              onClear={clearAnswer}
-              onSubmitCustom={submitCustom}
-              connected={answerConnected}
-            />
+            <PanelErrorBoundary label="Copilot answer">
+              <AnswerPanel
+                provider={provider}
+                onProviderChange={onProviderChange}
+                question={question}
+                answer={answer}
+                status={answerStatus}
+                error={answerError}
+                marked={marked}
+                onMarkAnswered={() => setMarked((m) => !m)}
+                onCancel={cancelAnswer}
+                onClear={clearAnswer}
+                onSubmitCustom={submitCustom}
+                connected={answerConnected}
+              />
+            </PanelErrorBoundary>
           </Panel>
           <PanelResizeHandle className="w-1 cursor-col-resize bg-neutral-200 transition-colors hover:bg-sky-400 dark:bg-neutral-800" />
           <Panel defaultSize={30} minSize={0} collapsible collapsedSize={0} className="pl-2">
-            <CodingPanel
-              active={codingActive}
-              onToggle={toggleCodingMode}
-              language={codingLanguage}
-              onLanguageChange={onCodingLanguageChange}
-              provider={provider}
-              tabs={codingTabs}
-              activeFingerprint={activeFingerprint}
-              onSelectTab={setActiveFingerprint}
-              onCloseTab={onCloseCodingTab}
-              onClearAll={onClearAllCodingTabs}
-              onRegenerate={onCodingRegenerate}
-              onReExtract={onCodingReExtract}
-              onCancel={onCodingCancel}
-              frameInfo={codingFrame}
-              error={codingError}
-            />
+            <PanelErrorBoundary label="Coding mode">
+              <CodingPanel
+                active={codingActive}
+                onToggle={toggleCodingMode}
+                language={codingLanguage}
+                onLanguageChange={onCodingLanguageChange}
+                provider={provider}
+                tabs={codingTabs}
+                activeFingerprint={activeFingerprint}
+                onSelectTab={setActiveFingerprint}
+                onCloseTab={onCloseCodingTab}
+                onClearAll={onClearAllCodingTabs}
+                onRegenerate={onCodingRegenerate}
+                onReExtract={onCodingReExtract}
+                onCancel={onCodingCancel}
+                frameInfo={codingFrame}
+                error={codingError}
+              />
+            </PanelErrorBoundary>
           </Panel>
         </PanelGroup>
       </div>

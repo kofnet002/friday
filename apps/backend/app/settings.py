@@ -42,5 +42,10 @@ class Settings(BaseSettings):
     # Persistence (SQLite for session context + resume)
     sqlite_path: str = Field(default="data/friday.db")
 
+    # Per-session safety budgets — pre-flight checked before each LLM call
+    # and audio second is metered as it's sent to Deepgram.
+    session_token_limit: int = Field(default=500_000)
+    session_audio_minute_limit: int = Field(default=120)
+
 
 settings = Settings()
