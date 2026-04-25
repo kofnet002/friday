@@ -2,6 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Electron drag region — top 28px of every page is grabbable so the user
+   can move the window. macOS traffic lights live in this strip already.
+   Ignored by normal browsers. */
+.app-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  z-index: 50;
+  -webkit-app-region: drag;
+  background: transparent;
+}
+.app-titlebar-spacer {
+  height: 28px;
+}
+
 :root {
   color-scheme: light dark;
 }

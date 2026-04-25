@@ -18,6 +18,44 @@ CREATE TABLE IF NOT EXISTS sessions (
     resume_text TEXT,
     created_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cost_usd REAL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_log(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS coding_solutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    platform TEXT,
+    title TEXT,
+    difficulty TEXT,
+    problem_statement TEXT NOT NULL,
+    examples_json TEXT,
+    constraints_json TEXT,
+    function_signature TEXT,
+    language TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT,
+    solution_text TEXT NOT NULL,
+    confidence REAL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_coding_solutions_session
+    ON coding_solutions(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_coding_solutions_fingerprint
+    ON coding_solutions(fingerprint);
 """
 
 
@@ -89,3 +127,100 @@ async def get_session(session_id: str) -> dict[str, Any] | None:
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+
+async def record_coding_solution(
+    *,
+    session_id: str,
+    fingerprint: str,
+    problem: dict[str, Any],
+    language: str,
+    provider: str,
+    model: str | None,
+    solution_text: str,
+) -> int:
+    """Persist a generated coding solution + its problem metadata."""
+    import json
+
+    examples = problem.get("examples")
+    constraints = problem.get("constraints")
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO coding_solutions (
+                session_id, fingerprint, platform, title, difficulty,
+                problem_statement, examples_json, constraints_json,
+                function_signature, language, provider, model,
+                solution_text, confidence, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                fingerprint,
+                problem.get("platform"),
+                problem.get("title"),
+                problem.get("difficulty"),
+                problem.get("problem_statement") or "",
+                json.dumps(examples) if examples else None,
+                json.dumps(constraints) if constraints else None,
+                problem.get("function_signature"),
+                language,
+                provider,
+                model,
+                solution_text,
+                problem.get("confidence"),
+                time.time(),
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid or 0)
+
+
+async def list_coding_solutions(session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT id, fingerprint, platform, title, difficulty, language,
+                   provider, model, confidence, created_at
+            FROM coding_solutions
+            WHERE session_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (session_id, limit),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
+async def log_usage(
+    *,
+    session_id: str,
+    kind: str,
+    provider: str | None = None,
+    model: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cost_usd: float | None = None,
+) -> None:
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            """
+            INSERT INTO usage_log (session_id, kind, provider, model,
+                                   input_tokens, output_tokens, cost_usd,
+                                   created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                kind,
+                provider,
+                model,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                time.time(),
+            ),
+        )
+        await db.commit()

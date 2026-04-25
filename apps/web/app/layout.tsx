@@ -14,6 +14,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body>
+        <div className="app-titlebar" aria-hidden />
         <Providers>{children}</Providers>
       </body>
     </html>

@@ -29,11 +29,15 @@ class Settings(BaseSettings):
     deepgram_sample_rate: int = Field(default=16000)
     deepgram_channels: int = Field(default=1)
 
-    # Question detection
-    question_detection_model: str = Field(default="gemini-2.5-flash")
+    # Question detection — default to flash-lite so it doesn't share
+    # gemini-2.5-flash's free-tier daily bucket with vision + answer streams.
+    question_detection_model: str = Field(default="gemini-2.5-flash-lite")
     question_detection_silence_ms: int = Field(default=1200)
     question_detection_transcript_window_s: int = Field(default=30)
     question_detection_min_confidence: float = Field(default=0.7)
+
+    # Vision extraction (coding mode). Must be a model with image input.
+    vision_extraction_model: str = Field(default="gemini-2.5-flash")
 
     # Persistence (SQLite for session context + resume)
     sqlite_path: str = Field(default="data/friday.db")

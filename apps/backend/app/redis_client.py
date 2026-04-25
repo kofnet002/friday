@@ -78,3 +78,37 @@ async def recent_transcript_text(session_id: str, window_seconds: float) -> str:
     """Concatenate the text of finals from the last `window_seconds`."""
     entries = await recent_transcript_entries(session_id, window_seconds)
     return " ".join(str(e["text"]) for e in entries).strip()
+
+
+# ─── coding mode ────────────────────────────────────────────────────────────
+
+CODING_PROBLEM_TTL_S = 60 * 60
+
+
+async def set_current_problem(session_id: str, problem_json: str) -> None:
+    client = await get_redis()
+    if client is None:
+        return
+    key = f"session:{session_id}:current_problem"
+    await cast(Awaitable[Any], client.set(key, problem_json, ex=CODING_PROBLEM_TTL_S))
+
+
+async def add_seen_problem_fingerprint(session_id: str, fingerprint: str) -> bool:
+    """Record that we've already surfaced this problem fingerprint this session.
+    Returns True if this was a NEW fingerprint (first time), False if already seen.
+    """
+    client = await get_redis()
+    if client is None:
+        return True
+    key = f"session:{session_id}:seen_problems"
+    added = await cast(Awaitable[int], client.sadd(key, fingerprint))
+    await cast(Awaitable[Any], client.expire(key, CODING_PROBLEM_TTL_S))
+    return bool(added)
+
+
+async def store_solution(session_id: str, problem_fingerprint: str, solution: str) -> None:
+    client = await get_redis()
+    if client is None:
+        return
+    key = f"session:{session_id}:solutions:{problem_fingerprint}"
+    await cast(Awaitable[Any], client.set(key, solution, ex=CODING_PROBLEM_TTL_S))

@@ -62,7 +62,7 @@ export function AnswerPanel({
           onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
           className="h-8 text-xs"
         >
-          <option value="gemini">Gemini 2.5 Pro</option>
+          <option value="gemini">Gemini 2.5 Flash</option>
           <option value="openai">GPT-5</option>
         </Select>
         <span

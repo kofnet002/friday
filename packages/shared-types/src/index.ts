@@ -95,3 +95,60 @@ export interface SessionContextResponse {
   resume_excerpt?: string | null;
   resume_chars?: number;
 }
+
+// ─── coding mode ─────────────────────────────────────────────────────────────
+
+export type CodingPlatform = 'leetcode' | 'turing' | 'hackerrank' | 'coderpad' | 'other';
+
+export type CodingDifficulty = 'easy' | 'medium' | 'hard';
+
+export type CodingLanguage = 'Python' | 'JavaScript' | 'TypeScript' | 'Java' | 'C++' | 'Go';
+
+export interface CodingExample {
+  input: string;
+  output: string;
+  explanation?: string | null;
+}
+
+/** Mirrors backend app.models.coding.ExtractedProblem. */
+export interface ExtractedProblem {
+  is_coding_problem: boolean;
+  platform?: CodingPlatform | null;
+  title?: string | null;
+  difficulty?: CodingDifficulty | null;
+  problem_statement?: string | null;
+  examples?: CodingExample[] | null;
+  constraints?: string[] | null;
+  function_signature?: string | null;
+  language_hint?: string | null;
+  confidence: number;
+}
+
+/** Pushed over /ws/transcribe when vision extraction has a new problem. */
+export interface CodingProblemDetectedEvent {
+  type: 'coding_problem_detected';
+  problem: ExtractedProblem;
+  fingerprint: string;
+}
+
+// /ws/coding-solution protocol
+export type CodingSolutionClientMessage =
+  | {
+      type: 'solve';
+      problem: ExtractedProblem;
+      language: CodingLanguage;
+      provider: AnswerProvider;
+      extra_instructions?: string;
+    }
+  | { type: 'cancel' }
+  | { type: 'ping' };
+
+export type CodingSolutionServerMessage =
+  | { type: 'started'; provider: AnswerProvider; language: CodingLanguage; model: string }
+  | { type: 'token'; text: string }
+  | { type: 'done' }
+  | { type: 'cancelled' }
+  | { type: 'pong' }
+  | { type: 'error'; message: string }
+  | { type: 'saved'; id: number; fingerprint: string }
+  | CodingProblemDetectedEvent;

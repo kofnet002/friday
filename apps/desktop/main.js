@@ -2,11 +2,13 @@ const { app, BrowserWindow, ipcMain, shell, systemPreferences, dialog } = requir
 const path = require('node:path');
 
 const { AudioSupervisor } = require('./audio');
+const { CodingCapture } = require('./coding');
 
 const DEV_URL = process.env.FRIDAY_WEB_URL || 'http://127.0.0.1:3333';
 const isDev = process.env.NODE_ENV === 'development';
 
 const audio = new AudioSupervisor();
+const coding = new CodingCapture();
 let mainWindow = null;
 
 function broadcast(channel, payload) {
@@ -23,6 +25,11 @@ audio.on('frame', (buffer) => {
 audio.on('error', (msg) => broadcast('audio:error', msg));
 audio.on('log', (msg) => broadcast('audio:log', msg));
 audio.on('exit', (info) => broadcast('audio:exit', info));
+
+coding.on('frame_processed', (info) => broadcast('coding:frame_processed', info));
+coding.on('extraction_result', (payload) => broadcast('coding:extraction_result', payload));
+coding.on('error', (msg) => broadcast('coding:error', msg));
+coding.on('log', (msg) => broadcast('coding:log', msg));
 
 async function ensurePermissions() {
   // Microphone (separate TCC bucket from screen recording)
@@ -90,6 +97,14 @@ ipcMain.handle('audio:resume', () => {
 });
 ipcMain.handle('audio:isRunning', () => audio.isRunning());
 
+ipcMain.handle('coding:start', (_evt, sessionId) => coding.start(sessionId));
+ipcMain.handle('coding:stop', () => {
+  coding.stop();
+  return { ok: true };
+});
+ipcMain.handle('coding:force_extract', () => coding.forceExtract());
+ipcMain.handle('coding:isActive', () => coding.isActive());
+
 app.whenReady().then(async () => {
   await ensurePermissions();
   createWindow();
@@ -101,9 +116,11 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   audio.stop();
+  coding.stop();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
   audio.stop();
+  coding.stop();
 });
