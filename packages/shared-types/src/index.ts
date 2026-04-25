@@ -96,6 +96,31 @@ export interface SessionContextResponse {
   resume_chars?: number;
 }
 
+export type InterviewType = 'technical' | 'behavioral' | 'system_design' | 'mixed';
+
+export interface SessionRow {
+  session_id: string;
+  job_title?: string | null;
+  company?: string | null;
+  language?: string | null;
+  extra_instructions?: string | null;
+  resume_text?: string | null;
+  interview_type?: InterviewType | null;
+  default_provider?: AnswerProvider | null;
+  has_resume?: number | boolean;
+  created_at: number;
+}
+
+export interface QAHistoryRow {
+  id: number;
+  question: string;
+  answer: string;
+  provider: AnswerProvider | string;
+  model?: string | null;
+  auto_detected: number | boolean;
+  created_at: number;
+}
+
 // ─── coding mode ─────────────────────────────────────────────────────────────
 
 export type CodingPlatform = 'leetcode' | 'turing' | 'hackerrank' | 'coderpad' | 'other';
