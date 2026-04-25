@@ -13,9 +13,8 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
-      <body>
+      <body className="bg-transparent">
         <div className="app-titlebar" aria-hidden />
-        <div className="app-titlebar-spacer" aria-hidden />
         <Providers>{children}</Providers>
       </body>
     </html>

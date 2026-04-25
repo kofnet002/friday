@@ -1,26 +1,13 @@
-import Link from 'next/link';
-
 import { SessionClient } from './session-client';
 
+/**
+ * Floating control bar — minimal page wrapper, no backdrop.
+ * The Electron window itself is transparent below the bar so popovers
+ * appear to float over the user's desktop content.
+ */
 export default function SessionPage() {
   return (
-    <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-6 py-8">
-      <header className="flex flex-col gap-2">
-        <Link
-          href="/setup"
-          className="self-start text-xs font-medium text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-        >
-          ← Setup
-        </Link>
-        <span className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600 dark:text-sky-400">
-          Friday · Session
-        </span>
-        <h1 className="text-3xl font-semibold tracking-tight">Live captions</h1>
-        <p className="max-w-2xl text-sm text-neutral-500 dark:text-neutral-400">
-          Friday listens to whatever your Mac is playing and transcribes it in real time. Play a
-          video anywhere on your screen — the current line is highlighted, earlier lines fade above.
-        </p>
-      </header>
+    <main className="px-3 py-3">
       <SessionClient />
     </main>
   );

@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import type { AnswerProvider, CodingLanguage, ExtractedProblem } from '@friday/shared-types';
 
+import { Code2, Eye } from 'lucide-react';
+
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { friendlyError } from '@/lib/error-messages';
@@ -86,21 +88,34 @@ export function CodingPanel({
       </div>
 
       {active && !activeTab ? (
-        <div className="flex items-center gap-2 rounded-md border border-dashed border-neutral-300 bg-neutral-50 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-400">
-          <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-sky-500" />
-          Watching for coding problems on-screen…
+        <div className="flex items-center gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/40 px-3 py-2 text-xs text-sky-700 dark:border-sky-500/30 dark:bg-sky-950/20 dark:text-sky-300">
+          <Eye className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span>Watching for coding problems on-screen…</span>
           {frameInfo ? (
-            <span className="ml-auto font-mono text-neutral-400">
-              Δ {frameInfo.changed_bits}/64 bits
+            <span className="ml-auto font-mono text-[10px] text-sky-500 dark:text-sky-400/80">
+              Δ {frameInfo.changed_bits}/64
             </span>
           ) : null}
         </div>
       ) : null}
 
       {!active && tabs.length === 0 ? (
-        <p className="text-xs text-neutral-500 dark:text-neutral-500">
-          Toggle coding mode (⌘⇧C) to auto-detect problems from your screen.
-        </p>
+        <div className="flex flex-col items-start gap-2 rounded-lg border border-dashed border-neutral-300 bg-neutral-50/60 px-4 py-5 dark:border-neutral-700 dark:bg-neutral-950/40">
+          <Code2 className="h-5 w-5 text-neutral-400 dark:text-neutral-500" aria-hidden />
+          <p className="text-sm font-medium text-neutral-800 dark:text-neutral-200">
+            Coding mode is off
+          </p>
+          <p className="text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
+            When enabled, Friday watches your screen and auto-detects LeetCode, Turing, and
+            HackerRank problems — then streams a solution.
+          </p>
+          <div className="mt-1 flex items-center gap-2 text-[11px] text-neutral-500">
+            <kbd className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 font-mono text-[10px] text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200">
+              ⌘⇧C
+            </kbd>
+            <span>or click Start above</span>
+          </div>
+        </div>
       ) : null}
 
       {tabs.length > 0 ? (
@@ -137,7 +152,7 @@ export function CodingPanel({
                     onCloseTab(tab.fingerprint);
                   }}
                   aria-label="close tab"
-                  className="rounded-full px-1 text-[11px] text-neutral-400 opacity-0 transition-opacity hover:bg-neutral-200 hover:text-neutral-700 group-hover:opacity-100 dark:hover:bg-neutral-700 dark:hover:text-neutral-200"
+                  className="flex h-4 w-4 items-center justify-center rounded-full text-[11px] leading-none text-neutral-400 opacity-50 transition-all hover:bg-neutral-200 hover:text-neutral-700 hover:opacity-100 group-hover:opacity-100 dark:hover:bg-neutral-700 dark:hover:text-neutral-200"
                 >
                   ×
                 </button>
@@ -334,12 +349,17 @@ function ActiveProblemView({
             {copied ? 'Copied ✓' : 'Copy code'}
           </Button>
         ) : null}
-        <span className="ml-auto self-center text-[10px] uppercase tracking-widest text-neutral-500">
+        <div className="ml-auto flex items-center gap-2 self-center">
           {tab.savedId ? (
-            <span className="mr-2 text-emerald-600 dark:text-emerald-400">Saved ✓</span>
+            <span className="flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+              <span className="h-1 w-1 rounded-full bg-emerald-500" aria-hidden />
+              Saved
+            </span>
           ) : null}
-          {provider} · {tab.language}
-        </span>
+          <span className="rounded-full bg-neutral-100 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+            {provider} · {tab.language}
+          </span>
+        </div>
       </div>
 
       <div
