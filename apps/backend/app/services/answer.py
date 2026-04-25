@@ -41,6 +41,7 @@ async def _stream_gemini(system: str, user: str) -> AsyncIterator[str]:
             temperature=0.4,
             max_output_tokens=1500,
             top_p=0.9,
+            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
         ),
     )
     async for chunk in stream:

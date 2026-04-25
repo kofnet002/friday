@@ -11,6 +11,9 @@
     "lint": "echo 'desktop lint not configured yet'",
     "typecheck": "echo 'desktop typecheck not configured yet'"
   },
+  "dependencies": {
+    "sharp": "^0.34.0"
+  },
   "devDependencies": {
     "cross-env": "^7.0.3",
     "electron": "^33.2.1",

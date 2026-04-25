@@ -1,9 +1,17 @@
+import Link from 'next/link';
+
 import { SetupForm } from './setup-form';
 
 export default function SetupPage() {
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col gap-8 px-6 py-10">
       <header className="flex flex-col gap-2">
+        <Link
+          href="/"
+          className="self-start text-xs font-medium text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+        >
+          ← Home
+        </Link>
         <span className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600 dark:text-sky-400">
           Friday · Setup
         </span>

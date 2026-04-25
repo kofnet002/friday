@@ -1,7 +1,16 @@
-import type { AnswerProvider, SessionContextResponse } from '@friday/shared-types';
+import type { AnswerProvider, CodingLanguage, SessionContextResponse } from '@friday/shared-types';
 
 const SESSION_ID_KEY = 'friday.session.id';
 const PROVIDER_KEY = 'friday.session.provider';
+const CODING_LANGUAGE_KEY = 'friday.session.coding_language';
+const CODING_LANGUAGES: readonly CodingLanguage[] = [
+  'Python',
+  'JavaScript',
+  'TypeScript',
+  'Java',
+  'C++',
+  'Go',
+];
 
 export function getOrCreateSessionId(): string {
   if (typeof window === 'undefined') return '';
@@ -32,6 +41,22 @@ export function setProviderPreference(p: AnswerProvider): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(PROVIDER_KEY, p);
 }
+
+export function getCodingLanguagePreference(): CodingLanguage {
+  if (typeof window === 'undefined') return 'Python';
+  const raw = window.localStorage.getItem(CODING_LANGUAGE_KEY);
+  if (raw && (CODING_LANGUAGES as readonly string[]).includes(raw)) {
+    return raw as CodingLanguage;
+  }
+  return 'Python';
+}
+
+export function setCodingLanguagePreference(lang: CodingLanguage): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(CODING_LANGUAGE_KEY, lang);
+}
+
+export const ALL_CODING_LANGUAGES = CODING_LANGUAGES;
 
 const BACKEND_HTTP_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://127.0.0.1:8000';
 

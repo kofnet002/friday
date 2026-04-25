@@ -4,21 +4,30 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type {
   AnswerProvider,
   AnswerServerMessage,
+  CodingLanguage,
+  CodingSolutionServerMessage,
+  ExtractedProblem,
   TranscriptEvent,
   WsServerMessage,
 } from '@friday/shared-types';
 
 import { Button } from '@/components/ui/button';
 import { AnswerWs } from '@/lib/answer-ws';
+import { CodingWs } from '@/lib/coding-ws';
 import {
+  getCodingLanguagePreference,
   getOrCreateSessionId,
   getProviderPreference,
+  setCodingLanguagePreference,
   setProviderPreference,
 } from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
 
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
+import { CodingPanel, type CodingProblemTab } from './coding-panel';
+
+const MAX_CODING_TABS = 3;
 
 type Status = 'idle' | 'starting' | 'recording' | 'paused' | 'error';
 
@@ -42,15 +51,34 @@ export function SessionClient() {
   const [marked, setMarked] = useState(false);
   const [answerConnected, setAnswerConnected] = useState(false);
 
+  // Coding panel state
+  const [codingActive, setCodingActive] = useState(false);
+  const [codingLanguage, setCodingLanguage] = useState<CodingLanguage>('Python');
+  const [codingTabs, setCodingTabs] = useState<CodingProblemTab[]>([]);
+  const [activeFingerprint, setActiveFingerprint] = useState<string | null>(null);
+  const [codingFrame, setCodingFrame] = useState<{
+    changed_bits: number;
+    interval_ms: number;
+  } | null>(null);
+  const [codingError, setCodingError] = useState<string | null>(null);
+
   const transcribeRef = useRef<TranscribeWs | null>(null);
   const answerRef = useRef<AnswerWs | null>(null);
+  const codingWsRef = useRef<CodingWs | null>(null);
   const lastSendAtRef = useRef<number>(0);
   const audioUnsubsRef = useRef<Array<() => void>>([]);
+  const codingUnsubsRef = useRef<Array<() => void>>([]);
   const finalsRef = useRef<string[]>([]);
   const providerRef = useRef<AnswerProvider>('gemini');
+  const codingLanguageRef = useRef<CodingLanguage>('Python');
+  const activeFingerprintRef = useRef<string | null>(null);
+  const codingTabsRef = useRef<CodingProblemTab[]>([]);
 
   finalsRef.current = finals;
   providerRef.current = provider;
+  codingLanguageRef.current = codingLanguage;
+  activeFingerprintRef.current = activeFingerprint;
+  codingTabsRef.current = codingTabs;
 
   const inElectron = typeof window !== 'undefined' && Boolean(window.friday);
 
@@ -59,6 +87,7 @@ export function SessionClient() {
     const sid = getOrCreateSessionId();
     setSessionIdState(sid);
     setProvider(getProviderPreference());
+    setCodingLanguage(getCodingLanguagePreference());
 
     const ws = new AnswerWs(sid, {
       onMessage: onAnswerMessage,
@@ -69,9 +98,15 @@ export function SessionClient() {
     ws.connect();
     answerRef.current = ws;
 
+    const codingWs = new CodingWs(sid, { onMessage: onCodingSolutionMessage });
+    codingWs.connect();
+    codingWsRef.current = codingWs;
+
     return () => {
       ws.close();
       answerRef.current = null;
+      codingWs.close();
+      codingWsRef.current = null;
     };
   }, []);
 
@@ -121,6 +156,101 @@ export function SessionClient() {
       askAnswer(msg.question);
     }
   }, []);
+
+  // ─── coding mode ──────────────────────────────────────────────────────────
+  const updateTab = (fingerprint: string, updater: (tab: CodingProblemTab) => CodingProblemTab) => {
+    setCodingTabs((prev) => prev.map((t) => (t.fingerprint === fingerprint ? updater(t) : t)));
+  };
+
+  const onCodingSolutionMessage = useCallback((msg: CodingSolutionServerMessage) => {
+    // Problem-detected events are pushed from /api/vision/extract via
+    // session_bus and arrive on this socket (it's always open while /session
+    // is mounted, unlike /ws/transcribe which requires Start).
+    if (msg.type === 'coding_problem_detected') {
+      onCodingProblemDetected(msg.problem, msg.fingerprint);
+      return;
+    }
+    if (msg.type === 'saved') {
+      updateTab(msg.fingerprint, (t) => ({ ...t, savedId: msg.id }));
+      return;
+    }
+    const fp = activeFingerprintRef.current;
+    if (!fp) return;
+    if (msg.type === 'started') {
+      updateTab(fp, (t) => ({
+        ...t,
+        solution: '',
+        status: 'streaming',
+        error: null,
+        savedId: null,
+      }));
+      return;
+    }
+    if (msg.type === 'token') {
+      updateTab(fp, (t) => ({ ...t, solution: t.solution + msg.text }));
+      return;
+    }
+    if (msg.type === 'done') {
+      updateTab(fp, (t) => ({ ...t, status: 'done' }));
+      return;
+    }
+    if (msg.type === 'cancelled') {
+      updateTab(fp, (t) => ({ ...t, status: 'cancelled' }));
+      return;
+    }
+    if (msg.type === 'error') {
+      updateTab(fp, (t) => ({ ...t, status: 'error', error: msg.message }));
+    }
+  }, []);
+
+  const requestSolve = (fingerprint: string, problem: ExtractedProblem, lang: CodingLanguage) => {
+    const ws = codingWsRef.current;
+    if (!ws || !ws.isOpen()) {
+      setCodingError('coding WS not connected');
+      return;
+    }
+    ws.send({
+      type: 'solve',
+      problem,
+      language: lang,
+      provider: providerRef.current,
+    });
+    updateTab(fingerprint, (t) => ({
+      ...t,
+      language: lang,
+      solution: '',
+      status: 'streaming',
+      error: null,
+    }));
+  };
+
+  const onCodingProblemDetected = (problem: ExtractedProblem, fingerprint: string) => {
+    setCodingError(null);
+    const lang = codingLanguageRef.current;
+    setCodingTabs((prev) => {
+      const existing = prev.find((t) => t.fingerprint === fingerprint);
+      if (existing) {
+        return prev.map((t) => (t.fingerprint === fingerprint ? { ...t, problem } : t));
+      }
+      const tab: CodingProblemTab = {
+        fingerprint,
+        problem,
+        language: lang,
+        solution: '',
+        status: 'streaming',
+        error: null,
+        savedId: null,
+      };
+      const next = [...prev, tab];
+      return next.length > MAX_CODING_TABS ? next.slice(-MAX_CODING_TABS) : next;
+    });
+    setActiveFingerprint(fingerprint);
+    // Auto-kick off the solve.
+    const ws = codingWsRef.current;
+    if (ws && ws.isOpen()) {
+      ws.send({ type: 'solve', problem, language: lang, provider: providerRef.current });
+    }
+  };
 
   const handleTranscript = (event: TranscriptEvent) => {
     if (lastSendAtRef.current > 0) {
@@ -245,19 +375,112 @@ export function SessionClient() {
 
   const submitCustom = (q: string) => askAnswer(q);
 
-  // ─── Cmd+Shift+Space hotkey: force-generate from recent transcript ────────
+  // ─── hotkeys: ⌘⇧␣ (force-ask) and ⌘⇧C (toggle coding mode) ────────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.metaKey && e.shiftKey && (e.code === 'Space' || e.key === ' ')) {
+      if (!e.metaKey || !e.shiftKey) return;
+      if (e.code === 'Space' || e.key === ' ') {
         e.preventDefault();
         const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
         if (recent) askAnswer(recent);
         else setAnswerError('no transcript yet');
+        return;
+      }
+      if (e.code === 'KeyC' || e.key?.toLowerCase() === 'c') {
+        e.preventDefault();
+        toggleCodingMode();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
+
+  const toggleCodingMode = async () => {
+    const fridayApi = window.friday;
+    if (!fridayApi?.coding) {
+      setCodingError('Coding mode only works inside the Friday desktop window.');
+      return;
+    }
+    if (codingActive) {
+      await fridayApi.coding.stop();
+      for (const off of codingUnsubsRef.current) off();
+      codingUnsubsRef.current = [];
+      setCodingActive(false);
+      setCodingFrame(null);
+      return;
+    }
+    const sid = getOrCreateSessionId();
+    const result = await fridayApi.coding.start(sid);
+    if (!result.ok) {
+      setCodingError(result.error ?? 'failed to start coding capture');
+      return;
+    }
+    setCodingError(null);
+    const offFrame = fridayApi.coding.onFrameProcessed((info) => {
+      setCodingFrame({ changed_bits: info.changed_bits, interval_ms: info.interval_ms });
+    });
+    const offExt = fridayApi.coding.onExtractionResult((payload) => {
+      // The real "problem detected" pathway is the transcribe WS event; this
+      // callback is purely informational (e.g., for debugging cache hits).
+      if (!payload.emitted && payload.problem?.is_coding_problem === false) {
+        // No-op: ignore non-problem frames.
+      }
+    });
+    const offErr = fridayApi.coding.onError((msg) => setCodingError(msg));
+    codingUnsubsRef.current = [offFrame, offExt, offErr];
+    setCodingActive(true);
+  };
+
+  const onCodingLanguageChange = (lang: CodingLanguage) => {
+    setCodingLanguage(lang);
+    setCodingLanguagePreference(lang);
+    const fp = activeFingerprintRef.current;
+    if (fp) {
+      const tab = codingTabsRef.current.find((t) => t.fingerprint === fp);
+      if (tab) requestSolve(fp, tab.problem, lang);
+    }
+  };
+
+  const onCodingRegenerate = () => {
+    const fp = activeFingerprintRef.current;
+    if (!fp) return;
+    const tab = codingTabsRef.current.find((t) => t.fingerprint === fp);
+    if (!tab) return;
+    requestSolve(fp, tab.problem, codingLanguageRef.current);
+  };
+
+  const onCodingReExtract = async () => {
+    const fridayApi = window.friday;
+    if (!fridayApi?.coding) return;
+    const result = await fridayApi.coding.forceExtract();
+    if (!result.ok) setCodingError(result.error ?? 'force extract failed');
+  };
+
+  const onCodingCancel = () => {
+    codingWsRef.current?.cancel();
+  };
+
+  const onCloseCodingTab = (fingerprint: string) => {
+    if (activeFingerprintRef.current === fingerprint) {
+      // Cancel any in-flight stream for the tab we're closing.
+      codingWsRef.current?.cancel();
+    }
+    setCodingTabs((prev) => {
+      const next = prev.filter((t) => t.fingerprint !== fingerprint);
+      if (activeFingerprintRef.current === fingerprint) {
+        const fallback = next[next.length - 1]?.fingerprint ?? null;
+        setActiveFingerprint(fallback);
+      }
+      return next;
+    });
+  };
+
+  const onClearAllCodingTabs = () => {
+    codingWsRef.current?.cancel();
+    setCodingTabs([]);
+    setActiveFingerprint(null);
+    setCodingError(null);
+  };
 
   useEffect(() => {
     return () => {
@@ -295,9 +518,16 @@ export function SessionClient() {
           <Button onClick={clearTranscript} variant="ghost">
             Clear transcript
           </Button>
+          <Button
+            onClick={toggleCodingMode}
+            variant={codingActive ? 'outline' : 'default'}
+            size="sm"
+          >
+            {codingActive ? 'Stop coding' : 'Coding mode'}
+          </Button>
         </div>
         <div className="ml-auto flex items-center gap-3 text-xs">
-          <span className="hidden font-mono text-neutral-500 md:inline">⌘⇧␣ to force-ask</span>
+          <span className="hidden font-mono text-neutral-500 md:inline">⌘⇧␣ ask · ⌘⇧C coding</span>
           <LatencyBadge ms={latencyMs} />
           {sessionId ? (
             <span className="font-mono text-neutral-500">session: {sessionId.slice(0, 8)}</span>
@@ -320,20 +550,39 @@ export function SessionClient() {
 
       <div className="grid gap-4 lg:grid-cols-[3fr_2fr]">
         <Transcript status={status} finals={finals} interim={interim} />
-        <AnswerPanel
-          provider={provider}
-          onProviderChange={onProviderChange}
-          question={question}
-          answer={answer}
-          status={answerStatus}
-          error={answerError}
-          marked={marked}
-          onMarkAnswered={() => setMarked((m) => !m)}
-          onCancel={cancelAnswer}
-          onClear={clearAnswer}
-          onSubmitCustom={submitCustom}
-          connected={answerConnected}
-        />
+        <div className="flex flex-col gap-4">
+          <AnswerPanel
+            provider={provider}
+            onProviderChange={onProviderChange}
+            question={question}
+            answer={answer}
+            status={answerStatus}
+            error={answerError}
+            marked={marked}
+            onMarkAnswered={() => setMarked((m) => !m)}
+            onCancel={cancelAnswer}
+            onClear={clearAnswer}
+            onSubmitCustom={submitCustom}
+            connected={answerConnected}
+          />
+          <CodingPanel
+            active={codingActive}
+            onToggle={toggleCodingMode}
+            language={codingLanguage}
+            onLanguageChange={onCodingLanguageChange}
+            provider={provider}
+            tabs={codingTabs}
+            activeFingerprint={activeFingerprint}
+            onSelectTab={setActiveFingerprint}
+            onCloseTab={onCloseCodingTab}
+            onClearAll={onClearAllCodingTabs}
+            onRegenerate={onCodingRegenerate}
+            onReExtract={onCodingReExtract}
+            onCancel={onCodingCancel}
+            frameInfo={codingFrame}
+            error={codingError}
+          />
+        </div>
       </div>
     </div>
   );
