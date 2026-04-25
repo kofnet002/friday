@@ -1,5 +1,6 @@
 'use client';
 
+import * as Popover from '@radix-ui/react-popover';
 import {
   forwardRef,
   useCallback,
@@ -9,8 +10,16 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Settings2, ShieldAlert, ShieldCheck, VenetianMask } from 'lucide-react';
-import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
+import {
+  Download,
+  Eraser,
+  Keyboard,
+  Pause,
+  Play,
+  ShieldAlert,
+  ShieldCheck,
+  Square,
+} from 'lucide-react';
 import type {
   AnswerProvider,
   AnswerServerMessage,
@@ -38,9 +47,17 @@ import {
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
 
+import { SetupForm } from '../setup/setup-form';
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
 import { CodingPanel, type CodingProblemTab } from './coding-panel';
-import { ConnectionPill, HistoryModal, SettingsModal, ShortcutsModal } from './session-modals';
+import { FeatureBar, getFeatureWidth, type FeatureKey } from './feature-bar';
+import {
+  ConnectionPill,
+  HistoryList,
+  ModalShell,
+  SettingsBody,
+  ShortcutsModal,
+} from './session-modals';
 
 const MAX_CODING_TABS = 3;
 
@@ -78,17 +95,23 @@ export function SessionClient() {
   const [codingError, setCodingError] = useState<string | null>(null);
   const [codingConnected, setCodingConnected] = useState(false);
 
+  // Active feature popover (null = no popover open, transcript visible behind)
+  const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
+
+  // Recording timer
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const recordingStartRef = useRef<number | null>(null);
+
   // Modals + history
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<QAHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [desktopStatus, setDesktopStatus] = useState<FridayWindowStatus | null>(null);
   const [privacyMode, setPrivacyMode] = useState(false);
   const [desktopToast, setDesktopToast] = useState<string | null>(null);
   const [stealthMode, setStealthMode] = useState(false);
   const [shieldOpen, setShieldOpen] = useState(false);
+  const [stealthDisableConfirmOpen, setStealthDisableConfirmOpen] = useState(false);
 
   const transcribeRef = useRef<TranscribeWs | null>(null);
   const answerRef = useRef<AnswerWs | null>(null);
@@ -236,6 +259,7 @@ export function SessionClient() {
     }
     if (msg.type === 'question_detected') {
       askAnswer(msg.question);
+      setActiveFeature('copilot');
     }
   }, []);
 
@@ -327,6 +351,7 @@ export function SessionClient() {
       return next.length > MAX_CODING_TABS ? next.slice(-MAX_CODING_TABS) : next;
     });
     setActiveFingerprint(fingerprint);
+    setActiveFeature('coding');
     // Auto-kick off the solve.
     const ws = codingWsRef.current;
     if (ws && ws.isOpen()) {
@@ -464,8 +489,12 @@ export function SessionClient() {
       if (e.code === 'Space' || e.key === ' ') {
         e.preventDefault();
         const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
-        if (recent) askAnswer(recent);
-        else setAnswerError('no transcript yet');
+        if (recent) {
+          askAnswer(recent);
+          setActiveFeature('copilot');
+        } else {
+          setAnswerError('no transcript yet');
+        }
         return;
       }
       if (e.code === 'KeyC' || e.key?.toLowerCase() === 'c') {
@@ -564,11 +593,6 @@ export function SessionClient() {
     }
   }, [sessionId]);
 
-  const openHistory = () => {
-    setHistoryOpen(true);
-    refreshHistory();
-  };
-
   const exportSession = () => {
     if (!sessionId) return;
     window.open(sessionExportUrl(sessionId), '_blank');
@@ -581,13 +605,26 @@ export function SessionClient() {
     setDesktopStatus(next);
   };
 
-  const toggleStealthMode = useCallback(async () => {
+  const applyStealthMode = useCallback(async (enable: boolean) => {
     const api = window.friday?.stealth;
     if (!api) return;
-    const next = stealthMode ? await api.disable() : await api.enable();
+    const next = enable ? await api.enable() : await api.disable();
     setStealthMode(next.enabled);
     setDesktopStatus((prev) => (prev ? { ...prev, stealth: next } : prev));
-  }, [stealthMode]);
+  }, []);
+
+  const toggleStealthMode = useCallback(() => {
+    if (stealthMode) {
+      setStealthDisableConfirmOpen(true);
+      return;
+    }
+    void applyStealthMode(true);
+  }, [stealthMode, applyStealthMode]);
+
+  const confirmDisableStealth = useCallback(async () => {
+    setStealthDisableConfirmOpen(false);
+    await applyStealthMode(false);
+  }, [applyStealthMode]);
 
   const centerDesktopWindow = async () => {
     const appWindow = window.friday?.appWindow;
@@ -637,184 +674,367 @@ export function SessionClient() {
     };
   }, []);
 
+  // Recording timer — ticks every second while status is 'recording'.
+  // Pauses (retains value) when status is 'paused'. Resets to 0 when idle.
+  useEffect(() => {
+    if (status === 'recording') {
+      if (recordingStartRef.current === null) {
+        recordingStartRef.current = Date.now() - elapsedMs;
+      }
+      const id = window.setInterval(() => {
+        if (recordingStartRef.current !== null) {
+          setElapsedMs(Date.now() - recordingStartRef.current);
+        }
+      }, 1000);
+      return () => window.clearInterval(id);
+    }
+    if (status === 'paused') {
+      recordingStartRef.current = null;
+      return undefined;
+    }
+    if (status === 'idle' || status === 'error') {
+      recordingStartRef.current = null;
+      setElapsedMs(0);
+    }
+    return undefined;
+    // elapsedMs intentionally omitted — we read its current value when
+    // resuming from pause but don't want to re-create the interval each tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
+
   const isRecording = status === 'recording';
   const isPaused = status === 'paused';
   const isLive = isRecording || isPaused;
+  const elapsedDisplay = formatElapsed(elapsedMs);
+
+  const renderFeatureContent = (key: FeatureKey) => {
+    if (key === 'setup') {
+      return <SetupForm onComplete={() => setActiveFeature(null)} />;
+    }
+    if (key === 'transcript') {
+      return (
+        <PanelErrorBoundary label="Transcript">
+          <Transcript status={status} finals={finals} interim={interim} privacyMode={privacyMode} />
+        </PanelErrorBoundary>
+      );
+    }
+    if (key === 'copilot') {
+      return (
+        <PanelErrorBoundary label="Copilot answer">
+          <AnswerPanel
+            provider={provider}
+            onProviderChange={onProviderChange}
+            question={question}
+            answer={answer}
+            status={answerStatus}
+            error={answerError}
+            marked={marked}
+            onMarkAnswered={() => setMarked((m) => !m)}
+            onCancel={cancelAnswer}
+            onClear={clearAnswer}
+            onSubmitCustom={submitCustom}
+            connected={answerConnected}
+            privacyMode={privacyMode}
+          />
+        </PanelErrorBoundary>
+      );
+    }
+    if (key === 'coding') {
+      return (
+        <PanelErrorBoundary label="Coding mode">
+          <CodingPanel
+            active={codingActive}
+            onToggle={toggleCodingMode}
+            language={codingLanguage}
+            onLanguageChange={onCodingLanguageChange}
+            provider={provider}
+            tabs={codingTabs}
+            activeFingerprint={activeFingerprint}
+            onSelectTab={setActiveFingerprint}
+            onCloseTab={onCloseCodingTab}
+            onClearAll={onClearAllCodingTabs}
+            onRegenerate={onCodingRegenerate}
+            onReExtract={onCodingReExtract}
+            onCancel={onCodingCancel}
+            frameInfo={codingFrame}
+            error={codingError}
+            privacyMode={privacyMode}
+          />
+        </PanelErrorBoundary>
+      );
+    }
+    if (key === 'history') {
+      return <HistoryList qa={history} loading={historyLoading} onExport={exportSession} />;
+    }
+    if (key === 'settings') {
+      return (
+        <SettingsBody
+          desktopStatus={desktopStatus}
+          stealthMode={stealthMode}
+          privacyMode={privacyMode}
+          onStealthModeChange={toggleStealthMode}
+          onPrivacyModeChange={setPrivacyMode}
+          onPreferenceChange={updateDesktopPreferences}
+          onCenterWindow={centerDesktopWindow}
+          onOpenStealthTest={openStealthTestPage}
+        />
+      );
+    }
+    return null;
+  };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-neutral-200 bg-white/70 p-3 shadow-sm backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/60">
-        <StatusPill status={status} />
-        <div className="flex gap-2">
-          {!isLive ? (
-            <Button onClick={start} disabled={status === 'starting'}>
-              {status === 'starting' ? 'Starting…' : 'Start'}
-            </Button>
+    <div className="mx-auto flex w-fit max-w-full flex-col items-center gap-2">
+      {/* Top control bar — brand · status · capture+transcript · other features.
+          Wrapped in a single Popover so all feature popovers anchor to the
+          whole bar (centered underneath) rather than to each individual icon. */}
+      <Popover.Root
+        open={activeFeature !== null}
+        onOpenChange={(open) => {
+          if (!open) setActiveFeature(null);
+        }}
+      >
+        <Popover.Anchor asChild>
+          <div className="flex items-center gap-x-2 rounded-2xl border border-white/40 bg-white/55 px-3 py-2 shadow-[0_12px_36px_rgba(15,23,42,0.12)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_12px_36px_rgba(0,0,0,0.55)]">
+            {/* Brand */}
+            <span
+              className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-semibold text-neutral-800 dark:text-neutral-100"
+              aria-label="Friday"
+            >
+              <span className="relative flex h-2 w-2">
+                <span
+                  className={cn(
+                    'absolute inline-flex h-full w-full rounded-full opacity-75',
+                    isRecording ? 'animate-ping bg-sky-400' : 'bg-transparent',
+                  )}
+                />
+                <span
+                  className={cn(
+                    'relative inline-flex h-2 w-2 rounded-full',
+                    isRecording
+                      ? 'bg-sky-500'
+                      : isPaused
+                        ? 'bg-amber-500'
+                        : 'bg-neutral-400 dark:bg-neutral-600',
+                  )}
+                />
+              </span>
+              Friday
+            </span>
+
+            <ClusterDivider />
+
+            {/* Recording status with inline timer */}
+            <div className="flex items-center gap-2">
+              <StatusPill status={status} />
+              <span
+                className={cn(
+                  'font-mono text-xs tabular-nums',
+                  isLive
+                    ? 'text-neutral-700 dark:text-neutral-200'
+                    : 'text-neutral-400 dark:text-neutral-600',
+                )}
+                aria-label="elapsed time"
+              >
+                {elapsedDisplay}
+              </span>
+            </div>
+
+            {/* Capture controls — icon-only when active, text on Start */}
+            <div className="flex items-center gap-0.5">
+              {!isLive ? (
+                <Button onClick={start} disabled={status === 'starting'} size="sm">
+                  <Play className="mr-1 h-3.5 w-3.5" aria-hidden />
+                  {status === 'starting' ? 'Starting…' : 'Start'}
+                </Button>
+              ) : null}
+              {isRecording ? (
+                <Button
+                  onClick={pause}
+                  variant="outline"
+                  size="sm"
+                  aria-label="pause"
+                  className="!px-2"
+                >
+                  <Pause className="h-3.5 w-3.5" aria-hidden />
+                </Button>
+              ) : null}
+              {isPaused ? (
+                <Button onClick={resume} size="sm" aria-label="resume" className="!px-2">
+                  <Play className="h-3.5 w-3.5" aria-hidden />
+                </Button>
+              ) : null}
+              {isLive ? (
+                <Button
+                  onClick={stop}
+                  variant="outline"
+                  size="sm"
+                  aria-label="stop"
+                  className="!px-2"
+                >
+                  <Square className="h-3.5 w-3.5" aria-hidden />
+                </Button>
+              ) : null}
+            </div>
+
+            <ClusterDivider />
+
+            {/* Feature cluster — all features share one anchored popover */}
+            <FeatureBar
+              active={activeFeature}
+              onChange={setActiveFeature}
+              badges={{
+                copilot: answerStatus === 'streaming',
+                coding: codingTabs.some((t) => t.status === 'streaming'),
+                transcript: isLive && (finals.length > 0 || Boolean(interim)),
+              }}
+            />
+          </div>
+        </Popover.Anchor>
+        <Popover.Portal>
+          {activeFeature ? (
+            <Popover.Content
+              align="center"
+              sideOffset={10}
+              collisionPadding={16}
+              onOpenAutoFocus={(e) => e.preventDefault()}
+              onInteractOutside={(e) => {
+                const target = e.target as HTMLElement | null;
+                if (target?.closest('[data-feature-trigger]')) {
+                  e.preventDefault();
+                }
+              }}
+              className={cn(
+                'z-50 max-h-[78vh] overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl',
+                'data-[state=open]:animate-in data-[state=closed]:animate-out',
+                'data-[state=open]:fade-in data-[state=closed]:fade-out',
+                'data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95',
+                'duration-150',
+                'dark:border-white/10 dark:bg-neutral-900/85 dark:shadow-[0_24px_60px_rgba(0,0,0,0.6)]',
+                getFeatureWidth(activeFeature),
+              )}
+            >
+              <Popover.Arrow className="fill-white/85 stroke-white/40 dark:fill-neutral-900/85 dark:stroke-white/10" />
+              {renderFeatureContent(activeFeature)}
+            </Popover.Content>
           ) : null}
-          {isRecording ? (
-            <Button onClick={pause} variant="outline">
-              Pause
-            </Button>
-          ) : null}
-          {isPaused ? <Button onClick={resume}>Resume</Button> : null}
-          {isLive ? (
-            <Button onClick={stop} variant="outline">
-              Stop
-            </Button>
-          ) : null}
-          <Button onClick={clearTranscript} variant="ghost">
-            Clear transcript
-          </Button>
-          <Button
-            onClick={toggleStealthMode}
-            variant={stealthMode ? 'outline' : 'default'}
-            size="sm"
-          >
-            <VenetianMask className="mr-1 h-4 w-4" />
-            {stealthMode ? 'Exit stealth' : 'Stealth mode'}
-          </Button>
-          <Button
-            onClick={toggleCodingMode}
-            variant={codingActive ? 'outline' : 'default'}
-            size="sm"
-          >
-            {codingActive ? 'Stop coding' : 'Coding mode'}
-          </Button>
-          <Button onClick={openHistory} variant="ghost" size="sm">
-            History
-          </Button>
-          <Button onClick={exportSession} variant="ghost" size="sm">
-            Export
-          </Button>
-          <Button onClick={() => setSettingsOpen(true)} variant="ghost" size="sm">
-            <Settings2 className="mr-1 h-4 w-4" />
-            Settings
-          </Button>
-          <Button onClick={() => setShortcutsOpen(true)} variant="ghost" size="sm">
-            ⌘/
-          </Button>
-        </div>
-        <div className="ml-auto flex items-center gap-3 text-xs">
-          <StealthIndicator
-            ref={shieldRef}
-            desktopStatus={desktopStatus}
-            stealthMode={stealthMode}
-            open={shieldOpen}
-            onToggle={() => setShieldOpen((value) => !value)}
-          />
-          <ConnectionPill
-            transcribe={
-              status === 'recording' || status === 'paused'
-                ? 'live'
-                : status === 'error'
-                  ? 'error'
-                  : 'idle'
-            }
-            answer={answerConnected}
-            coding={codingConnected}
-          />
-          <LatencyBadge ms={latencyMs} />
-          {sessionId ? (
-            <span className="font-mono text-neutral-500">session: {sessionId.slice(0, 8)}</span>
-          ) : null}
-        </div>
+        </Popover.Portal>
+      </Popover.Root>
+
+      {/* Utility row — sits centered beneath the main bar */}
+      <div className="flex items-center gap-2 rounded-full border border-white/40 bg-white/55 px-3 py-1 text-[11px] shadow-[0_8px_24px_rgba(15,23,42,0.10)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
+        <StealthIndicator
+          ref={shieldRef}
+          desktopStatus={desktopStatus}
+          stealthMode={stealthMode}
+          open={shieldOpen}
+          onToggle={() => setShieldOpen((value) => !value)}
+        />
+        <ConnectionPill
+          transcribe={
+            status === 'recording' || status === 'paused'
+              ? 'live'
+              : status === 'error'
+                ? 'error'
+                : 'idle'
+          }
+          answer={answerConnected}
+          coding={codingConnected}
+        />
+        <LatencyBadge ms={latencyMs} />
+        {sessionId ? (
+          <span className="rounded-full bg-white/60 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-600 dark:bg-white/5 dark:text-neutral-300">
+            {sessionId.slice(0, 8)}
+          </span>
+        ) : null}
+        <span aria-hidden className="h-3.5 w-px bg-neutral-300/50 dark:bg-white/10" />
+        <button
+          type="button"
+          onClick={clearTranscript}
+          aria-label="clear transcript"
+          title="Clear transcript"
+          className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+        >
+          <Eraser className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => setShortcutsOpen(true)}
+          aria-label="keyboard shortcuts"
+          title="Shortcuts (⌘/)"
+          className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+        >
+          <Keyboard className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={exportSession}
+          aria-label="export session"
+          title="Export session"
+          className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+        >
+          <Download className="h-3.5 w-3.5" />
+        </button>
       </div>
 
+      {/* Banners */}
       {!inElectron ? (
         <div className="rounded-md border border-amber-400/50 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-200">
           Open this page from the Friday desktop window — system-audio capture isn&apos;t available
           in a regular browser tab.
         </div>
       ) : null}
-
       {error ? (
         <div className="rounded-md border border-red-400/50 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300">
           {error}
         </div>
       ) : null}
-
       {desktopToast ? <DesktopToast message={desktopToast} /> : null}
-      {stealthMode ? <StealthBanner /> : null}
-
-      <div className="min-h-[60vh] flex-1">
-        <PanelGroup direction="horizontal" autoSaveId="friday-session-layout">
-          <Panel defaultSize={25} minSize={18} className="pr-2">
-            <PanelErrorBoundary label="Transcript">
-              <Transcript
-                status={status}
-                finals={finals}
-                interim={interim}
-                privacyMode={privacyMode}
-              />
-            </PanelErrorBoundary>
-          </Panel>
-          <PanelResizeHandle className="w-1 cursor-col-resize bg-neutral-200 transition-colors hover:bg-sky-400 dark:bg-neutral-800" />
-          <Panel defaultSize={45} minSize={28} className="px-2">
-            <PanelErrorBoundary label="Copilot answer">
-              <AnswerPanel
-                provider={provider}
-                onProviderChange={onProviderChange}
-                question={question}
-                answer={answer}
-                status={answerStatus}
-                error={answerError}
-                marked={marked}
-                onMarkAnswered={() => setMarked((m) => !m)}
-                onCancel={cancelAnswer}
-                onClear={clearAnswer}
-                onSubmitCustom={submitCustom}
-                connected={answerConnected}
-                privacyMode={privacyMode}
-              />
-            </PanelErrorBoundary>
-          </Panel>
-          <PanelResizeHandle className="w-1 cursor-col-resize bg-neutral-200 transition-colors hover:bg-sky-400 dark:bg-neutral-800" />
-          <Panel defaultSize={30} minSize={0} collapsible collapsedSize={0} className="pl-2">
-            <PanelErrorBoundary label="Coding mode">
-              <CodingPanel
-                active={codingActive}
-                onToggle={toggleCodingMode}
-                language={codingLanguage}
-                onLanguageChange={onCodingLanguageChange}
-                provider={provider}
-                tabs={codingTabs}
-                activeFingerprint={activeFingerprint}
-                onSelectTab={setActiveFingerprint}
-                onCloseTab={onCloseCodingTab}
-                onClearAll={onClearAllCodingTabs}
-                onRegenerate={onCodingRegenerate}
-                onReExtract={onCodingReExtract}
-                onCancel={onCodingCancel}
-                frameInfo={codingFrame}
-                error={codingError}
-                privacyMode={privacyMode}
-              />
-            </PanelErrorBoundary>
-          </Panel>
-        </PanelGroup>
-      </div>
 
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
-      <SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        desktopStatus={desktopStatus}
-        stealthMode={stealthMode}
-        privacyMode={privacyMode}
-        onStealthModeChange={toggleStealthMode}
-        onPrivacyModeChange={setPrivacyMode}
-        onPreferenceChange={updateDesktopPreferences}
-        onCenterWindow={centerDesktopWindow}
-        onOpenStealthTest={openStealthTestPage}
-      />
-      <HistoryModal
-        open={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        qa={history}
-        loading={historyLoading}
-      />
+
+      <ModalShell
+        title="Disable stealth mode?"
+        icon={<ShieldAlert className="h-3.5 w-3.5" />}
+        open={stealthDisableConfirmOpen}
+        onClose={() => setStealthDisableConfirmOpen(false)}
+      >
+        <div className="flex flex-col gap-4 text-sm">
+          <p className="text-neutral-700 dark:text-neutral-200">
+            Turning stealth mode off will release Electron content protection and the macOS
+            window-sharing lock. The Friday window may then appear in screen-share, screen
+            recordings, and screenshot tools.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setStealthDisableConfirmOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => {
+                void confirmDisableStealth();
+              }}
+            >
+              Disable stealth
+            </Button>
+          </div>
+        </div>
+      </ModalShell>
     </div>
   );
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
 const StealthIndicator = forwardRef<
@@ -917,15 +1137,6 @@ function StatusRow({
   );
 }
 
-function StealthBanner() {
-  return (
-    <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
-      Stealth mode is active. Friday is requesting Electron content protection and macOS native
-      window-sharing lockdown for demonstration and awareness use, not invisibility guarantees.
-    </div>
-  );
-}
-
 function DesktopToast({ message }: { message: string }) {
   return (
     <div className="pointer-events-none fixed right-6 top-16 z-[90] rounded-full border border-neutral-200 bg-white/90 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-lg backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/90 dark:text-neutral-200">
@@ -973,6 +1184,15 @@ function StatusPill({ status }: { status: Status }) {
       <span className={cn('h-2 w-2 rounded-full', preset.dot)} />
       {preset.label}
     </div>
+  );
+}
+
+function ClusterDivider() {
+  return (
+    <span
+      aria-hidden
+      className="hidden h-5 w-px bg-neutral-200 dark:bg-neutral-800 sm:inline-block"
+    />
   );
 }
 
@@ -1027,12 +1247,14 @@ function Transcript({
   };
 
   const empty = finals.length === 0 && !interim;
-  const placeholder =
+  const emptyHeadline =
+    status === 'idle' ? 'Press Start to listen' : status === 'paused' ? 'Paused' : 'Listening…';
+  const emptyHint =
     status === 'idle'
-      ? 'Press Start — play a video in any app and Friday will transcribe it here.'
+      ? 'Play a video in any app and Friday will transcribe it here.'
       : status === 'paused'
-        ? 'Paused. Hit Resume to keep transcribing.'
-        : 'Listening…';
+        ? 'Hit Resume to keep transcribing.'
+        : 'Waiting for the first words.';
 
   const glowTone = useMemo(() => {
     if (status === 'recording') return 'bg-sky-500/10 opacity-100 dark:bg-sky-400/10';
@@ -1056,9 +1278,32 @@ function Transcript({
       >
         <div className="mx-auto flex max-w-[60ch] flex-col gap-4 text-lg leading-relaxed tracking-normal">
           {empty ? (
-            <p className="text-center text-sm text-neutral-400 dark:text-neutral-600">
-              {placeholder}
-            </p>
+            <div className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center">
+              <div
+                className={cn(
+                  'flex h-9 w-9 items-center justify-center rounded-full border',
+                  status === 'recording'
+                    ? 'border-sky-300 bg-sky-50 text-sky-600 dark:border-sky-500/40 dark:bg-sky-950/30 dark:text-sky-400'
+                    : status === 'paused'
+                      ? 'border-amber-300 bg-amber-50 text-amber-600 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-400'
+                      : 'border-neutral-300 bg-neutral-50 text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-400',
+                )}
+                aria-hidden
+              >
+                <span
+                  className={cn(
+                    'inline-block h-2 w-2 rounded-full bg-current',
+                    status === 'recording' && 'animate-pulse',
+                  )}
+                />
+              </div>
+              <p className="text-base font-medium text-neutral-700 dark:text-neutral-200">
+                {emptyHeadline}
+              </p>
+              <p className="max-w-[36ch] text-sm text-neutral-500 dark:text-neutral-400">
+                {emptyHint}
+              </p>
+            </div>
           ) : (
             <div className={cn(privacyMode && 'select-none blur-sm')}>
               {finals.map((text, idx) => (

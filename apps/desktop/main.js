@@ -25,8 +25,8 @@ const NUDGE_PX = 50;
 const DEFAULT_STEALTH_ENABLED = true;
 const DEFAULT_WINDOW_STATE = Object.freeze({
   bounds: {
-    width: 520,
-    height: 720,
+    width: 1080,
+    height: 620,
   },
   opacity: 1,
   preferences: {
@@ -330,11 +330,13 @@ function createWindow() {
     height: persisted.bounds.height,
     x: persisted.bounds.x,
     y: persisted.bounds.y,
-    minWidth: 400,
-    minHeight: 500,
+    minWidth: 720,
+    minHeight: 120,
     resizable: true,
     title: 'Friday',
-    backgroundColor: '#0a0a0a',
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
     frame: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -351,7 +353,8 @@ function createWindow() {
 
   applyWindowPreferences();
   applyStealthProtection();
-  mainWindow.loadURL(DEV_URL);
+  // Launch directly into the floating control bar.
+  mainWindow.loadURL(`${DEV_URL}/session`);
   mainWindow.on('move', persistWindowBounds);
   mainWindow.on('resize', persistWindowBounds);
   mainWindow.on('show', () => {

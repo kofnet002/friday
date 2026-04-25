@@ -13,6 +13,7 @@
     "@friday/prompts": "workspace:*",
     "@friday/shared-types": "workspace:*",
     "@friday/ui": "workspace:*",
+    "@radix-ui/react-popover": "^1.1.4",
     "@radix-ui/react-slot": "^1.1.1",
     "@tanstack/react-query": "^5.62.7",
     "class-variance-authority": "^0.7.1",

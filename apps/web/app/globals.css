@@ -29,7 +29,8 @@ body {
 }
 
 body {
-  @apply bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100;
+  @apply text-neutral-900 dark:text-neutral-100;
+  background: transparent;
   font-family:
     ui-sans-serif,
     system-ui,
@@ -38,4 +39,11 @@ body {
     'Segoe UI',
     Roboto,
     sans-serif;
+}
+
+/* Page-level pages that need their own backdrop (e.g. the standalone Setup
+   route) opt in via this class on their <main>. The session route stays
+   transparent so the desktop window shows just the floating bar. */
+.page-backdrop {
+  @apply bg-white dark:bg-neutral-950;
 }
