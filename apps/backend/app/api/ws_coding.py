@@ -12,6 +12,7 @@ from app.logging import log
 from app.redis_client import store_solution
 from app.services.coding_extraction import problem_fingerprint
 from app.services.coding_solution import Provider, resolved_model, stream_solution
+from app.services.limits import check_token_budget
 from app.services.usage import record_solution_call
 
 router = APIRouter()
@@ -46,6 +47,19 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         extra = request.get("extra_instructions")
         if not problem.get("problem_statement"):
             await send_json({"type": "error", "message": "problem.problem_statement required"})
+            return
+
+        budget = await check_token_budget(session_id)
+        if not budget.ok:
+            await send_json(
+                {
+                    "type": "limit_exceeded",
+                    "kind": "tokens",
+                    "message": budget.message,
+                    "used": budget.used,
+                    "limit": budget.limit,
+                }
+            )
             return
 
         model = resolved_model(provider)

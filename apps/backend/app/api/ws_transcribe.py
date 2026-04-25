@@ -10,7 +10,13 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.logging import log
 from app.providers.deepgram import DeepgramSession
 from app.redis_client import append_transcript
+from app.services.limits import add_audio_seconds, check_audio_budget
 from app.services.question_detection import QuestionDetector
+
+# Each PCM frame from the desktop helper is 100ms long (16 kHz × 0.1s × 2 bytes).
+AUDIO_FRAME_SECONDS = 0.1
+# Flush audio-second counter to Redis every N frames to reduce write traffic.
+AUDIO_TRACK_FLUSH_EVERY = 10
 
 router = APIRouter()
 
@@ -70,14 +76,37 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
         await websocket.close(code=1011)
         return
 
+    audio_frame_count = 0
+    audio_budget_blocked = False
+
     try:
         while True:
             message = await websocket.receive()
             if message.get("type") == "websocket.disconnect":
                 break
             if "bytes" in message and message["bytes"] is not None:
+                if audio_budget_blocked:
+                    continue
                 if not paused:
                     await deepgram.send(message["bytes"])
+                    audio_frame_count += 1
+                    if audio_frame_count % AUDIO_TRACK_FLUSH_EVERY == 0:
+                        await add_audio_seconds(
+                            effective_session_id,
+                            AUDIO_FRAME_SECONDS * AUDIO_TRACK_FLUSH_EVERY,
+                        )
+                        check = await check_audio_budget(effective_session_id)
+                        if not check.ok:
+                            audio_budget_blocked = True
+                            await send_json_safe(
+                                {
+                                    "type": "limit_exceeded",
+                                    "kind": "audio",
+                                    "message": check.message,
+                                    "used_minutes": check.used,
+                                    "limit_minutes": check.limit,
+                                }
+                            )
                 continue
             if "text" in message and message["text"] is not None:
                 try:

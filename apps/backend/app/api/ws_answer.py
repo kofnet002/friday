@@ -11,6 +11,7 @@ from app.logging import log
 from app.prompts.answer_generation import AnswerContext
 from app.redis_client import recent_transcript_text
 from app.services.answer import Provider, stream_answer
+from app.services.limits import check_token_budget
 from app.settings import settings
 
 router = APIRouter()
@@ -41,6 +42,20 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         question = str(request.get("question") or "").strip()
         if not question:
             await send_json({"type": "error", "message": "empty question"})
+            return
+
+        # Pre-flight budget check.
+        budget = await check_token_budget(session_id)
+        if not budget.ok:
+            await send_json(
+                {
+                    "type": "limit_exceeded",
+                    "kind": "tokens",
+                    "message": budget.message,
+                    "used": budget.used,
+                    "limit": budget.limit,
+                }
+            )
             return
 
         override = request.get("session_context") or {}
