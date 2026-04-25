@@ -2,14 +2,17 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import type { AnswerProvider, InterviewType } from '@friday/shared-types';
 
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import {
   fetchContext,
+  fetchLatestSession,
   getOrCreateSessionId,
   saveContext,
+  setProviderPreference,
   setSessionId,
   uploadResume,
 } from '@/lib/session-context';
@@ -22,6 +25,8 @@ export function SetupForm() {
   const [company, setCompany] = useState('');
   const [language, setLanguage] = useState('en');
   const [extraInstructions, setExtra] = useState('');
+  const [interviewType, setInterviewType] = useState<InterviewType>('mixed');
+  const [defaultProvider, setDefaultProvider] = useState<AnswerProvider>('gemini');
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeStatus, setResumeStatus] = useState<
     | { kind: 'idle' }
@@ -30,11 +35,11 @@ export function SetupForm() {
     | { kind: 'err'; msg: string }
   >({ kind: 'idle' });
   const [saving, setSaving] = useState(false);
+  const [hasPriorSession, setHasPriorSession] = useState(false);
 
   useEffect(() => {
     const id = getOrCreateSessionId();
     setSid(id);
-    // Pre-fill if prior context exists
     fetchContext(id).then((ctx) => {
       if (!ctx || !ctx.exists) return;
       if (ctx.job_title) setJobTitle(ctx.job_title);
@@ -45,7 +50,23 @@ export function SetupForm() {
         setResumeStatus({ kind: 'ok', chars: ctx.resume_chars });
       }
     });
+    fetchLatestSession().then((latest) => {
+      if (latest && latest.session_id !== id) setHasPriorSession(true);
+    });
   }, []);
+
+  const duplicateLastSession = async () => {
+    const latest = await fetchLatestSession();
+    if (!latest) return;
+    if (latest.job_title) setJobTitle(latest.job_title);
+    if (latest.company) setCompany(latest.company);
+    if (latest.language) setLanguage(latest.language);
+    if (latest.extra_instructions) setExtra(latest.extra_instructions);
+    if (latest.interview_type) setInterviewType(latest.interview_type);
+    if (latest.default_provider === 'gemini' || latest.default_provider === 'openai') {
+      setDefaultProvider(latest.default_provider);
+    }
+  };
 
   const regenerateSession = () => {
     const id = crypto.randomUUID();
@@ -76,7 +97,10 @@ export function SetupForm() {
       company: company || undefined,
       language,
       extra_instructions: extraInstructions || undefined,
+      interview_type: interviewType,
+      default_provider: defaultProvider,
     });
+    setProviderPreference(defaultProvider);
     setSaving(false);
     if (ok) {
       router.push('/session');
@@ -101,6 +125,29 @@ export function SetupForm() {
             onChange={(e) => setCompany(e.target.value)}
             placeholder="e.g. Anthropic"
           />
+        </Labeled>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Labeled label="Interview type">
+          <Select
+            value={interviewType}
+            onChange={(e) => setInterviewType(e.target.value as InterviewType)}
+          >
+            <option value="technical">Technical</option>
+            <option value="behavioral">Behavioral</option>
+            <option value="system_design">System design</option>
+            <option value="mixed">Mixed</option>
+          </Select>
+        </Labeled>
+        <Labeled label="Default copilot model">
+          <Select
+            value={defaultProvider}
+            onChange={(e) => setDefaultProvider(e.target.value as AnswerProvider)}
+          >
+            <option value="gemini">Gemini 2.5 Pro</option>
+            <option value="openai">GPT-5</option>
+          </Select>
         </Labeled>
       </div>
 
@@ -146,6 +193,15 @@ export function SetupForm() {
           >
             new session
           </button>
+          {hasPriorSession ? (
+            <button
+              type="button"
+              onClick={duplicateLastSession}
+              className="ml-3 underline hover:text-neutral-700 dark:hover:text-neutral-300"
+            >
+              duplicate last session
+            </button>
+          ) : null}
         </div>
         <Button type="submit" disabled={saving}>
           {saving ? 'Saving…' : 'Start session →'}

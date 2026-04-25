@@ -6,12 +6,19 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.db import get_session
+from app.db import append_qa, get_session
 from app.logging import log
 from app.prompts.answer_generation import AnswerContext
+from app.redis_client import recent_transcript_text
 from app.services.answer import Provider, stream_answer
+from app.settings import settings
 
 router = APIRouter()
+
+# Window of transcript automatically included as `recent_conversation` if the
+# client doesn't pass one explicitly. Roomier than question-detection's 30s so
+# the answer can ground in surrounding context.
+ANSWER_TRANSCRIPT_WINDOW_S = 60.0
 
 
 @router.websocket("/ws/answer")
@@ -41,6 +48,15 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         if session_id:
             persisted = await get_session(session_id) or {}
 
+        recent_transcript = override.get("recent_transcript")
+        if not recent_transcript and session_id:
+            try:
+                recent_transcript = await recent_transcript_text(
+                    session_id, ANSWER_TRANSCRIPT_WINDOW_S
+                )
+            except Exception:  # noqa: BLE001
+                recent_transcript = None
+
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
@@ -49,12 +65,19 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             job_title=override.get("job_title") or persisted.get("job_title"),
             company=override.get("company") or persisted.get("company"),
             language=override.get("language") or persisted.get("language") or "en",
-            recent_transcript=override.get("recent_transcript"),
+            recent_transcript=recent_transcript,
+        )
+
+        auto_detected = bool(request.get("auto_detected", False))
+        model = (
+            settings.gemini_model if provider == "gemini" else settings.openai_model
         )
 
         await send_json({"type": "started", "question": question, "provider": provider})
+        collected: list[str] = []
         try:
             async for token in stream_answer(provider, question, context):
+                collected.append(token)
                 await send_json({"type": "token", "text": token})
             await send_json({"type": "done"})
         except asyncio.CancelledError:
@@ -63,6 +86,22 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         except Exception as exc:  # noqa: BLE001
             log.error("ws_answer.stream_error", error=str(exc))
             await send_json({"type": "error", "message": str(exc)})
+            return
+
+        answer_text = "".join(collected).strip()
+        if answer_text and session_id:
+            try:
+                row_id = await append_qa(
+                    session_id=session_id,
+                    question=question,
+                    answer=answer_text,
+                    provider=provider,
+                    model=model,
+                    auto_detected=auto_detected,
+                )
+                await send_json({"type": "saved", "id": row_id})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ws_answer.save_failed", error=str(exc))
 
     try:
         while True:
