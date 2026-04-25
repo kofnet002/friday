@@ -14,6 +14,11 @@ const codingListeners = {
   log: new Set(),
 };
 
+const windowListeners = {
+  status: new Set(),
+  toast: new Set(),
+};
+
 ipcRenderer.on('audio:frame', (_evt, arrayBuffer) => {
   for (const cb of audioListeners.frame) cb(arrayBuffer);
 });
@@ -38,6 +43,12 @@ ipcRenderer.on('coding:error', (_evt, msg) => {
 });
 ipcRenderer.on('coding:log', (_evt, msg) => {
   for (const cb of codingListeners.log) cb(msg);
+});
+ipcRenderer.on('window:status', (_evt, payload) => {
+  for (const cb of windowListeners.status) cb(payload);
+});
+ipcRenderer.on('window:toast', (_evt, payload) => {
+  for (const cb of windowListeners.toast) cb(payload);
 });
 
 contextBridge.exposeInMainWorld('friday', {
@@ -87,5 +98,25 @@ contextBridge.exposeInMainWorld('friday', {
       codingListeners.log.add(cb);
       return () => codingListeners.log.delete(cb);
     },
+  },
+  appWindow: {
+    status: () => ipcRenderer.invoke('window:status'),
+    toggleVisibility: () => ipcRenderer.invoke('window:toggle_visibility'),
+    center: () => ipcRenderer.invoke('window:center'),
+    updatePreferences: (patch) => ipcRenderer.invoke('window:update_preferences', patch),
+    setOpacity: (value) => ipcRenderer.invoke('window:set_opacity', value),
+    onStatus: (cb) => {
+      windowListeners.status.add(cb);
+      return () => windowListeners.status.delete(cb);
+    },
+    onToast: (cb) => {
+      windowListeners.toast.add(cb);
+      return () => windowListeners.toast.delete(cb);
+    },
+  },
+  stealth: {
+    enable: () => ipcRenderer.invoke('stealth:enable'),
+    disable: () => ipcRenderer.invoke('stealth:disable'),
+    status: () => ipcRenderer.invoke('stealth:status'),
   },
 });

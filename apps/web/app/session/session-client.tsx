@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Settings2, ShieldAlert, ShieldCheck, VenetianMask } from 'lucide-react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import type {
   AnswerProvider,
@@ -31,7 +32,7 @@ import { cn } from '@/lib/utils';
 
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
 import { CodingPanel, type CodingProblemTab } from './coding-panel';
-import { ConnectionPill, HistoryModal, ShortcutsModal } from './session-modals';
+import { ConnectionPill, HistoryModal, SettingsModal, ShortcutsModal } from './session-modals';
 
 const MAX_CODING_TABS = 3;
 
@@ -74,6 +75,11 @@ export function SessionClient() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<QAHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [desktopStatus, setDesktopStatus] = useState<FridayWindowStatus | null>(null);
+  const [privacyMode, setPrivacyMode] = useState(false);
+  const [desktopToast, setDesktopToast] = useState<string | null>(null);
+  const [stealthMode, setStealthMode] = useState(false);
 
   const transcribeRef = useRef<TranscribeWs | null>(null);
   const answerRef = useRef<AnswerWs | null>(null);
@@ -86,6 +92,7 @@ export function SessionClient() {
   const codingLanguageRef = useRef<CodingLanguage>('Python');
   const activeFingerprintRef = useRef<string | null>(null);
   const codingTabsRef = useRef<CodingProblemTab[]>([]);
+  const toastTimerRef = useRef<number | null>(null);
 
   finalsRef.current = finals;
   providerRef.current = provider;
@@ -127,6 +134,42 @@ export function SessionClient() {
       codingWsRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!inElectron || !window.friday?.appWindow) return;
+
+    let mounted = true;
+    window.friday.appWindow.status().then((status) => {
+      if (!mounted) return;
+      setDesktopStatus(status);
+      setStealthMode(Boolean(status.stealth?.enabled));
+    });
+
+    const offStatus = window.friday.appWindow.onStatus((status) => {
+      setDesktopStatus(status);
+      setStealthMode(Boolean(status.stealth?.enabled));
+    });
+    const offToast = window.friday.appWindow.onToast((toast) => {
+      setDesktopToast(toast.message);
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      toastTimerRef.current = window.setTimeout(() => {
+        setDesktopToast(null);
+        toastTimerRef.current = null;
+      }, 1800);
+    });
+
+    return () => {
+      mounted = false;
+      offStatus();
+      offToast();
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+    };
+  }, [inElectron]);
 
   // ─── answer WS message handling ────────────────────────────────────────────
   const onAnswerMessage = useCallback((msg: AnswerServerMessage) => {
@@ -510,6 +553,28 @@ export function SessionClient() {
     window.open(sessionExportUrl(sessionId), '_blank');
   };
 
+  const updateDesktopPreferences = async (patch: Partial<FridayWindowPreferences>) => {
+    const appWindow = window.friday?.appWindow;
+    if (!appWindow) return;
+    const next = await appWindow.updatePreferences(patch);
+    setDesktopStatus(next);
+  };
+
+  const toggleStealthMode = useCallback(async () => {
+    const api = window.friday?.stealth;
+    if (!api) return;
+    const next = stealthMode ? await api.disable() : await api.enable();
+    setStealthMode(next.enabled);
+    setDesktopStatus((prev) => (prev ? { ...prev, stealth: next } : prev));
+  }, [stealthMode]);
+
+  const centerDesktopWindow = async () => {
+    const appWindow = window.friday?.appWindow;
+    if (!appWindow) return;
+    const next = await appWindow.center();
+    setDesktopStatus(next);
+  };
+
   // Refresh history once any answer stream completes (best-effort; small fetch).
   useEffect(() => {
     if (answerStatus === 'done') {
@@ -576,6 +641,14 @@ export function SessionClient() {
             Clear transcript
           </Button>
           <Button
+            onClick={toggleStealthMode}
+            variant={stealthMode ? 'outline' : 'default'}
+            size="sm"
+          >
+            <VenetianMask className="mr-1 h-4 w-4" />
+            {stealthMode ? 'Exit stealth' : 'Stealth mode'}
+          </Button>
+          <Button
             onClick={toggleCodingMode}
             variant={codingActive ? 'outline' : 'default'}
             size="sm"
@@ -588,11 +661,20 @@ export function SessionClient() {
           <Button onClick={exportSession} variant="ghost" size="sm">
             Export
           </Button>
+          <Button onClick={() => setSettingsOpen(true)} variant="ghost" size="sm">
+            <Settings2 className="mr-1 h-4 w-4" />
+            Settings
+          </Button>
           <Button onClick={() => setShortcutsOpen(true)} variant="ghost" size="sm">
             ⌘/
           </Button>
         </div>
         <div className="ml-auto flex items-center gap-3 text-xs">
+          <WindowShield
+            desktopStatus={desktopStatus}
+            stealthMode={stealthMode}
+            onClick={() => setSettingsOpen(true)}
+          />
           <ConnectionPill
             transcribe={
               status === 'recording' || status === 'paused'
@@ -624,11 +706,19 @@ export function SessionClient() {
         </div>
       ) : null}
 
+      {desktopToast ? <DesktopToast message={desktopToast} /> : null}
+      {stealthMode ? <StealthBanner /> : null}
+
       <div className="min-h-[60vh] flex-1">
         <PanelGroup direction="horizontal" autoSaveId="friday-session-layout">
           <Panel defaultSize={25} minSize={18} className="pr-2">
             <PanelErrorBoundary label="Transcript">
-              <Transcript status={status} finals={finals} interim={interim} />
+              <Transcript
+                status={status}
+                finals={finals}
+                interim={interim}
+                privacyMode={privacyMode}
+              />
             </PanelErrorBoundary>
           </Panel>
           <PanelResizeHandle className="w-1 cursor-col-resize bg-neutral-200 transition-colors hover:bg-sky-400 dark:bg-neutral-800" />
@@ -647,6 +737,7 @@ export function SessionClient() {
                 onClear={clearAnswer}
                 onSubmitCustom={submitCustom}
                 connected={answerConnected}
+                privacyMode={privacyMode}
               />
             </PanelErrorBoundary>
           </Panel>
@@ -669,6 +760,7 @@ export function SessionClient() {
                 onCancel={onCodingCancel}
                 frameInfo={codingFrame}
                 error={codingError}
+                privacyMode={privacyMode}
               />
             </PanelErrorBoundary>
           </Panel>
@@ -676,12 +768,73 @@ export function SessionClient() {
       </div>
 
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        desktopStatus={desktopStatus}
+        stealthMode={stealthMode}
+        privacyMode={privacyMode}
+        onStealthModeChange={toggleStealthMode}
+        onPrivacyModeChange={setPrivacyMode}
+        onPreferenceChange={updateDesktopPreferences}
+        onCenterWindow={centerDesktopWindow}
+      />
       <HistoryModal
         open={historyOpen}
         onClose={() => setHistoryOpen(false)}
         qa={history}
         loading={historyLoading}
       />
+    </div>
+  );
+}
+
+function WindowShield({
+  desktopStatus,
+  stealthMode,
+  onClick,
+}: {
+  desktopStatus: FridayWindowStatus | null;
+  stealthMode: boolean;
+  onClick: () => void;
+}) {
+  const healthy =
+    desktopStatus?.preferences.alwaysOnTop && desktopStatus?.preferences.hideWindowControls;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full border px-2 py-1 font-medium',
+        healthy
+          ? 'border-emerald-300 bg-emerald-500/10 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400'
+          : 'border-red-300 bg-red-500/10 text-red-700 dark:border-red-800 dark:text-red-400',
+      )}
+      title={
+        desktopStatus
+          ? `always-on-top: ${desktopStatus.preferences.alwaysOnTop ? 'on' : 'off'}, all workspaces: ${desktopStatus.preferences.visibleOnAllWorkspaces ? 'on' : 'off'}, opacity: ${Math.round(desktopStatus.opacity * 100)}%, stealth: ${stealthMode ? 'on' : 'off'}, native: ${desktopStatus.stealth.nativeApplied ? 'applied' : desktopStatus.stealth.nativeSupported ? 'pending' : 'unsupported'}`
+          : 'Desktop status unavailable outside the Electron shell'
+      }
+    >
+      {healthy ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
+      <span>{stealthMode ? 'Stealth on' : healthy ? 'Window ready' : 'Needs review'}</span>
+    </button>
+  );
+}
+
+function StealthBanner() {
+  return (
+    <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+      Stealth mode is active. Friday is requesting Electron content protection and macOS native
+      window-sharing lockdown for demonstration and awareness use, not invisibility guarantees.
+    </div>
+  );
+}
+
+function DesktopToast({ message }: { message: string }) {
+  return (
+    <div className="pointer-events-none fixed right-6 top-16 z-[90] rounded-full border border-neutral-200 bg-white/90 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-lg backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/90 dark:text-neutral-200">
+      {message}
     </div>
   );
 }
@@ -749,10 +902,12 @@ function Transcript({
   status,
   finals,
   interim,
+  privacyMode,
 }: {
   status: Status;
   finals: string[];
   interim: string;
+  privacyMode: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
@@ -810,7 +965,7 @@ function Transcript({
               {placeholder}
             </p>
           ) : (
-            <>
+            <div className={cn(privacyMode && 'select-none blur-sm')}>
               {finals.map((text, idx) => (
                 <p
                   key={idx}
@@ -825,10 +980,15 @@ function Transcript({
                   <span className="ml-1 inline-block animate-pulse">▍</span>
                 </p>
               ) : null}
-            </>
+            </div>
           )}
         </div>
       </div>
+      {privacyMode ? (
+        <div className="pointer-events-none absolute inset-x-6 top-6 z-20 rounded-lg border border-neutral-200/80 bg-white/85 px-3 py-2 text-xs font-medium text-neutral-700 shadow-sm backdrop-blur dark:border-neutral-800/80 dark:bg-neutral-900/85 dark:text-neutral-200">
+          Stealth mode is on. Transcript content is masked in this window.
+        </div>
+      ) : null}
       {!pinned ? (
         <button
           type="button"

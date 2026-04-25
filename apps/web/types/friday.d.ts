@@ -39,11 +39,62 @@ declare global {
     onLog: (cb: (msg: string) => void) => () => void;
   }
 
+  interface FridayWindowPreferences {
+    alwaysOnTop: boolean;
+    visibleOnAllWorkspaces: boolean;
+    hideWindowControls: boolean;
+  }
+
+  interface FridayWindowStatus {
+    visible: boolean;
+    focused: boolean;
+    opacity: number;
+    bounds: {
+      x?: number;
+      y?: number;
+      width: number;
+      height: number;
+    };
+    preferences: FridayWindowPreferences;
+    stealth: FridayStealthStatus;
+  }
+
+  interface FridayWindowToast {
+    message: string;
+    timestamp: number;
+  }
+
+  interface FridayWindowApi {
+    status: () => Promise<FridayWindowStatus>;
+    toggleVisibility: () => Promise<FridayWindowStatus>;
+    center: () => Promise<FridayWindowStatus>;
+    updatePreferences: (patch: Partial<FridayWindowPreferences>) => Promise<FridayWindowStatus>;
+    setOpacity: (value: number) => Promise<FridayWindowStatus>;
+    onStatus: (cb: (status: FridayWindowStatus) => void) => () => void;
+    onToast: (cb: (toast: FridayWindowToast) => void) => () => void;
+  }
+
+  interface FridayStealthStatus {
+    enabled: boolean;
+    contentProtection: boolean;
+    nativeSupported: boolean;
+    nativeApplied: boolean;
+    error: string | null;
+  }
+
+  interface FridayStealthApi {
+    enable: () => Promise<FridayStealthStatus>;
+    disable: () => Promise<FridayStealthStatus>;
+    status: () => Promise<FridayStealthStatus>;
+  }
+
   interface FridayApi {
     platform: string;
     versions: Record<string, string>;
     audio: FridayAudioApi;
     coding: FridayCodingApi;
+    appWindow: FridayWindowApi;
+    stealth: FridayStealthApi;
   }
 
   interface Window {
