@@ -110,6 +110,7 @@ export function SettingsModal({
   onPrivacyModeChange,
   onPreferenceChange,
   onCenterWindow,
+  onOpenStealthTest,
 }: {
   open: boolean;
   onClose: () => void;
@@ -120,6 +121,7 @@ export function SettingsModal({
   onPrivacyModeChange: (value: boolean) => void;
   onPreferenceChange: (patch: Partial<FridayWindowPreferences>) => void;
   onCenterWindow: () => void;
+  onOpenStealthTest: () => void;
 }) {
   const prefs = desktopStatus?.preferences;
 
@@ -128,12 +130,9 @@ export function SettingsModal({
       <div className="flex flex-col gap-6 text-sm">
         <section className="flex flex-col gap-3">
           <div>
-            <h3 className="font-semibold text-neutral-800 dark:text-neutral-100">
-              Desktop controls
-            </h3>
+            <h3 className="font-semibold text-neutral-800 dark:text-neutral-100">Stealth</h3>
             <p className="mt-1 text-neutral-500 dark:text-neutral-400">
-              Visible desktop settings for keeping Friday compact, movable, and easy to recover in
-              development.
+              Use these toggles to verify each behavior independently during development.
             </p>
           </div>
           <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/30">
@@ -157,9 +156,25 @@ export function SettingsModal({
             </div>
           </div>
           <ToggleRow
+            icon={<Shield className="h-4 w-4" />}
+            title="Accessory app"
+            description="Use accessory-mode app behavior instead of a normal Dock and Cmd-Tab app."
+            checked={Boolean(prefs?.accessoryApp)}
+            disabled={!desktopStatus}
+            onChange={(checked) => onPreferenceChange({ accessoryApp: checked })}
+          />
+          <ToggleRow
+            icon={<EyeOff className="h-4 w-4" />}
+            title="Dock hidden"
+            description="Hide the Dock icon while keeping the menu bar icon as the primary launcher."
+            checked={Boolean(prefs?.dockHidden)}
+            disabled={!desktopStatus}
+            onChange={(checked) => onPreferenceChange({ dockHidden: checked })}
+          />
+          <ToggleRow
             icon={<MonitorUp className="h-4 w-4" />}
             title="Always on top"
-            description="Keep the visible app above normal windows."
+            description="Keep the visible app above normal windows, including fullscreen contexts."
             checked={Boolean(prefs?.alwaysOnTop)}
             disabled={!desktopStatus}
             onChange={(checked) => onPreferenceChange({ alwaysOnTop: checked })}
@@ -218,14 +233,22 @@ export function SettingsModal({
           </div>
         </section>
 
-        <section className="flex flex-col gap-3">
+        <section className="flex flex-col gap-3 rounded-xl border border-neutral-200 p-4 dark:border-neutral-800">
           <div>
-            <h3 className="font-semibold text-neutral-800 dark:text-neutral-100">Hotkeys</h3>
+            <h3 className="font-semibold text-neutral-800 dark:text-neutral-100">
+              Hotkey Reference
+            </h3>
             <p className="mt-1 text-neutral-500 dark:text-neutral-400">
-              These shortcuts work globally in the desktop app.
+              Use this card while checking visibility, movement, and opacity behavior.
             </p>
           </div>
-          <ShortcutTable items={DESKTOP_SHORTCUTS} />
+          <ShortcutTable
+            items={[
+              ...SESSION_SHORTCUTS,
+              ...DESKTOP_SHORTCUTS,
+              { keys: 'Esc', label: 'Close any open modal' },
+            ]}
+          />
         </section>
 
         <section className="flex flex-col gap-3 rounded-xl border border-sky-200 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950/30">
@@ -244,6 +267,11 @@ export function SettingsModal({
               Run your screen-share or screenshot check and confirm the window behaves as expected.
             </li>
           </ol>
+          <div>
+            <Button type="button" variant="outline" onClick={onOpenStealthTest}>
+              Test stealth
+            </Button>
+          </div>
         </section>
       </div>
     </ModalShell>

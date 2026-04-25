@@ -130,25 +130,18 @@ Per-session safety budgets (configurable in `.env`):
 - API keys appearing anywhere in the log stream are masked to
   `sk-…<redacted:N>…last4` form by a structlog processor.
 
-## Honest scope
+## Stealth Testing
 
-This started as a "Parakeet clone" experiment. It includes the components
-that imitate that product (live transcription, auto question-detection,
-LLM answer streaming, vision-based coding-problem extraction), and a UI
-for using them.
+- Open the in-app `Test stealth` page from Session → Settings for a short
+  manual verification flow.
+- The full desktop checklist lives at
+  [`apps/desktop/test-stealth.md`](./apps/desktop/test-stealth.md).
 
-It does **not** include:
+## Known Caveats
 
-- Stealth mode / screen-share invisibility / hidden-from-dock window —
-  those are explicitly not built. Adding them would turn the app into a
-  tool whose only purpose is deceiving an interviewer in real time.
-- Anti-detection / always-on-top above fullscreen Zoom / opacity-based
-  hiding.
-
-The capabilities that _are_ built have plausible non-cheating uses:
-captioning for accessibility, async transcription review, solo interview
-prep, LeetCode study with AI hints. Use accordingly.
-
-## Troubleshooting
-
-See [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md).
+- macOS Sonoma and later may still ask the user to enable Screen Recording
+  permission even for windows that are intended to stay out of captures.
+  That is a system-level quirk, not an app bug.
+- Zoom should be kept on the latest version. For the most reliable
+  `setContentProtection` behavior, enable `Use hardware acceleration for
+screen sharing` in Zoom's advanced video settings.

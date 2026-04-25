@@ -40,7 +40,9 @@ declare global {
   }
 
   interface FridayWindowPreferences {
+    accessoryApp: boolean;
     alwaysOnTop: boolean;
+    dockHidden: boolean;
     visibleOnAllWorkspaces: boolean;
     hideWindowControls: boolean;
   }
@@ -48,6 +50,8 @@ declare global {
   interface FridayWindowStatus {
     visible: boolean;
     focused: boolean;
+    dockHidden: boolean;
+    accessoryApp: boolean;
     opacity: number;
     bounds: {
       x?: number;

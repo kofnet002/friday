@@ -3,6 +3,11 @@
   "version": "0.0.1",
   "private": true,
   "main": "main.js",
+  "build": {
+    "extendInfo": {
+      "LSUIElement": true
+    }
+  },
   "scripts": {
     "dev": "wait-on -t 60000 http://127.0.0.1:3333 && cross-env NODE_ENV=development electron .",
     "build": "pnpm run build:swift && pnpm run build:native:stealth",
@@ -13,6 +18,7 @@
     "typecheck": "echo 'desktop typecheck not configured yet'"
   },
   "dependencies": {
+    "electron-store": "^11.0.2",
     "sharp": "^0.34.0"
   },
   "devDependencies": {

@@ -1,6 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Settings2, ShieldAlert, ShieldCheck, VenetianMask } from 'lucide-react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import type {
@@ -80,6 +88,7 @@ export function SessionClient() {
   const [privacyMode, setPrivacyMode] = useState(false);
   const [desktopToast, setDesktopToast] = useState<string | null>(null);
   const [stealthMode, setStealthMode] = useState(false);
+  const [shieldOpen, setShieldOpen] = useState(false);
 
   const transcribeRef = useRef<TranscribeWs | null>(null);
   const answerRef = useRef<AnswerWs | null>(null);
@@ -93,6 +102,7 @@ export function SessionClient() {
   const activeFingerprintRef = useRef<string | null>(null);
   const codingTabsRef = useRef<CodingProblemTab[]>([]);
   const toastTimerRef = useRef<number | null>(null);
+  const shieldRef = useRef<HTMLDivElement>(null);
 
   finalsRef.current = finals;
   providerRef.current = provider;
@@ -170,6 +180,17 @@ export function SessionClient() {
       }
     };
   }, [inElectron]);
+
+  useEffect(() => {
+    if (!shieldOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!shieldRef.current?.contains(event.target as Node)) {
+        setShieldOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onPointerDown);
+    return () => window.removeEventListener('mousedown', onPointerDown);
+  }, [shieldOpen]);
 
   // ─── answer WS message handling ────────────────────────────────────────────
   const onAnswerMessage = useCallback((msg: AnswerServerMessage) => {
@@ -575,6 +596,10 @@ export function SessionClient() {
     setDesktopStatus(next);
   };
 
+  const openStealthTestPage = () => {
+    window.open('/stealth-test', '_blank', 'noopener,noreferrer');
+  };
+
   // Refresh history once any answer stream completes (best-effort; small fetch).
   useEffect(() => {
     if (answerStatus === 'done') {
@@ -670,10 +695,12 @@ export function SessionClient() {
           </Button>
         </div>
         <div className="ml-auto flex items-center gap-3 text-xs">
-          <WindowShield
+          <StealthIndicator
+            ref={shieldRef}
             desktopStatus={desktopStatus}
             stealthMode={stealthMode}
-            onClick={() => setSettingsOpen(true)}
+            open={shieldOpen}
+            onToggle={() => setShieldOpen((value) => !value)}
           />
           <ConnectionPill
             transcribe={
@@ -695,8 +722,8 @@ export function SessionClient() {
 
       {!inElectron ? (
         <div className="rounded-md border border-amber-400/50 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-200">
-          Open this page from the Friday desktop window — system-audio capture isn't available in a
-          regular browser tab.
+          Open this page from the Friday desktop window — system-audio capture isn&apos;t available
+          in a regular browser tab.
         </div>
       ) : null}
 
@@ -778,6 +805,7 @@ export function SessionClient() {
         onPrivacyModeChange={setPrivacyMode}
         onPreferenceChange={updateDesktopPreferences}
         onCenterWindow={centerDesktopWindow}
+        onOpenStealthTest={openStealthTestPage}
       />
       <HistoryModal
         open={historyOpen}
@@ -789,36 +817,103 @@ export function SessionClient() {
   );
 }
 
-function WindowShield({
-  desktopStatus,
-  stealthMode,
-  onClick,
-}: {
-  desktopStatus: FridayWindowStatus | null;
-  stealthMode: boolean;
-  onClick: () => void;
-}) {
-  const healthy =
-    desktopStatus?.preferences.alwaysOnTop && desktopStatus?.preferences.hideWindowControls;
+const StealthIndicator = forwardRef<
+  HTMLDivElement,
+  {
+    desktopStatus: FridayWindowStatus | null;
+    stealthMode: boolean;
+    open: boolean;
+    onToggle: () => void;
+  }
+>(function StealthIndicator({ desktopStatus, stealthMode, open, onToggle }, ref) {
+  const screenShareProtected = Boolean(
+    desktopStatus?.stealth.contentProtection &&
+    (desktopStatus.stealth.nativeApplied || !desktopStatus.stealth.nativeSupported),
+  );
+  const tone = stealthMode
+    ? 'border-emerald-300 bg-emerald-500/10 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400'
+    : 'border-red-300 bg-red-500/10 text-red-700 dark:border-red-800 dark:text-red-400';
+
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        'inline-flex items-center gap-1.5 rounded-full border px-2 py-1 font-medium',
-        healthy
-          ? 'border-emerald-300 bg-emerald-500/10 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400'
-          : 'border-red-300 bg-red-500/10 text-red-700 dark:border-red-800 dark:text-red-400',
-      )}
-      title={
-        desktopStatus
-          ? `always-on-top: ${desktopStatus.preferences.alwaysOnTop ? 'on' : 'off'}, all workspaces: ${desktopStatus.preferences.visibleOnAllWorkspaces ? 'on' : 'off'}, opacity: ${Math.round(desktopStatus.opacity * 100)}%, stealth: ${stealthMode ? 'on' : 'off'}, native: ${desktopStatus.stealth.nativeApplied ? 'applied' : desktopStatus.stealth.nativeSupported ? 'pending' : 'unsupported'}`
-          : 'Desktop status unavailable outside the Electron shell'
-      }
-    >
-      {healthy ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-      <span>{stealthMode ? 'Stealth on' : healthy ? 'Window ready' : 'Needs review'}</span>
-    </button>
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={cn(
+          'inline-flex h-8 w-8 items-center justify-center rounded-full border transition-colors',
+          tone,
+        )}
+        aria-label="Stealth status"
+        title={stealthMode ? 'Stealth active' : 'Stealth disabled'}
+      >
+        {stealthMode ? <ShieldCheck className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-10 z-40 w-72 rounded-xl border border-neutral-200 bg-white/95 p-3 shadow-xl backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95">
+          <div className="flex items-center gap-2">
+            {stealthMode ? (
+              <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <ShieldAlert className="h-4 w-4 text-red-600 dark:text-red-400" />
+            )}
+            <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+              Stealth status
+            </div>
+          </div>
+          <div className="mt-3 space-y-2 text-xs text-neutral-600 dark:text-neutral-300">
+            <StatusRow
+              label="Screen-share protection"
+              value={screenShareProtected ? 'Active' : 'Reduced'}
+              tone={screenShareProtected ? 'good' : 'bad'}
+            />
+            <StatusRow
+              label="Dock hidden"
+              value={desktopStatus?.dockHidden ? 'Yes' : 'No'}
+              tone={desktopStatus?.dockHidden ? 'good' : 'bad'}
+            />
+            <StatusRow
+              label="Always on top"
+              value={desktopStatus?.preferences.alwaysOnTop ? 'Yes' : 'No'}
+              tone={desktopStatus?.preferences.alwaysOnTop ? 'good' : 'bad'}
+            />
+            <StatusRow
+              label="Current opacity"
+              value={desktopStatus ? `${Math.round(desktopStatus.opacity * 100)}%` : '—'}
+            />
+            <StatusRow
+              label="Accessory app"
+              value={desktopStatus?.accessoryApp ? 'Yes' : 'No'}
+              tone={desktopStatus?.accessoryApp ? 'good' : 'bad'}
+            />
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+function StatusRow({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: 'good' | 'bad';
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span>{label}</span>
+      <span
+        className={cn(
+          'font-medium',
+          tone === 'good' && 'text-emerald-700 dark:text-emerald-400',
+          tone === 'bad' && 'text-red-700 dark:text-red-400',
+        )}
+      >
+        {value}
+      </span>
+    </div>
   );
 }
 

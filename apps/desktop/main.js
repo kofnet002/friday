@@ -16,21 +16,34 @@ const path = require('node:path');
 const { AudioSupervisor } = require('./audio');
 const { CodingCapture } = require('./coding');
 const stealth = require('./stealth');
-const { WindowStateStore } = require('./window-state');
 
 const DEV_URL = process.env.FRIDAY_WEB_URL || 'http://127.0.0.1:3333';
-const isDev = process.env.NODE_ENV === 'development';
 const OPACITY_STEP = 0.1;
 const MIN_OPACITY = 0.3;
 const MAX_OPACITY = 1.0;
 const NUDGE_PX = 50;
 const DEFAULT_STEALTH_ENABLED = true;
+const DEFAULT_WINDOW_STATE = Object.freeze({
+  bounds: {
+    width: 520,
+    height: 720,
+  },
+  opacity: 1,
+  preferences: {
+    accessoryApp: true,
+    alwaysOnTop: true,
+    dockHidden: true,
+    visibleOnAllWorkspaces: true,
+    hideWindowControls: true,
+  },
+});
 
 const audio = new AudioSupervisor();
 const coding = new CodingCapture();
 let mainWindow = null;
 let tray = null;
 let windowState = null;
+let Store = null;
 let stealthEnabled = DEFAULT_STEALTH_ENABLED;
 let stealthStatus = stealth.statusShape({ enabled: DEFAULT_STEALTH_ENABLED });
 
@@ -44,16 +57,71 @@ function broadcast(channel, payload) {
   }
 }
 
+function cloneDefaultWindowState() {
+  return JSON.parse(JSON.stringify(DEFAULT_WINDOW_STATE));
+}
+
+function getDockHidden() {
+  if (process.platform !== 'darwin' || !app.dock?.isVisible) return false;
+  return !app.dock.isVisible();
+}
+
+function getAccessoryActive() {
+  if (process.platform !== 'darwin') return false;
+  return getWindowState().preferences.accessoryApp;
+}
+
+function createWindowStateStore() {
+  return new Store({
+    name: 'window-state',
+    defaults: cloneDefaultWindowState(),
+  });
+}
+
+function getWindowState() {
+  if (!windowState) return cloneDefaultWindowState();
+  const defaults = cloneDefaultWindowState();
+  const bounds = windowState.get('bounds') ?? {};
+  const preferences = windowState.get('preferences') ?? {};
+  return {
+    ...defaults,
+    opacity: Number(windowState.get('opacity')) || defaults.opacity,
+    bounds: {
+      ...defaults.bounds,
+      ...bounds,
+    },
+    preferences: {
+      ...defaults.preferences,
+      ...preferences,
+    },
+  };
+}
+
+function updateWindowState(patch) {
+  if (!windowState) return getWindowState();
+  const next = {
+    ...getWindowState(),
+    ...patch,
+    bounds: {
+      ...getWindowState().bounds,
+      ...(patch?.bounds ?? {}),
+    },
+    preferences: {
+      ...getWindowState().preferences,
+      ...(patch?.preferences ?? {}),
+    },
+  };
+  windowState.set(next);
+  return next;
+}
+
 function makeTrayIcon() {
   const svg = `
     <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
-      <path
-        d="M13.8 5.7c0 4-2.7 7.1-6.2 7.1-1 0-1.9-.2-2.7-.7l-2.2.9.8-2.2C2.8 10 2.4 8.9 2.4 7.7c0-4 2.7-7.1 6.2-7.1 3.5 0 5.2 2.2 5.2 5.1Z"
-        fill="black"
-      />
-      <path d="M10.2 4.8 15.6 3l-2 5.1" fill="black"/>
-      <circle cx="6.2" cy="7" r="0.9" fill="white"/>
-      <circle cx="9" cy="7" r="0.9" fill="white"/>
+      <path d="M14.9 4.1c-.6 2.2-1.8 3.8-3.5 4.7l1.3 1.2c.6.6.8 1.3.6 2.1-.1.7-.5 1.3-1.1 1.7-.7.4-1.4.5-2.1.2l-3.1-1.2-2.8 1.5.8-2.9C3.5 10.4 3 9 3 7.4c0-1.8.6-3.2 1.9-4.4C6.2 1.7 7.8 1 9.7 1c2.1 0 3.8 1 5.2 3.1Z" fill="black"/>
+      <path d="M10.2 5.1 16 3.2l-2.2 5.3" fill="black"/>
+      <circle cx="7" cy="6.6" r="0.85" fill="white"/>
+      <path d="M6.3 9.1c1 .6 2 .7 3.1.2" fill="none" stroke="white" stroke-width="1" stroke-linecap="round"/>
     </svg>
   `.trim();
   const image = nativeImage.createFromDataURL(`data:image/svg+xml;utf8,${encodeURIComponent(svg)}`);
@@ -62,21 +130,15 @@ function makeTrayIcon() {
 }
 
 function buildStatusPayload() {
-  const stored = windowState?.getState() ?? {
-    bounds: { width: 520, height: 720 },
-    opacity: 1,
-    preferences: {
-      alwaysOnTop: true,
-      visibleOnAllWorkspaces: true,
-      hideWindowControls: true,
-    },
-  };
+  const stored = getWindowState();
   return {
     visible: Boolean(mainWindow && mainWindow.isVisible()),
     focused: Boolean(mainWindow && mainWindow.isFocused()),
     opacity: mainWindow ? Number(mainWindow.getOpacity().toFixed(2)) : stored.opacity,
     bounds: mainWindow ? mainWindow.getBounds() : stored.bounds,
     preferences: stored.preferences,
+    dockHidden: getDockHidden(),
+    accessoryApp: getAccessoryActive(),
     stealth: stealthStatus,
   };
 }
@@ -91,13 +153,24 @@ function publishToast(message) {
 
 function applyWindowPreferences() {
   if (!mainWindow || !windowState) return;
-  const { preferences, opacity } = windowState.getState();
-  mainWindow.setAlwaysOnTop(Boolean(preferences.alwaysOnTop), 'floating');
+  const { preferences, opacity } = getWindowState();
+  mainWindow.setAlwaysOnTop(Boolean(preferences.alwaysOnTop), 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(Boolean(preferences.visibleOnAllWorkspaces), {
     visibleOnFullScreen: Boolean(preferences.visibleOnAllWorkspaces),
   });
   mainWindow.setWindowButtonVisibility(!preferences.hideWindowControls);
   mainWindow.setOpacity(clamp(opacity, MIN_OPACITY, MAX_OPACITY));
+}
+
+function applyShellPreferences() {
+  if (process.platform !== 'darwin') return;
+  const { preferences } = getWindowState();
+  app.setActivationPolicy(preferences.accessoryApp ? 'accessory' : 'regular');
+  if (preferences.dockHidden || preferences.accessoryApp) {
+    app.dock?.hide?.();
+  } else {
+    app.dock?.show?.();
+  }
 }
 
 function applyStealthProtection() {
@@ -110,7 +183,7 @@ function persistWindowBounds() {
   if (!mainWindow || !windowState) return;
   if (mainWindow.isMinimized() || mainWindow.isDestroyed()) return;
   const bounds = mainWindow.getBounds();
-  windowState.update({ bounds });
+  updateWindowState({ bounds });
   publishStatus();
 }
 
@@ -150,7 +223,7 @@ function adjustOpacity(delta) {
   if (!mainWindow || !windowState) return;
   const nextOpacity = clamp(mainWindow.getOpacity() + delta, MIN_OPACITY, MAX_OPACITY);
   mainWindow.setOpacity(nextOpacity);
-  windowState.update({ opacity: nextOpacity });
+  updateWindowState({ opacity: nextOpacity });
   publishStatus();
   publishToast(`Opacity ${Math.round(nextOpacity * 100)}%`);
 }
@@ -158,7 +231,7 @@ function adjustOpacity(delta) {
 function resetWindowState() {
   if (!mainWindow || !windowState) return;
   mainWindow.setOpacity(1);
-  windowState.update({ opacity: 1 });
+  updateWindowState({ opacity: 1 });
   centerWindow();
   publishStatus();
   publishToast('Opacity reset and window centered');
@@ -251,7 +324,7 @@ async function ensurePermissions() {
 }
 
 function createWindow() {
-  const persisted = windowState.getState();
+  const persisted = getWindowState();
   mainWindow = new BrowserWindow({
     width: persisted.bounds.width,
     height: persisted.bounds.height,
@@ -296,10 +369,6 @@ function createWindow() {
     applyStealthProtection();
     publishStatus();
   });
-
-  if (isDev) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-  }
 }
 
 ipcMain.handle('audio:start', () => audio.start());
@@ -335,13 +404,14 @@ ipcMain.handle('window:center', () => {
   return buildStatusPayload();
 });
 ipcMain.handle('window:update_preferences', (_evt, patch) => {
-  const current = windowState.getState();
-  windowState.update({
+  const current = getWindowState();
+  updateWindowState({
     preferences: {
       ...current.preferences,
       ...(patch ?? {}),
     },
   });
+  applyShellPreferences();
   applyWindowPreferences();
   publishStatus();
   return buildStatusPayload();
@@ -350,7 +420,7 @@ ipcMain.handle('window:set_opacity', (_evt, value) => {
   if (!mainWindow || !windowState) return buildStatusPayload();
   const nextOpacity = clamp(Number(value) || 1, MIN_OPACITY, MAX_OPACITY);
   mainWindow.setOpacity(nextOpacity);
-  windowState.update({ opacity: nextOpacity });
+  updateWindowState({ opacity: nextOpacity });
   publishStatus();
   return buildStatusPayload();
 });
@@ -365,7 +435,9 @@ ipcMain.handle('stealth:disable', () => {
 ipcMain.handle('stealth:status', () => stealthStatus);
 
 app.whenReady().then(async () => {
-  windowState = new WindowStateStore(app.getPath('userData'));
+  ({ default: Store } = await import('electron-store'));
+  windowState = createWindowStateStore();
+  applyShellPreferences();
   await ensurePermissions();
   createWindow();
   createTray();
