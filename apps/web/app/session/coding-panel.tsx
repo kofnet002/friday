@@ -38,6 +38,7 @@ export interface CodingPanelProps {
   onCancel: () => void;
   frameInfo: { changed_bits: number; interval_ms: number } | null;
   error: string | null;
+  privacyMode: boolean;
 }
 
 export function CodingPanel({
@@ -56,6 +57,7 @@ export function CodingPanel({
   onCancel,
   frameInfo,
   error,
+  privacyMode,
 }: CodingPanelProps) {
   const activeTab = tabs.find((t) => t.fingerprint === activeFingerprint) ?? null;
 
@@ -171,6 +173,7 @@ export function CodingPanel({
           onRegenerate={onRegenerate}
           onReExtract={onReExtract}
           onCancel={onCancel}
+          privacyMode={privacyMode}
         />
       ) : null}
     </div>
@@ -219,12 +222,14 @@ function ActiveProblemView({
   onRegenerate,
   onReExtract,
   onCancel,
+  privacyMode,
 }: {
   tab: CodingProblemTab;
   provider: AnswerProvider;
   onRegenerate: () => void;
   onReExtract: () => void;
   onCancel: () => void;
+  privacyMode: boolean;
 }) {
   const { problem, solution, status, error } = tab;
   const [copied, setCopied] = useState(false);
@@ -337,7 +342,12 @@ function ActiveProblemView({
         </span>
       </div>
 
-      <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-950">
+      <div
+        className={cn(
+          'rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-950',
+          privacyMode && 'select-none blur-sm',
+        )}
+      >
         {status === 'error' ? (
           <div className="flex items-center justify-between gap-2 text-xs text-red-700 dark:text-red-400">
             <span>{error ?? 'solution failed'}</span>
@@ -353,6 +363,11 @@ function ActiveProblemView({
           </p>
         )}
       </div>
+      {privacyMode ? (
+        <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-300">
+          Stealth mode is on. Coding content is masked in this window.
+        </div>
+      ) : null}
     </div>
   );
 }

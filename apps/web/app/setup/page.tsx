@@ -17,7 +17,7 @@ export default function SetupPage() {
         </span>
         <h1 className="text-3xl font-semibold tracking-tight">Session context</h1>
         <p className="max-w-xl text-sm text-neutral-500 dark:text-neutral-400">
-          Friday uses this context to ground the copilot's answers during the live interview.
+          Friday uses this context to ground the copilot&apos;s answers during the live interview.
           Nothing you enter leaves your machine unless you trigger a question.
         </p>
       </header>

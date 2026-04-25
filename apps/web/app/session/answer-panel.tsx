@@ -24,6 +24,7 @@ export interface AnswerPanelProps {
   onClear: () => void;
   onSubmitCustom: (question: string) => void;
   connected: boolean;
+  privacyMode: boolean;
 }
 
 export function AnswerPanel({
@@ -39,6 +40,7 @@ export function AnswerPanel({
   onClear,
   onSubmitCustom,
   connected,
+  privacyMode,
 }: AnswerPanelProps) {
   const [customPrompt, setCustomPrompt] = useState('');
 
@@ -109,6 +111,7 @@ export function AnswerPanel({
         className={cn(
           'min-h-[200px] flex-1 overflow-y-auto rounded-lg border border-neutral-200 bg-neutral-50 p-4 transition-opacity dark:border-neutral-800 dark:bg-neutral-950',
           marked && 'opacity-50',
+          privacyMode && 'select-none blur-sm',
         )}
       >
         {answer ? (
@@ -123,6 +126,12 @@ export function AnswerPanel({
           </p>
         )}
       </div>
+
+      {privacyMode ? (
+        <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-300">
+          Stealth mode is on. Answer content is masked in this window.
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap gap-2">
         {isStreaming ? (
