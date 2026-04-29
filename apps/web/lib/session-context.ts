@@ -41,7 +41,9 @@ export function readSessionId(): string | null {
 export function getProviderPreference(): AnswerProvider {
   if (typeof window === 'undefined') return 'gemini';
   const raw = window.localStorage.getItem(PROVIDER_KEY);
-  return raw === 'openai' ? 'openai' : 'gemini';
+  if (raw === 'openai') return 'openai';
+  if (raw === 'deepseek') return 'deepseek';
+  return 'gemini';
 }
 
 export function setProviderPreference(p: AnswerProvider): void {

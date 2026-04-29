@@ -8,9 +8,10 @@ from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 from app.prompts.answer_generation import AnswerContext, answer_system_prompt, answer_user_prompt
+from app.services._retry import retry_stream
 from app.settings import settings
 
-Provider = Literal["gemini", "openai"]
+Provider = Literal["gemini", "openai", "deepseek"]
 
 
 async def stream_answer(
@@ -22,11 +23,13 @@ async def stream_answer(
     system = answer_system_prompt(context)
     user = answer_user_prompt(question, context.recent_transcript)
     if provider == "gemini":
-        async for token in _stream_gemini(system, user):
-            yield token
+        factory = lambda: _stream_gemini(system, user)  # noqa: E731
+    elif provider == "deepseek":
+        factory = lambda: _stream_deepseek(system, user)  # noqa: E731
     else:
-        async for token in _stream_openai(system, user):
-            yield token
+        factory = lambda: _stream_openai(system, user)  # noqa: E731
+    async for token in retry_stream(factory, label=f"answer.{provider}"):
+        yield token
 
 
 async def _stream_gemini(system: str, user: str) -> AsyncIterator[str]:
@@ -56,6 +59,31 @@ async def _stream_openai(system: str, user: str) -> AsyncIterator[str]:
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     stream = await client.chat.completions.create(
         model=settings.openai_model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        stream=True,
+        temperature=0.4,
+        max_tokens=1500,
+    )
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta and delta.content:
+            yield delta.content
+
+
+async def _stream_deepseek(system: str, user: str) -> AsyncIterator[str]:
+    if not settings.deepseek_api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY is not set")
+    client = AsyncOpenAI(
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+    )
+    stream = await client.chat.completions.create(
+        model=settings.deepseek_model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},

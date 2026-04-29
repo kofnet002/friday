@@ -16,11 +16,14 @@ class Settings(BaseSettings):
     deepgram_api_key: str = Field(default="")
     gemini_api_key: str = Field(default="")
     openai_api_key: str = Field(default="")
+    deepseek_api_key: str = Field(default="")
     backend_url: str = Field(default="http://127.0.0.1:8000")
     redis_url: str = Field(default="redis://127.0.0.1:6379")
 
     gemini_model: str = Field(default="gemini-2.5-flash")
     openai_model: str = Field(default="gpt-5")
+    deepseek_model: str = Field(default="deepseek-chat")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com")
 
     # Deepgram streaming config
     deepgram_model: str = Field(default="nova-3")

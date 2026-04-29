@@ -51,6 +51,7 @@ async def health_deep(response: Response) -> dict[str, Any]:
     checks["deepgram_key"] = "present" if settings.deepgram_api_key else "missing"
     checks["gemini_key"] = "present" if settings.gemini_api_key else "missing"
     checks["openai_key"] = "present" if settings.openai_api_key else "missing"
+    checks["deepseek_key"] = "present" if settings.deepseek_api_key else "missing"
 
     degraded = (
         checks["redis"] == "down"

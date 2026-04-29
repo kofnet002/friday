@@ -84,9 +84,12 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         )
 
         auto_detected = bool(request.get("auto_detected", False))
-        model = (
-            settings.gemini_model if provider == "gemini" else settings.openai_model
-        )
+        if provider == "gemini":
+            model = settings.gemini_model
+        elif provider == "deepseek":
+            model = settings.deepseek_model
+        else:
+            model = settings.openai_model
 
         await send_json({"type": "started", "question": question, "provider": provider})
         collected: list[str] = []

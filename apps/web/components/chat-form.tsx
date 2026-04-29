@@ -61,6 +61,7 @@ export function ChatForm() {
         >
           <option value="gemini">Gemini (gemini-2.5-flash)</option>
           <option value="openai">OpenAI (gpt-5)</option>
+          <option value="deepseek">DeepSeek (deepseek-chat)</option>
         </Select>
       </div>
 

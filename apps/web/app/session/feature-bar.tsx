@@ -1,18 +1,10 @@
 'use client';
 
-import {
-  Captions,
-  Clock,
-  Code2,
-  Settings2,
-  Sparkles,
-  UserCog,
-  type LucideIcon,
-} from 'lucide-react';
+import { Clock, Code2, Headphones, Settings2, UserCog, type LucideIcon } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
-export type FeatureKey = 'setup' | 'transcript' | 'copilot' | 'coding' | 'history' | 'settings';
+export type FeatureKey = 'setup' | 'listen' | 'coding' | 'history' | 'settings';
 
 interface FeatureDef {
   key: FeatureKey;
@@ -25,17 +17,18 @@ interface FeatureDef {
 }
 
 export const FEATURES: readonly FeatureDef[] = [
-  // Transcript sits first — visually grouped with the Capture cluster (Start/Pause/Stop)
-  // that lives in the bar to the left of FeatureBar.
+  // "Listen" merges live transcript + copilot answer — they're two views of
+  // one pipeline (mic → transcript → question detection → answer), so a
+  // single panel is easier to grok than two siblings. Sits first, grouped
+  // with the Capture cluster (Start/Pause/Stop) to its left.
   {
-    key: 'transcript',
-    label: 'Transcript',
-    icon: Captions,
-    width: 'w-[48rem] max-w-[94vw]',
+    key: 'listen',
+    label: 'Listen',
+    icon: Headphones,
+    width: 'w-[50rem] max-w-[96vw]',
     divideAfter: true,
   },
   { key: 'setup', label: 'Setup', icon: UserCog, width: 'w-[44rem] max-w-[94vw]' },
-  { key: 'copilot', label: 'Copilot', icon: Sparkles, width: 'w-[46rem] max-w-[94vw]' },
   { key: 'coding', label: 'Coding', icon: Code2, width: 'w-[52rem] max-w-[96vw]' },
   { key: 'history', label: 'History', icon: Clock, width: 'w-[42rem] max-w-[94vw]' },
   { key: 'settings', label: 'Settings', icon: Settings2, width: 'w-[44rem] max-w-[94vw]' },

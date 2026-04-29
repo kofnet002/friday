@@ -7,12 +7,14 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.logging import log
+from app.providers.deepseek import stream_deepseek
 from app.providers.gemini import stream_gemini
 from app.providers.openai import stream_openai
+from app.services._retry import retry_stream
 
 router = APIRouter()
 
-Provider = Literal["gemini", "openai"]
+Provider = Literal["gemini", "openai", "deepseek"]
 
 
 class ChatRequest(BaseModel):
@@ -23,8 +25,13 @@ class ChatRequest(BaseModel):
 async def _token_events(provider: Provider, message: str) -> AsyncIterator[dict[str, str]]:
     log.info("chat.start", provider=provider, length=len(message))
     try:
-        source = stream_gemini(message) if provider == "gemini" else stream_openai(message)
-        async for token in source:
+        if provider == "gemini":
+            factory = lambda: stream_gemini(message)  # noqa: E731
+        elif provider == "deepseek":
+            factory = lambda: stream_deepseek(message)  # noqa: E731
+        else:
+            factory = lambda: stream_openai(message)  # noqa: E731
+        async for token in retry_stream(factory, label=f"chat.{provider}"):
             yield {"event": "token", "data": json.dumps({"text": token})}
         yield {"event": "done", "data": "{}"}
         log.info("chat.done", provider=provider)
@@ -35,6 +42,6 @@ async def _token_events(provider: Provider, message: str) -> AsyncIterator[dict[
 
 @router.post("/api/chat")
 async def chat(request: ChatRequest) -> EventSourceResponse:
-    if request.provider not in ("gemini", "openai"):
+    if request.provider not in ("gemini", "openai", "deepseek"):
         raise HTTPException(status_code=400, detail="invalid provider")
     return EventSourceResponse(_token_events(request.provider, request.message))

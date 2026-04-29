@@ -259,7 +259,7 @@ export function SessionClient() {
     }
     if (msg.type === 'question_detected') {
       askAnswer(msg.question);
-      setActiveFeature('copilot');
+      setActiveFeature('listen');
     }
   }, []);
 
@@ -491,7 +491,7 @@ export function SessionClient() {
         const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
         if (recent) {
           askAnswer(recent);
-          setActiveFeature('copilot');
+          setActiveFeature('listen');
         } else {
           setAnswerError('no transcript yet');
         }
@@ -711,31 +711,33 @@ export function SessionClient() {
     if (key === 'setup') {
       return <SetupForm onComplete={() => setActiveFeature(null)} />;
     }
-    if (key === 'transcript') {
+    if (key === 'listen') {
       return (
-        <PanelErrorBoundary label="Transcript">
-          <Transcript status={status} finals={finals} interim={interim} privacyMode={privacyMode} />
-        </PanelErrorBoundary>
-      );
-    }
-    if (key === 'copilot') {
-      return (
-        <PanelErrorBoundary label="Copilot answer">
-          <AnswerPanel
-            provider={provider}
-            onProviderChange={onProviderChange}
-            question={question}
-            answer={answer}
-            status={answerStatus}
-            error={answerError}
-            marked={marked}
-            onMarkAnswered={() => setMarked((m) => !m)}
-            onCancel={cancelAnswer}
-            onClear={clearAnswer}
-            onSubmitCustom={submitCustom}
-            connected={answerConnected}
-            privacyMode={privacyMode}
-          />
+        <PanelErrorBoundary label="Listen">
+          <div className="flex flex-col gap-3">
+            <Transcript
+              status={status}
+              finals={finals}
+              interim={interim}
+              privacyMode={privacyMode}
+              compact
+            />
+            <AnswerPanel
+              provider={provider}
+              onProviderChange={onProviderChange}
+              question={question}
+              answer={answer}
+              status={answerStatus}
+              error={answerError}
+              marked={marked}
+              onMarkAnswered={() => setMarked((m) => !m)}
+              onCancel={cancelAnswer}
+              onClear={clearAnswer}
+              onSubmitCustom={submitCustom}
+              connected={answerConnected}
+              privacyMode={privacyMode}
+            />
+          </div>
         </PanelErrorBoundary>
       );
     }
@@ -748,6 +750,7 @@ export function SessionClient() {
             language={codingLanguage}
             onLanguageChange={onCodingLanguageChange}
             provider={provider}
+            onProviderChange={onProviderChange}
             tabs={codingTabs}
             activeFingerprint={activeFingerprint}
             onSelectTab={setActiveFingerprint}
@@ -884,9 +887,10 @@ export function SessionClient() {
               active={activeFeature}
               onChange={setActiveFeature}
               badges={{
-                copilot: answerStatus === 'streaming',
+                listen:
+                  answerStatus === 'streaming' ||
+                  (isLive && (finals.length > 0 || Boolean(interim))),
                 coding: codingTabs.some((t) => t.status === 'streaming'),
-                transcript: isLive && (finals.length > 0 || Boolean(interim)),
               }}
             />
           </div>
@@ -1218,11 +1222,14 @@ function Transcript({
   finals,
   interim,
   privacyMode,
+  compact = false,
 }: {
   status: Status;
   finals: string[];
   interim: string;
   privacyMode: boolean;
+  /** Slim layout for embedded use inside the Listen panel. */
+  compact?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
@@ -1274,9 +1281,17 @@ function Transcript({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="relative z-10 h-[60vh] overflow-y-auto scroll-smooth px-8 py-8"
+        className={cn(
+          'relative z-10 overflow-y-auto scroll-smooth',
+          compact ? 'h-[22vh] px-5 py-4' : 'h-[60vh] px-8 py-8',
+        )}
       >
-        <div className="mx-auto flex max-w-[60ch] flex-col gap-4 text-lg leading-relaxed tracking-normal">
+        <div
+          className={cn(
+            'mx-auto flex flex-col gap-4 tracking-normal',
+            compact ? 'max-w-[64ch] text-sm leading-snug' : 'max-w-[60ch] text-lg leading-relaxed',
+          )}
+        >
           {empty ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center">
               <div
