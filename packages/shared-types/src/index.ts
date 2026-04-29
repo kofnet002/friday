@@ -1,4 +1,4 @@
-export type Provider = 'gemini' | 'openai';
+export type Provider = 'gemini' | 'openai' | 'deepseek';
 
 /** Mirrors backend `app.api.chat.ChatRequest` (Pydantic v2). */
 export interface ChatRequest {
@@ -44,7 +44,7 @@ export interface QuestionDetectedEvent {
 
 // ─── /ws/answer ──────────────────────────────────────────────────────────────
 
-export type AnswerProvider = 'gemini' | 'openai';
+export type AnswerProvider = 'gemini' | 'openai' | 'deepseek';
 
 export interface AnswerSessionContext {
   resume_text?: string;

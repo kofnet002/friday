@@ -44,6 +44,16 @@ export function friendlyError(raw: string | null | undefined): FriendlyError {
     };
   }
 
+  // Provider overload — retried briefly on the backend; if it still fails,
+  // the model is genuinely throttling and the user should wait or switch.
+  if (/503|service unavailable|"unavailable"|overloaded|high demand/.test(lower)) {
+    return {
+      text: 'Model is overloaded right now.',
+      hint: 'Spikes are usually brief — try again in a few seconds or switch to another model.',
+      cause,
+    };
+  }
+
   // Auth
   if (/invalid api key|invalid_api_key|unauthorized|401/.test(lower)) {
     if (/deepgram/.test(lower)) {
@@ -64,6 +74,13 @@ export function friendlyError(raw: string | null | undefined): FriendlyError {
       return {
         text: 'OpenAI API key invalid.',
         hint: 'Check OPENAI_API_KEY in your backend .env.',
+        cause,
+      };
+    }
+    if (/deepseek/.test(lower)) {
+      return {
+        text: 'DeepSeek API key invalid.',
+        hint: 'Check DEEPSEEK_API_KEY in your backend .env.',
         cause,
       };
     }

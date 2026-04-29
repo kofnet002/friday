@@ -76,5 +76,6 @@ def coding_solution_user_prompt(problem: dict[str, Any]) -> str:
 
 SOLUTION_GEMINI_MODEL = "gemini-2.5-flash"
 SOLUTION_OPENAI_MODEL = "gpt-5"
+SOLUTION_DEEPSEEK_MODEL = "deepseek-chat"
 SOLUTION_MAX_OUTPUT_TOKENS = 2500
 SOLUTION_TEMPERATURE = 0.2

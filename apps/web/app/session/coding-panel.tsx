@@ -30,6 +30,7 @@ export interface CodingPanelProps {
   language: CodingLanguage;
   onLanguageChange: (lang: CodingLanguage) => void;
   provider: AnswerProvider;
+  onProviderChange: (provider: AnswerProvider) => void;
   tabs: CodingProblemTab[];
   activeFingerprint: string | null;
   onSelectTab: (fingerprint: string) => void;
@@ -49,6 +50,7 @@ export function CodingPanel({
   language,
   onLanguageChange,
   provider,
+  onProviderChange,
   tabs,
   activeFingerprint,
   onSelectTab,
@@ -71,9 +73,19 @@ export function CodingPanel({
         </span>
         <ActivePill active={active} />
         <Select
+          value={provider}
+          onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+          className="ml-auto h-8 text-xs"
+          aria-label="model"
+        >
+          <option value="gemini">Gemini 2.5 Flash</option>
+          <option value="openai">GPT-5</option>
+          <option value="deepseek">DeepSeek</option>
+        </Select>
+        <Select
           value={language}
           onChange={(e) => onLanguageChange(e.target.value as CodingLanguage)}
-          className="ml-auto h-8 text-xs"
+          className="h-8 text-xs"
           aria-label="language"
         >
           {ALL_CODING_LANGUAGES.map((lang) => (
