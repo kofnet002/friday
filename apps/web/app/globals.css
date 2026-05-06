@@ -2,25 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Electron drag region — top 28px of every page is grabbable so the user
-   can move the window. macOS traffic lights live in this strip already.
-   Ignored by normal browsers. */
-.app-titlebar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 28px;
-  z-index: 50;
-  -webkit-app-region: drag;
-  background: transparent;
-}
-.app-titlebar-spacer {
-  height: 28px;
-}
-
 :root {
   color-scheme: light dark;
+}
+
+/* Slick UI: scale the rem base so Tailwind's text-sm (0.875rem) — the
+   dominant label size in the floating bar — renders as ~12px, with all
+   other rem-based sizings shrinking proportionally. */
+html {
+  font-size: 13.714px;
 }
 
 html,
@@ -39,6 +29,20 @@ body {
     'Segoe UI',
     Roboto,
     sans-serif;
+}
+
+/* Make the floating bar itself the window's drag handle. Empty bar pixels
+   move the window; interactive children (buttons, links, popover triggers)
+   opt out so clicks still register. Ignored by normal browsers. */
+.session-bar {
+  -webkit-app-region: drag;
+}
+.session-bar button,
+.session-bar [role='button'],
+.session-bar a,
+.session-bar input,
+.session-bar [data-feature-trigger] {
+  -webkit-app-region: no-drag;
 }
 
 /* Page-level pages that need their own backdrop (e.g. the standalone Setup

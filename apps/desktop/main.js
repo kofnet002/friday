@@ -353,6 +353,10 @@ function createWindow() {
 
   applyWindowPreferences();
   applyStealthProtection();
+  // Default to click-through so only explicit interactive regions (the
+  // control bar, popovers, modals) capture mouse events. The renderer
+  // toggles this on hover over its data-interactive surfaces.
+  mainWindow.setIgnoreMouseEvents(true, { forward: true });
   // Launch directly into the floating control bar.
   mainWindow.loadURL(`${DEV_URL}/session`);
   mainWindow.on('move', persistWindowBounds);
@@ -418,6 +422,15 @@ ipcMain.handle('window:update_preferences', (_evt, patch) => {
   applyWindowPreferences();
   publishStatus();
   return buildStatusPayload();
+});
+ipcMain.handle('window:set_interactive', (_evt, interactive) => {
+  if (!mainWindow) return { ok: false };
+  if (interactive) {
+    mainWindow.setIgnoreMouseEvents(false);
+  } else {
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  }
+  return { ok: true, interactive: Boolean(interactive) };
 });
 ipcMain.handle('window:set_opacity', (_evt, value) => {
   if (!mainWindow || !windowState) return buildStatusPayload();

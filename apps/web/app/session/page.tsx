@@ -1,14 +1,10 @@
 import { SessionClient } from './session-client';
 
 /**
- * Floating control bar — minimal page wrapper, no backdrop.
- * The Electron window itself is transparent below the bar so popovers
- * appear to float over the user's desktop content.
+ * Floating control bar — no page-level wrapper or padding. The Electron
+ * window is click-through by default; only the SessionClient's own
+ * data-interactive surfaces capture mouse events.
  */
 export default function SessionPage() {
-  return (
-    <main className="px-3 py-3">
-      <SessionClient />
-    </main>
-  );
+  return <SessionClient />;
 }

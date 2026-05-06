@@ -13,6 +13,7 @@ import {
 import {
   Download,
   Eraser,
+  GripVertical,
   Keyboard,
   Pause,
   Play,
@@ -214,6 +215,67 @@ export function SessionClient() {
     window.addEventListener('mousedown', onPointerDown);
     return () => window.removeEventListener('mousedown', onPointerDown);
   }, [shieldOpen]);
+
+  // Click-through routing: by default the Electron window ignores mouse
+  // events so the desktop underneath stays clickable. While the cursor is
+  // over any [data-interactive] surface (the bar, popovers, modals,
+  // dropdowns) we flip the window to capture events. A small debounce on
+  // the "leave" side bridges the visual gap between the bar and the
+  // popover so brief gap-crossings don't drop interactivity mid-action.
+  useEffect(() => {
+    if (!inElectron) return;
+    const api = window.friday?.appWindow;
+    if (!api?.setInteractive) return;
+
+    let lastInteractive = false;
+    let pointerHeld = false;
+    let leaveTimer: number | null = null;
+
+    const apply = (next: boolean) => {
+      if (next === lastInteractive) return;
+      lastInteractive = next;
+      void api.setInteractive(next);
+    };
+
+    const evaluate = (clientX: number, clientY: number) => {
+      const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const wantsInteractive = !!el?.closest('[data-interactive="true"]');
+      if (leaveTimer !== null) {
+        window.clearTimeout(leaveTimer);
+        leaveTimer = null;
+      }
+      if (wantsInteractive) {
+        apply(true);
+        return;
+      }
+      if (pointerHeld) return;
+      leaveTimer = window.setTimeout(() => {
+        leaveTimer = null;
+        apply(false);
+      }, 120);
+    };
+
+    const onMove = (e: MouseEvent) => evaluate(e.clientX, e.clientY);
+    const onDown = (e: MouseEvent) => {
+      pointerHeld = true;
+      evaluate(e.clientX, e.clientY);
+    };
+    const onUp = (e: MouseEvent) => {
+      pointerHeld = false;
+      evaluate(e.clientX, e.clientY);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('mouseup', onUp);
+      if (leaveTimer !== null) window.clearTimeout(leaveTimer);
+      void api.setInteractive(false);
+    };
+  }, [inElectron]);
 
   // ─── answer WS message handling ────────────────────────────────────────────
   const onAnswerMessage = useCallback((msg: AnswerServerMessage) => {
@@ -428,11 +490,18 @@ export function SessionClient() {
     });
     audioUnsubsRef.current = [offFrame, offError, offExit];
     setStatus('recording');
+    // Pop the Listen panel as soon as we start capturing so the user can
+    // see transcript + answers without an extra click.
+    setActiveFeature('listen');
   };
 
   const teardownAudioListeners = () => {
     for (const off of audioUnsubsRef.current) off();
     audioUnsubsRef.current = [];
+  };
+
+  const closeListenIfOpen = () => {
+    setActiveFeature((prev) => (prev === 'listen' ? null : prev));
   };
 
   const stop = async () => {
@@ -443,12 +512,14 @@ export function SessionClient() {
     transcribeRef.current?.close();
     transcribeRef.current = null;
     setStatus('idle');
+    closeListenIfOpen();
   };
 
   const pause = async () => {
     if (inElectron && window.friday) await window.friday.audio.pause();
     transcribeRef.current?.sendControl({ type: 'pause' });
     setStatus('paused');
+    closeListenIfOpen();
   };
 
   const resume = async () => {
@@ -787,7 +858,7 @@ export function SessionClient() {
   };
 
   return (
-    <div className="mx-auto flex w-fit max-w-full flex-col items-center gap-2">
+    <div className="pointer-events-none mx-auto flex w-fit max-w-full flex-col items-center gap-2 px-3 py-3">
       {/* Top control bar — brand · status · capture+transcript · other features.
           Wrapped in a single Popover so all feature popovers anchor to the
           whole bar (centered underneath) rather than to each individual icon. */}
@@ -798,7 +869,10 @@ export function SessionClient() {
         }}
       >
         <Popover.Anchor asChild>
-          <div className="flex items-center gap-x-2 rounded-2xl border border-white/40 bg-white/55 px-3 py-2 shadow-[0_12px_36px_rgba(15,23,42,0.12)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_12px_36px_rgba(0,0,0,0.55)]">
+          <div
+            data-interactive="true"
+            className="session-bar pointer-events-auto flex items-center gap-x-2 rounded-2xl border border-white/40 bg-white/55 px-3 py-2 shadow-[0_12px_36px_rgba(15,23,42,0.12)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_12px_36px_rgba(0,0,0,0.55)]"
+          >
             {/* Brand */}
             <span
               className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-semibold text-neutral-800 dark:text-neutral-100"
@@ -893,6 +967,20 @@ export function SessionClient() {
                 coding: codingTabs.some((t) => t.status === 'streaming'),
               }}
             />
+
+            <ClusterDivider />
+
+            {/* Drag handle — empty bar pixels also drag thanks to .session-bar,
+                but this gives the user an obvious target. The span is a non-
+                button element, so the .session-bar drag region applies. */}
+            <span
+              role="presentation"
+              aria-label="Drag to move"
+              title="Drag to move"
+              className="flex h-7 cursor-move items-center justify-center rounded-md px-1 text-neutral-500 hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-200"
+            >
+              <GripVertical className="h-4 w-4" aria-hidden />
+            </span>
           </div>
         </Popover.Anchor>
         <Popover.Portal>
@@ -908,8 +996,9 @@ export function SessionClient() {
                   e.preventDefault();
                 }
               }}
+              data-interactive="true"
               className={cn(
-                'z-50 max-h-[78vh] overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl',
+                'pointer-events-auto z-50 max-h-[78vh] overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl',
                 'data-[state=open]:animate-in data-[state=closed]:animate-out',
                 'data-[state=open]:fade-in data-[state=closed]:fade-out',
                 'data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95',
@@ -925,8 +1014,17 @@ export function SessionClient() {
         </Popover.Portal>
       </Popover.Root>
 
-      {/* Utility row — sits centered beneath the main bar */}
-      <div className="flex items-center gap-2 rounded-full border border-white/40 bg-white/55 px-3 py-1 text-[11px] shadow-[0_8px_24px_rgba(15,23,42,0.10)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
+      {/* Utility row — sits centered beneath the main bar. Hidden while a
+          feature popover is open so the popover (which drops downward from
+          the bar) doesn't visually cover it. */}
+      <div
+        data-interactive="true"
+        aria-hidden={activeFeature !== null}
+        className={cn(
+          'pointer-events-auto flex items-center gap-2 rounded-full border border-white/40 bg-white/55 px-3 py-1 text-[11px] shadow-[0_8px_24px_rgba(15,23,42,0.10)] backdrop-blur-2xl backdrop-saturate-150 transition-opacity duration-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_8px_24px_rgba(0,0,0,0.45)]',
+          activeFeature !== null && 'pointer-events-none invisible opacity-0',
+        )}
+      >
         <StealthIndicator
           ref={shieldRef}
           desktopStatus={desktopStatus}
@@ -983,13 +1081,19 @@ export function SessionClient() {
 
       {/* Banners */}
       {!inElectron ? (
-        <div className="rounded-md border border-amber-400/50 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-200">
+        <div
+          data-interactive="true"
+          className="pointer-events-auto rounded-md border border-amber-400/50 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-200"
+        >
           Open this page from the Friday desktop window — system-audio capture isn&apos;t available
           in a regular browser tab.
         </div>
       ) : null}
       {error ? (
-        <div className="rounded-md border border-red-400/50 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300">
+        <div
+          data-interactive="true"
+          className="pointer-events-auto rounded-md border border-red-400/50 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300"
+        >
           {error}
         </div>
       ) : null}

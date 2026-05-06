@@ -61,7 +61,8 @@ export function ModalShell({
   if (!open) return null;
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 px-4 py-8 backdrop-blur-sm animate-in fade-in duration-150"
+      data-interactive="true"
+      className="pointer-events-auto fixed inset-0 z-[100] flex items-center justify-center bg-black/55 px-4 py-8 backdrop-blur-sm animate-in fade-in duration-150"
       onClick={onClose}
     >
       <div
