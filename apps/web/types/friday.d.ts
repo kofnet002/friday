@@ -74,6 +74,7 @@ declare global {
     center: () => Promise<FridayWindowStatus>;
     updatePreferences: (patch: Partial<FridayWindowPreferences>) => Promise<FridayWindowStatus>;
     setOpacity: (value: number) => Promise<FridayWindowStatus>;
+    setInteractive: (value: boolean) => Promise<{ ok: boolean; interactive?: boolean }>;
     onStatus: (cb: (status: FridayWindowStatus) => void) => () => void;
     onToast: (cb: (toast: FridayWindowToast) => void) => () => void;
   }
