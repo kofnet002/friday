@@ -105,13 +105,13 @@ state per-launch.
 Approximate per-hour cost during active use, based on the rough public
 prices baked into `apps/backend/app/services/usage.py`:
 
-| Component          | Model                    | ~Cost / hour                  |
-| ------------------ | ------------------------ | ----------------------------- |
-| Transcription      | Deepgram nova-3          | ~$0.26                        |
-| Question detection | Gemini 2.5 Flash-Lite    | <$0.01                        |
-| Vision extraction  | Gemini 2.5 Flash         | ~$0.005 (≤20 frames)          |
-| Answer streaming   | Gemini 2.5 Pro / GPT-5   | varies; typically $0.01–$0.05 |
-| Coding solution    | Gemini 2.5 Flash / GPT-5 | <$0.02 per problem            |
+| Component          | Model                     | ~Cost / hour                  |
+| ------------------ | ------------------------- | ----------------------------- |
+| Transcription      | Deepgram nova-3           | ~$0.26                        |
+| Question detection | Gemini 2.5 Flash-Lite     | <$0.01                        |
+| Vision extraction  | Gemini 2.5 Flash          | ~$0.005 (≤20 frames)          |
+| Answer streaming   | Gemini 2.5 Pro / GPT-4o   | varies; typically $0.01–$0.05 |
+| Coding solution    | Gemini 2.5 Flash / GPT-4o | <$0.02 per problem            |
 
 Per-session safety budgets (configurable in `.env`):
 

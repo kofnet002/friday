@@ -84,10 +84,22 @@ class CodingCapture extends EventEmitter {
     this.inflightId = 0;
     this.lastHash = null;
     this.lastExtractAt = 0;
+    // Provider used for the vision/OCR step. Mirrors the Coding panel's
+    // selection in the renderer; left null until the renderer pushes one,
+    // in which case the backend resolves it from session.default_provider.
+    this.provider = null;
   }
 
   isActive() {
     return this.active;
+  }
+
+  setProvider(provider) {
+    if (provider === 'gemini' || provider === 'openai' || provider === 'deepseek') {
+      this.provider = provider;
+    } else {
+      this.provider = null;
+    }
   }
 
   start(sessionId) {
@@ -180,6 +192,7 @@ class CodingCapture extends EventEmitter {
           image_base64: base64,
           session_id: sessionIdAtSend,
           force: Boolean(force),
+          provider: this.provider || undefined,
         }),
       });
       if (!this.active || this.inflightId !== callId) {

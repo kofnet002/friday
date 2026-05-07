@@ -15,6 +15,8 @@ import {
   Eraser,
   GripVertical,
   Keyboard,
+  Loader2,
+  Mic,
   Pause,
   Play,
   ShieldAlert,
@@ -38,12 +40,15 @@ import { AnswerWs } from '@/lib/answer-ws';
 import { CodingWs } from '@/lib/coding-ws';
 import {
   fetchSessionDetail,
+  fetchSessionUsage,
   getCodingLanguagePreference,
   getOrCreateSessionId,
   getProviderPreference,
+  patchSessionProvider,
   sessionExportUrl,
   setCodingLanguagePreference,
   setProviderPreference,
+  type SessionUsageSummary,
 } from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
@@ -64,8 +69,22 @@ const MAX_CODING_TABS = 3;
 
 type Status = 'idle' | 'starting' | 'recording' | 'paused' | 'error';
 
+interface AnswerEntry {
+  id: string;
+  question: string;
+  answer: string;
+  status: AnswerStatus;
+  error: string | null;
+  marked: boolean;
+  createdAt: number;
+}
+
 const AUTOSCROLL_THRESHOLD_PX = 48;
-const RECENT_FINALS_JOIN = 2;
+// Force-ask (⌘⇧Space) sends the last N finalized transcript chunks to the
+// copilot. The interviewer's question often isn't the *last* thing said —
+// they ask, then keep narrating. Keep this window wide enough that the
+// question is included; the prompt instructs the LLM to extract it.
+const RECENT_FINALS_JOIN = 8;
 
 export function SessionClient() {
   const [sessionId, setSessionIdState] = useState<string>('');
@@ -75,14 +94,17 @@ export function SessionClient() {
   const [finals, setFinals] = useState<string[]>([]);
   const [interim, setInterim] = useState<string>('');
 
-  // Answer panel state
+  // Answer panel state — every ask appends a new AnswerEntry; the panel
+  // displays entries[entryIndex] and the chevrons step the index. The
+  // currently-streaming entry is tracked separately via streamingIdRef so
+  // tokens always land on the right entry even if the user navigates away
+  // while the LLM is still streaming.
   const [provider, setProvider] = useState<AnswerProvider>('gemini');
-  const [question, setQuestion] = useState<string | null>(null);
-  const [answer, setAnswer] = useState<string>('');
-  const [answerStatus, setAnswerStatus] = useState<AnswerStatus>('idle');
-  const [answerError, setAnswerError] = useState<string | null>(null);
-  const [marked, setMarked] = useState(false);
+  const [entries, setEntries] = useState<AnswerEntry[]>([]);
+  const [entryIndex, setEntryIndex] = useState(-1);
+  const [panelError, setPanelError] = useState<string | null>(null);
   const [answerConnected, setAnswerConnected] = useState(false);
+  const streamingIdRef = useRef<string | null>(null);
 
   // Coding panel state
   const [codingActive, setCodingActive] = useState(false);
@@ -107,6 +129,7 @@ export function SessionClient() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [history, setHistory] = useState<QAHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [usage, setUsage] = useState<SessionUsageSummary | null>(null);
   const [desktopStatus, setDesktopStatus] = useState<FridayWindowStatus | null>(null);
   const [privacyMode, setPrivacyMode] = useState(false);
   const [desktopToast, setDesktopToast] = useState<string | null>(null);
@@ -133,6 +156,8 @@ export function SessionClient() {
   codingLanguageRef.current = codingLanguage;
   activeFingerprintRef.current = activeFingerprint;
   codingTabsRef.current = codingTabs;
+
+  const currentEntry = entryIndex >= 0 && entryIndex < entries.length ? entries[entryIndex] : null;
 
   const inElectron = typeof window !== 'undefined' && Boolean(window.friday);
 
@@ -278,31 +303,46 @@ export function SessionClient() {
   }, [inElectron]);
 
   // ─── answer WS message handling ────────────────────────────────────────────
-  const onAnswerMessage = useCallback((msg: AnswerServerMessage) => {
-    if (msg.type === 'started') {
-      setAnswer('');
-      setAnswerError(null);
-      setMarked(false);
-      setAnswerStatus('streaming');
-      return;
-    }
-    if (msg.type === 'token') {
-      setAnswer((prev) => prev + msg.text);
-      return;
-    }
-    if (msg.type === 'done') {
-      setAnswerStatus('done');
-      return;
-    }
-    if (msg.type === 'cancelled') {
-      setAnswerStatus('cancelled');
-      return;
-    }
-    if (msg.type === 'error') {
-      setAnswerError(msg.message);
-      setAnswerStatus('error');
-    }
-  }, []);
+  const updateEntry = useCallback(
+    (id: string, patch: Partial<AnswerEntry> | ((entry: AnswerEntry) => Partial<AnswerEntry>)) => {
+      setEntries((prev) =>
+        prev.map((e) =>
+          e.id === id ? { ...e, ...(typeof patch === 'function' ? patch(e) : patch) } : e,
+        ),
+      );
+    },
+    [],
+  );
+
+  const onAnswerMessage = useCallback(
+    (msg: AnswerServerMessage) => {
+      const id = streamingIdRef.current;
+      if (!id) return;
+      if (msg.type === 'started') {
+        updateEntry(id, { answer: '', error: null, marked: false, status: 'streaming' });
+        return;
+      }
+      if (msg.type === 'token') {
+        updateEntry(id, (e) => ({ answer: e.answer + msg.text }));
+        return;
+      }
+      if (msg.type === 'done') {
+        updateEntry(id, { status: 'done' });
+        streamingIdRef.current = null;
+        return;
+      }
+      if (msg.type === 'cancelled') {
+        updateEntry(id, { status: 'cancelled' });
+        streamingIdRef.current = null;
+        return;
+      }
+      if (msg.type === 'error') {
+        updateEntry(id, { status: 'error', error: msg.message });
+        streamingIdRef.current = null;
+      }
+    },
+    [updateEntry],
+  );
 
   // ─── transcribe WS message handling ────────────────────────────────────────
   const onTranscribeMessage = useCallback((msg: WsServerMessage) => {
@@ -436,14 +476,31 @@ export function SessionClient() {
   const askAnswer = (q: string) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
-      setAnswerError('copilot WS not connected');
+      setPanelError('copilot WS not connected');
       return;
     }
-    setQuestion(q);
-    setAnswer('');
-    setAnswerError(null);
-    setMarked(false);
-    setAnswerStatus('streaming');
+    const id =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const entry: AnswerEntry = {
+      id,
+      question: q,
+      answer: '',
+      status: 'streaming',
+      error: null,
+      marked: false,
+      createdAt: Date.now(),
+    };
+    setPanelError(null);
+    setEntries((prev) => {
+      const next = [...prev, entry];
+      // Auto-jump to the new entry — the user just asked and wants to see
+      // the answer. They can chevron back to older ones afterward.
+      setEntryIndex(next.length - 1);
+      return next;
+    });
+    streamingIdRef.current = id;
     ws.send({ type: 'question', question: q, provider: providerRef.current });
   };
 
@@ -534,21 +591,60 @@ export function SessionClient() {
     setLatencyMs(null);
   };
 
+  // Removes the currently-displayed entry from the in-memory list. If it's
+  // the streaming one, also tells the WS to cancel so the server stops
+  // generating tokens we'd just throw away.
   const clearAnswer = () => {
-    setAnswer('');
-    setQuestion(null);
-    setAnswerError(null);
-    setMarked(false);
-    setAnswerStatus('idle');
+    if (entryIndex < 0) return;
+    const removed = entries[entryIndex];
+    if (removed && streamingIdRef.current === removed.id) {
+      answerRef.current?.cancel();
+      streamingIdRef.current = null;
+    }
+    setEntries((prev) => {
+      const next = prev.filter((_, i) => i !== entryIndex);
+      // Keep the user on the nearest neighbor (previous entry if there is
+      // one, otherwise the new tail; -1 if the list is now empty).
+      setEntryIndex(next.length === 0 ? -1 : Math.min(entryIndex, next.length - 1));
+      return next;
+    });
   };
 
   const cancelAnswer = () => {
     answerRef.current?.cancel();
   };
 
+  const onMarkAnswered = () => {
+    const current = entryIndex >= 0 ? entries[entryIndex] : null;
+    if (!current) return;
+    updateEntry(current.id, { marked: !current.marked });
+  };
+
+  const onReask = () => {
+    const current = entryIndex >= 0 ? entries[entryIndex] : null;
+    if (!current?.question) return;
+    askAnswer(current.question);
+  };
+
+  const goPrev = () => {
+    setEntryIndex((i) => Math.max(0, i - 1));
+  };
+
+  const goNext = () => {
+    setEntryIndex((i) => Math.min(entries.length - 1, i + 1));
+  };
+
   const onProviderChange = (p: AnswerProvider) => {
     setProvider(p);
     setProviderPreference(p);
+    // Mirror the choice into the desktop capture so the next vision/extract
+    // request uses the user-selected model. Best-effort — outside Electron
+    // the API isn't there.
+    void window.friday?.coding?.setProvider?.(p);
+    // Persist to the server's session row so /api/vision/extract resolves
+    // the right provider even when the desktop fires a capture before the
+    // setProvider IPC has reached it.
+    if (sessionId) void patchSessionProvider(sessionId, p);
   };
 
   const submitCustom = (q: string) => askAnswer(q);
@@ -564,7 +660,7 @@ export function SessionClient() {
           askAnswer(recent);
           setActiveFeature('listen');
         } else {
-          setAnswerError('no transcript yet');
+          setPanelError('no transcript yet');
         }
         return;
       }
@@ -608,6 +704,9 @@ export function SessionClient() {
       setCodingError(result.error ?? 'failed to start coding capture');
       return;
     }
+    // Push the renderer's currently-selected provider into the desktop
+    // capture so the very first vision/extract uses the user's pick.
+    void fridayApi.coding.setProvider?.(providerRef.current);
     setCodingError(null);
     const offFrame = fridayApi.coding.onFrameProcessed((info) => {
       setCodingFrame({ changed_bits: info.changed_bits, interval_ms: info.interval_ms });
@@ -664,6 +763,12 @@ export function SessionClient() {
     }
   }, [sessionId]);
 
+  const refreshUsage = useCallback(async () => {
+    if (!sessionId) return;
+    const data = await fetchSessionUsage(sessionId);
+    if (data) setUsage(data);
+  }, [sessionId]);
+
   const exportSession = () => {
     if (!sessionId) return;
     window.open(sessionExportUrl(sessionId), '_blank');
@@ -708,12 +813,41 @@ export function SessionClient() {
     window.open('/stealth-test', '_blank', 'noopener,noreferrer');
   };
 
-  // Refresh history once any answer stream completes (best-effort; small fetch).
+  // Refresh history + usage cost each time an entry transitions to 'done'
+  // (best-effort, small fetches). A ref of already-handled ids prevents
+  // firing on every token re-render.
+  const refreshedDoneIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (answerStatus === 'done') {
-      refreshHistory();
+    let touched = false;
+    for (const e of entries) {
+      if (e.status === 'done' && !refreshedDoneIdsRef.current.has(e.id)) {
+        refreshedDoneIdsRef.current.add(e.id);
+        touched = true;
+      }
     }
-  }, [answerStatus, refreshHistory]);
+    if (touched) {
+      void refreshHistory();
+      void refreshUsage();
+    }
+  }, [entries, refreshHistory, refreshUsage]);
+
+  // Refresh usage when a coding solution finishes streaming, and once on
+  // initial session id resolution so the pill shows last-known total.
+  const refreshedCodingIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let touched = false;
+    for (const tab of codingTabs) {
+      if (tab.status === 'done' && !refreshedCodingIdsRef.current.has(tab.fingerprint)) {
+        refreshedCodingIdsRef.current.add(tab.fingerprint);
+        touched = true;
+      }
+    }
+    if (touched) void refreshUsage();
+  }, [codingTabs, refreshUsage]);
+
+  useEffect(() => {
+    void refreshUsage();
+  }, [refreshUsage]);
 
   const onCloseCodingTab = (fingerprint: string) => {
     if (activeFingerprintRef.current === fingerprint) {
@@ -796,14 +930,19 @@ export function SessionClient() {
             <AnswerPanel
               provider={provider}
               onProviderChange={onProviderChange}
-              question={question}
-              answer={answer}
-              status={answerStatus}
-              error={answerError}
-              marked={marked}
-              onMarkAnswered={() => setMarked((m) => !m)}
+              question={currentEntry?.question ?? null}
+              answer={currentEntry?.answer ?? ''}
+              status={currentEntry?.status ?? 'idle'}
+              error={currentEntry?.error ?? panelError}
+              marked={Boolean(currentEntry?.marked)}
+              onMarkAnswered={onMarkAnswered}
               onCancel={cancelAnswer}
               onClear={clearAnswer}
+              onReask={onReask}
+              entryIndex={entries.length === 0 ? 0 : entryIndex + 1}
+              entryCount={entries.length}
+              onPrev={goPrev}
+              onNext={goNext}
               onSubmitCustom={submitCustom}
               connected={answerConnected}
               privacyMode={privacyMode}
@@ -860,129 +999,87 @@ export function SessionClient() {
   return (
     <div className="pointer-events-none mx-auto flex w-fit max-w-full flex-col items-center gap-2 px-3 py-3">
       {/* Top control bar — brand · status · capture+transcript · other features.
-          Wrapped in a single Popover so all feature popovers anchor to the
-          whole bar (centered underneath) rather than to each individual icon. */}
+          The Popover anchor lives on the utility row below so feature
+          popovers open BENEATH that row instead of overlapping it. */}
       <Popover.Root
         open={activeFeature !== null}
         onOpenChange={(open) => {
           if (!open) setActiveFeature(null);
         }}
       >
-        <Popover.Anchor asChild>
-          <div
-            data-interactive="true"
-            className="session-bar pointer-events-auto flex items-center gap-x-2 rounded-2xl border border-white/40 bg-white/55 px-3 py-2 shadow-[0_12px_36px_rgba(15,23,42,0.12)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_12px_36px_rgba(0,0,0,0.55)]"
+        <div
+          data-interactive="true"
+          className="session-bar pointer-events-auto flex items-center gap-x-2 rounded-2xl border border-white/40 bg-white/55 px-3 py-2 shadow-[0_12px_36px_rgba(15,23,42,0.12)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_12px_36px_rgba(0,0,0,0.55)]"
+        >
+          {/* Brand */}
+          <span
+            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-semibold text-neutral-800 dark:text-neutral-100"
+            aria-label="Friday"
           >
-            {/* Brand */}
-            <span
-              className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-semibold text-neutral-800 dark:text-neutral-100"
-              aria-label="Friday"
-            >
-              <span className="relative flex h-2 w-2">
-                <span
-                  className={cn(
-                    'absolute inline-flex h-full w-full rounded-full opacity-75',
-                    isRecording ? 'animate-ping bg-sky-400' : 'bg-transparent',
-                  )}
-                />
-                <span
-                  className={cn(
-                    'relative inline-flex h-2 w-2 rounded-full',
-                    isRecording
-                      ? 'bg-sky-500'
-                      : isPaused
-                        ? 'bg-amber-500'
-                        : 'bg-neutral-400 dark:bg-neutral-600',
-                  )}
-                />
-              </span>
-              Friday
-            </span>
-
-            <ClusterDivider />
-
-            {/* Recording status with inline timer */}
-            <div className="flex items-center gap-2">
-              <StatusPill status={status} />
+            <span className="relative flex h-2 w-2">
               <span
                 className={cn(
-                  'font-mono text-xs tabular-nums',
-                  isLive
-                    ? 'text-neutral-700 dark:text-neutral-200'
-                    : 'text-neutral-400 dark:text-neutral-600',
+                  'absolute inline-flex h-full w-full rounded-full opacity-75',
+                  isRecording ? 'animate-ping bg-sky-400' : 'bg-transparent',
                 )}
-                aria-label="elapsed time"
-              >
-                {elapsedDisplay}
-              </span>
-            </div>
+              />
+              <span
+                className={cn(
+                  'relative inline-flex h-2 w-2 rounded-full',
+                  isRecording
+                    ? 'bg-sky-500'
+                    : isPaused
+                      ? 'bg-amber-500'
+                      : 'bg-neutral-400 dark:bg-neutral-600',
+                )}
+              />
+            </span>
+            Friday
+          </span>
 
-            {/* Capture controls — icon-only when active, text on Start */}
-            <div className="flex items-center gap-0.5">
-              {!isLive ? (
-                <Button onClick={start} disabled={status === 'starting'} size="sm">
-                  <Play className="mr-1 h-3.5 w-3.5" aria-hidden />
-                  {status === 'starting' ? 'Starting…' : 'Start'}
-                </Button>
-              ) : null}
-              {isRecording ? (
-                <Button
-                  onClick={pause}
-                  variant="outline"
-                  size="sm"
-                  aria-label="pause"
-                  className="!px-2"
-                >
-                  <Pause className="h-3.5 w-3.5" aria-hidden />
-                </Button>
-              ) : null}
-              {isPaused ? (
-                <Button onClick={resume} size="sm" aria-label="resume" className="!px-2">
-                  <Play className="h-3.5 w-3.5" aria-hidden />
-                </Button>
-              ) : null}
-              {isLive ? (
-                <Button
-                  onClick={stop}
-                  variant="outline"
-                  size="sm"
-                  aria-label="stop"
-                  className="!px-2"
-                >
-                  <Square className="h-3.5 w-3.5" aria-hidden />
-                </Button>
-              ) : null}
-            </div>
+          <ClusterDivider />
 
-            <ClusterDivider />
+          {/* Capture cluster — single mic when idle; segmented pill with
+                live timer + pause/resume + stop when active. Encodes status
+                via tint (red = recording, amber = paused), so we no longer
+                need a separate status badge or a standalone timer. */}
+          <CaptureCluster
+            status={status}
+            elapsedDisplay={elapsedDisplay}
+            onStart={start}
+            onPause={pause}
+            onResume={resume}
+            onStop={stop}
+          />
 
-            {/* Feature cluster — all features share one anchored popover */}
-            <FeatureBar
-              active={activeFeature}
-              onChange={setActiveFeature}
-              badges={{
-                listen:
-                  answerStatus === 'streaming' ||
-                  (isLive && (finals.length > 0 || Boolean(interim))),
-                coding: codingTabs.some((t) => t.status === 'streaming'),
-              }}
-            />
+          <ClusterDivider />
 
-            <ClusterDivider />
+          {/* Feature cluster — all features share one anchored popover */}
+          <FeatureBar
+            active={activeFeature}
+            onChange={setActiveFeature}
+            badges={{
+              listen:
+                entries.some((e) => e.status === 'streaming') ||
+                (isLive && (finals.length > 0 || Boolean(interim))),
+              coding: codingTabs.some((t) => t.status === 'streaming'),
+            }}
+          />
 
-            {/* Drag handle — empty bar pixels also drag thanks to .session-bar,
+          <ClusterDivider />
+
+          {/* Drag handle — empty bar pixels also drag thanks to .session-bar,
                 but this gives the user an obvious target. The span is a non-
                 button element, so the .session-bar drag region applies. */}
-            <span
-              role="presentation"
-              aria-label="Drag to move"
-              title="Drag to move"
-              className="flex h-7 cursor-move items-center justify-center rounded-md px-1 text-neutral-500 hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-200"
-            >
-              <GripVertical className="h-4 w-4" aria-hidden />
-            </span>
-          </div>
-        </Popover.Anchor>
+          <span
+            role="presentation"
+            aria-label="Drag to move"
+            title="Drag to move"
+            className="flex h-7 cursor-move items-center justify-center rounded-md px-1 text-neutral-500 hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-200"
+          >
+            <GripVertical className="h-4 w-4" aria-hidden />
+          </span>
+        </div>
         <Popover.Portal>
           {activeFeature ? (
             <Popover.Content
@@ -998,7 +1095,12 @@ export function SessionClient() {
               }}
               data-interactive="true"
               className={cn(
-                'pointer-events-auto z-50 max-h-[78vh] overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl',
+                'pointer-events-auto z-50 resize overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl',
+                // Default height is generous so the user sees a usable
+                // workspace immediately. The resize handle (bottom-right
+                // corner from `resize: both`) lets them grow OR shrink in
+                // either dimension, clamped by min/max.
+                'h-[68vh] min-h-[20rem] min-w-[24rem] max-h-[92vh]',
                 'data-[state=open]:animate-in data-[state=closed]:animate-out',
                 'data-[state=open]:fade-in data-[state=closed]:fade-out',
                 'data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95',
@@ -1012,72 +1114,70 @@ export function SessionClient() {
             </Popover.Content>
           ) : null}
         </Popover.Portal>
+        {/* Utility row — sits centered beneath the main bar AND is the popover
+          anchor, so feature popovers drop down beneath it instead of
+          covering it. */}
+        <Popover.Anchor asChild>
+          <div
+            data-interactive="true"
+            className="pointer-events-auto flex items-center gap-2 rounded-full border border-white/40 bg-white/55 px-3 py-1 text-[11px] shadow-[0_8px_24px_rgba(15,23,42,0.10)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_8px_24px_rgba(0,0,0,0.45)]"
+          >
+            <StealthIndicator
+              ref={shieldRef}
+              desktopStatus={desktopStatus}
+              stealthMode={stealthMode}
+              open={shieldOpen}
+              onToggle={() => setShieldOpen((value) => !value)}
+            />
+            <ConnectionPill
+              transcribe={
+                status === 'recording' || status === 'paused'
+                  ? 'live'
+                  : status === 'error'
+                    ? 'error'
+                    : 'idle'
+              }
+              answer={answerConnected}
+              coding={codingConnected}
+            />
+            <LatencyBadge ms={latencyMs} />
+            <CostPill usage={usage} />
+            {sessionId ? (
+              <span className="rounded-full bg-white/60 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-600 dark:bg-white/5 dark:text-neutral-300">
+                {sessionId.slice(0, 8)}
+              </span>
+            ) : null}
+            <span aria-hidden className="h-3.5 w-px bg-neutral-300/50 dark:bg-white/10" />
+            <button
+              type="button"
+              onClick={clearTranscript}
+              aria-label="clear transcript"
+              title="Clear transcript"
+              className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+            >
+              <Eraser className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setShortcutsOpen(true)}
+              aria-label="keyboard shortcuts"
+              title="Shortcuts (⌘/)"
+              className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+            >
+              <Keyboard className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={exportSession}
+              aria-label="export session"
+              title="Export session"
+              className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </Popover.Anchor>
       </Popover.Root>
-
-      {/* Utility row — sits centered beneath the main bar. Hidden while a
-          feature popover is open so the popover (which drops downward from
-          the bar) doesn't visually cover it. */}
-      <div
-        data-interactive="true"
-        aria-hidden={activeFeature !== null}
-        className={cn(
-          'pointer-events-auto flex items-center gap-2 rounded-full border border-white/40 bg-white/55 px-3 py-1 text-[11px] shadow-[0_8px_24px_rgba(15,23,42,0.10)] backdrop-blur-2xl backdrop-saturate-150 transition-opacity duration-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_8px_24px_rgba(0,0,0,0.45)]',
-          activeFeature !== null && 'pointer-events-none invisible opacity-0',
-        )}
-      >
-        <StealthIndicator
-          ref={shieldRef}
-          desktopStatus={desktopStatus}
-          stealthMode={stealthMode}
-          open={shieldOpen}
-          onToggle={() => setShieldOpen((value) => !value)}
-        />
-        <ConnectionPill
-          transcribe={
-            status === 'recording' || status === 'paused'
-              ? 'live'
-              : status === 'error'
-                ? 'error'
-                : 'idle'
-          }
-          answer={answerConnected}
-          coding={codingConnected}
-        />
-        <LatencyBadge ms={latencyMs} />
-        {sessionId ? (
-          <span className="rounded-full bg-white/60 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-600 dark:bg-white/5 dark:text-neutral-300">
-            {sessionId.slice(0, 8)}
-          </span>
-        ) : null}
-        <span aria-hidden className="h-3.5 w-px bg-neutral-300/50 dark:bg-white/10" />
-        <button
-          type="button"
-          onClick={clearTranscript}
-          aria-label="clear transcript"
-          title="Clear transcript"
-          className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
-        >
-          <Eraser className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={() => setShortcutsOpen(true)}
-          aria-label="keyboard shortcuts"
-          title="Shortcuts (⌘/)"
-          className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
-        >
-          <Keyboard className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={exportSession}
-          aria-label="export session"
-          title="Export session"
-          className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
-        >
-          <Download className="h-3.5 w-3.5" />
-        </button>
-      </div>
 
       {/* Banners */}
       {!inElectron ? (
@@ -1134,6 +1234,119 @@ export function SessionClient() {
           </div>
         </div>
       </ModalShell>
+    </div>
+  );
+}
+
+function CaptureCluster({
+  status,
+  elapsedDisplay,
+  onStart,
+  onPause,
+  onResume,
+  onStop,
+}: {
+  status: Status;
+  elapsedDisplay: string;
+  onStart: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onStop: () => void;
+}) {
+  const isRecording = status === 'recording';
+  const isPaused = status === 'paused';
+  const isLive = isRecording || isPaused;
+  const isStarting = status === 'starting';
+
+  if (!isLive) {
+    return (
+      <button
+        type="button"
+        onClick={onStart}
+        disabled={isStarting}
+        aria-label={isStarting ? 'Starting…' : 'Start listening'}
+        title={isStarting ? 'Starting…' : 'Start listening (⌘⇧Space)'}
+        className={cn(
+          'group inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors',
+          'border-sky-300/60 bg-sky-500/10 text-sky-700 hover:bg-sky-500/20',
+          'dark:border-sky-500/40 dark:text-sky-300 dark:hover:bg-sky-500/20',
+          'disabled:cursor-not-allowed disabled:opacity-60',
+        )}
+      >
+        {isStarting ? (
+          <>
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            <span>Starting…</span>
+          </>
+        ) : (
+          <>
+            <Mic className="h-3.5 w-3.5 transition-transform group-hover:scale-110" aria-hidden />
+            <span>Listen</span>
+          </>
+        )}
+      </button>
+    );
+  }
+
+  // Live (recording or paused) — segmented pill with timer + pause/resume + stop.
+  const tone = isRecording
+    ? {
+        wrap: 'border-red-400/40 bg-red-500/10',
+        text: 'text-red-700 dark:text-red-300',
+        dot: 'animate-pulse bg-red-500',
+        primaryHover: 'hover:bg-red-500/20',
+      }
+    : {
+        wrap: 'border-amber-400/40 bg-amber-500/10',
+        text: 'text-amber-700 dark:text-amber-300',
+        dot: 'bg-amber-500',
+        primaryHover: 'hover:bg-amber-500/20',
+      };
+
+  return (
+    <div
+      className={cn('inline-flex h-8 items-center gap-0.5 rounded-full border p-0.5', tone.wrap)}
+      role="group"
+      aria-label={isRecording ? 'Listening' : 'Paused'}
+    >
+      <span
+        className={cn(
+          'flex items-center gap-1.5 px-2 font-mono text-[11px] tabular-nums',
+          tone.text,
+        )}
+      >
+        <span className={cn('h-1.5 w-1.5 rounded-full', tone.dot)} aria-hidden />
+        {elapsedDisplay}
+      </span>
+      <button
+        type="button"
+        onClick={isRecording ? onPause : onResume}
+        aria-label={isRecording ? 'Pause' : 'Resume'}
+        title={isRecording ? 'Pause' : 'Resume'}
+        className={cn(
+          'flex h-6 w-6 items-center justify-center rounded-full transition-colors',
+          tone.text,
+          tone.primaryHover,
+        )}
+      >
+        {isRecording ? (
+          <Pause className="h-3 w-3" aria-hidden />
+        ) : (
+          <Play className="h-3 w-3" aria-hidden />
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={onStop}
+        aria-label="Stop"
+        title="Stop"
+        className={cn(
+          'flex h-6 w-6 items-center justify-center rounded-full transition-colors',
+          'text-neutral-700 hover:bg-neutral-200/70 dark:text-neutral-300 dark:hover:bg-white/10',
+        )}
+      >
+        <Square className="h-3 w-3" aria-hidden />
+      </button>
     </div>
   );
 }
@@ -1253,54 +1466,78 @@ function DesktopToast({ message }: { message: string }) {
   );
 }
 
-function StatusPill({ status }: { status: Status }) {
-  const preset = {
-    idle: {
-      label: 'IDLE',
-      dot: 'bg-neutral-400',
-      wrap: 'bg-neutral-200/60 text-neutral-600 dark:bg-neutral-800/80 dark:text-neutral-400',
-    },
-    starting: {
-      label: 'STARTING',
-      dot: 'animate-pulse bg-sky-500',
-      wrap: 'bg-sky-500/10 text-sky-600 dark:text-sky-400',
-    },
-    recording: {
-      label: 'REC',
-      dot: 'animate-pulse bg-red-500',
-      wrap: 'bg-red-500/10 text-red-600 dark:text-red-400',
-    },
-    paused: {
-      label: 'PAUSED',
-      dot: 'bg-amber-500',
-      wrap: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
-    },
-    error: {
-      label: 'ERROR',
-      dot: 'bg-red-600',
-      wrap: 'bg-red-600/10 text-red-700 dark:text-red-400',
-    },
-  }[status];
-
-  return (
-    <div
-      className={cn(
-        'flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold tracking-[0.15em]',
-        preset.wrap,
-      )}
-    >
-      <span className={cn('h-2 w-2 rounded-full', preset.dot)} />
-      {preset.label}
-    </div>
-  );
-}
-
 function ClusterDivider() {
   return (
     <span
       aria-hidden
       className="hidden h-5 w-px bg-neutral-200 dark:bg-neutral-800 sm:inline-block"
     />
+  );
+}
+
+// Descriptive session-cost pill: shows running USD spend + an itemized
+// breakdown by call-kind on hover. Pulls from /api/sessions/{id}/usage,
+// which aggregates the usage_log table. Tones scale with cost so a runaway
+// session is visible at a glance.
+function CostPill({ usage }: { usage: SessionUsageSummary | null }) {
+  if (!usage) {
+    return (
+      <div
+        className="flex items-center gap-1.5 rounded-full bg-neutral-100 px-2 py-1 font-mono text-[10px] text-neutral-500 dark:bg-neutral-800/80 dark:text-neutral-500"
+        title="No LLM calls yet this session"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-neutral-400" />
+        <span>$0.0000</span>
+      </div>
+    );
+  }
+  const total = usage.total_cost_usd ?? 0;
+  // Tone thresholds tuned to typical usage: <$0.05 = green (cheap), <$0.50
+  // = amber (heavy session), >$0.50 = red (probably runaway coding mode).
+  const tone =
+    total < 0.05
+      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+      : total < 0.5
+        ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+        : 'bg-red-500/15 text-red-700 dark:text-red-400';
+  const dot = total < 0.05 ? 'bg-emerald-500' : total < 0.5 ? 'bg-amber-500' : 'bg-red-500';
+
+  // Multi-line tooltip with per-row breakdown so the user can see *what's*
+  // costing them without opening the export.
+  const breakdown = usage.rows
+    .map((r) => {
+      const cost = r.cost_usd ?? 0;
+      const label = `${r.kind}${r.model ? ` · ${r.model}` : ''}`;
+      return `${label}: ${r.calls}× → $${cost.toFixed(4)}`;
+    })
+    .join('\n');
+  const tooltip = [
+    `Session spend: $${total.toFixed(4)}`,
+    `${usage.total_calls} LLM calls (${usage.total_input_tokens.toLocaleString()} in / ${usage.total_output_tokens.toLocaleString()} out tokens)`,
+    breakdown ? '' : null,
+    breakdown || null,
+  ]
+    .filter((s): s is string => s !== null)
+    .join('\n');
+
+  // Display formatting: keep 4 decimals while cheap so $0.0023 reads cleanly,
+  // 2 decimals once we cross a cent so totals stay scannable.
+  const displayCost = total >= 0.01 ? `$${total.toFixed(2)}` : `$${total.toFixed(4)}`;
+
+  return (
+    <div
+      className={cn('flex items-center gap-1.5 rounded-full px-2 py-1 font-mono text-[10px]', tone)}
+      title={tooltip}
+      aria-label={`Session cost ${displayCost} across ${usage.total_calls} calls`}
+    >
+      <span className={cn('h-1.5 w-1.5 rounded-full', dot)} />
+      <span>{displayCost}</span>
+      <span className="text-neutral-500 dark:text-neutral-400">·</span>
+      <span>{usage.total_calls}</span>
+      <span className="uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+        {usage.total_calls === 1 ? 'call' : 'calls'}
+      </span>
+    </div>
   );
 }
 
@@ -1374,7 +1611,7 @@ function Transcript({
   }, [status]);
 
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-neutral-200 bg-gradient-to-b from-white via-neutral-50 to-white shadow-inner dark:border-neutral-800 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+    <div className="relative overflow-hidden rounded-xl">
       <div
         aria-hidden
         className={cn(

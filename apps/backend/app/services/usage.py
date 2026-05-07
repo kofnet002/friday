@@ -11,10 +11,17 @@ from app.db import log_usage
 from app.logging import log
 
 # USD per 1M tokens. Rough approximations; refine as needed.
+# PRICING: dict[str, tuple[float, float]] = {
+#     "gemini-2.5-flash": (0.075, 0.30),
+#     "gemini-2.5-pro": (1.25, 10.0),
+#     "gpt-4o": (2.50, 10.0),
+#     "gpt-4o-mini": (0.15, 0.60),
+# }
+
 PRICING: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash": (0.075, 0.30),
-    "gemini-2.5-pro": (1.25, 10.0),
-    "gpt-5": (2.50, 10.0),
+    "gemini-2.5-pro": (1.25, 5.00),
+    "gpt-4o": (2.50, 10.00),
     "gpt-4o-mini": (0.15, 0.60),
 }
 
@@ -40,13 +47,14 @@ async def record_vision_call(
     model: str,
     output_tokens: int | None = None,
     prompt_text_tokens: int = 0,
+    provider: str = "gemini",
 ) -> None:
     input_tokens = VISION_IMAGE_TOKENS + prompt_text_tokens
     cost = _cost(model, input_tokens, output_tokens)
     await log_usage(
         session_id=session_id,
         kind="vision_extract",
-        provider="gemini",
+        provider=provider,
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -55,6 +63,7 @@ async def record_vision_call(
     log.info(
         "usage.vision",
         session_id=session_id,
+        provider=provider,
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,

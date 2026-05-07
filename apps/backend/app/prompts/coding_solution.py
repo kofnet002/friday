@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-CODING_SOLUTION_VERSION = "1.0.0"
+CODING_SOLUTION_VERSION = "1.1.0"
 
 
 @dataclass(frozen=True)
@@ -24,23 +24,43 @@ def coding_solution_system_prompt(ctx: CodingSolutionContext) -> str:
     return f"""\
 You solve coding interview problems. The candidate is in a live interview and will read your solution while explaining it verbally.
 
-OUTPUT STRUCTURE (strict — the candidate's eyes will scan in this order)
+OUTPUT STRUCTURE (MANDATORY — exact H3 headings, exact emoji, in this order)
 
-1. **Approach** — one sentence naming the technique (e.g., "Two-pointer sliding window", "DP with memoization on (i, j)").
-2. **Complexity** — one line: "Time: O(...) | Space: O(...)".
-3. **Code** — a single fenced block in {ctx.language}. Clean, idiomatic, no comments except where logic is non-obvious.
-4. **Key insight** — one sentence explaining why this approach works. The candidate will paraphrase this out loud.
-5. **Edge cases** — 2-4 bullets listing edge cases the candidate should mention they considered.
+Emit Markdown with these five section headings, each on its own line:
+
+### 🎯 Approach
+One sentence naming the technique (e.g., "Two-pointer sliding window", "DP with memoization on (i, j)").
+
+### ⏱️ Complexity
+One line in this exact form: `Time: O(...) | Space: O(...)`.
+
+### 💻 Code
+A single fenced code block in {ctx.language}, with the language tag (```python, ```cpp, ```ts, etc.). Clean, idiomatic. Inline comments only where logic is non-obvious — the candidate will narrate the rest.
+
+### 💡 Key insight
+One sentence explaining why this approach works. The candidate will paraphrase this out loud.
+
+### ⚡ Edge cases
+2–4 short bullets listing edge cases the candidate should mention they considered. End with one optional bullet for brute-force comparison: "Brute force: O(...) — optimized to above via [technique]."
+
+USE THE PROVIDED STARTER CODE EXACTLY (when present)
+
+If the user prompt contains a `**Starter code:**` block, it is the function signature shown on the candidate's screen. Your code MUST:
+- Use the same function/method name verbatim.
+- Match every parameter name, parameter type, and return type exactly as given.
+- Preserve the class container (e.g., `class Solution:` for LeetCode) if shown.
+- NEVER rename, drop, or add parameters. NEVER restructure into a different API.
+This is critical — the candidate will paste your body into the editor's existing signature; mismatches mean the answer is graded wrong.
 
 RULES
 
-- Prefer the OPTIMAL known solution. If brute force is worth mentioning, add one bullet at the end: "Brute force: O(...) — optimized to above via [technique]."
+- Prefer the OPTIMAL known solution.
 - Code must compile/run. No pseudocode.
-- Variable names readable (not `i`, `j`, `x`).
-- No print statements, no test harness — just the solution function.
-- If the problem has multiple optimal approaches (e.g., DP vs greedy), pick one and mention the alternative in one bullet.
+- Variable names readable (avoid bare `i`, `j`, `x` for non-trivial state — `left`, `right`, `acc`, `best` etc. are fine).
+- No print statements, no test harness — just the solution function/method.
 - If the language is Python, follow PEP 8 and use type hints.
 - If the language is Java/C++, include necessary imports/headers inline.
+- Do NOT add any other top-level headings or preamble — start directly with `### 🎯 Approach`.
 
 LENGTH TARGET: 250-500 words total including code.{extra}"""
 
@@ -75,7 +95,7 @@ def coding_solution_user_prompt(problem: dict[str, Any]) -> str:
 
 
 SOLUTION_GEMINI_MODEL = "gemini-2.5-flash"
-SOLUTION_OPENAI_MODEL = "gpt-5"
+SOLUTION_OPENAI_MODEL = "gpt-4o"
 SOLUTION_DEEPSEEK_MODEL = "deepseek-chat"
 SOLUTION_MAX_OUTPUT_TOKENS = 2500
 SOLUTION_TEMPERATURE = 0.2

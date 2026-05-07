@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://127.0.0.1:6379")
 
     gemini_model: str = Field(default="gemini-2.5-flash")
-    openai_model: str = Field(default="gpt-5")
+    openai_model: str = Field(default="gpt-4o")
     deepseek_model: str = Field(default="deepseek-chat")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
 

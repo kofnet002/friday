@@ -400,6 +400,10 @@ ipcMain.handle('coding:stop', () => {
 });
 ipcMain.handle('coding:force_extract', () => coding.forceExtract());
 ipcMain.handle('coding:isActive', () => coding.isActive());
+ipcMain.handle('coding:set_provider', (_evt, provider) => {
+  coding.setProvider(provider);
+  return { ok: true, provider: coding.provider };
+});
 ipcMain.handle('window:status', () => buildStatusPayload());
 ipcMain.handle('window:toggle_visibility', () => {
   toggleWindowVisibility();

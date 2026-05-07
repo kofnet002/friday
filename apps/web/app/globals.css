@@ -37,6 +37,19 @@ body {
 .session-bar {
   -webkit-app-region: drag;
 }
+
+/* shiki's <pre> ships with its own padding + radius. When it lives inside
+   our IDE-style card we want it edge-to-edge so there's no double-frame. */
+.friday-code-body .shiki {
+  margin: 0;
+  border-radius: 0;
+  background: transparent !important;
+  padding: 0.75rem 1rem;
+}
+.friday-code-body .shiki code {
+  font-size: inherit;
+  line-height: inherit;
+}
 .session-bar button,
 .session-bar [role='button'],
 .session-bar a,
