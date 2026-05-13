@@ -10,9 +10,10 @@
   },
   "scripts": {
     "dev": "wait-on -t 60000 http://127.0.0.1:3333 && cross-env NODE_ENV=development electron .",
-    "build": "pnpm run build:swift && pnpm run build:native:stealth",
+    "build": "pnpm run build:swift && pnpm run build:native:stealth && pnpm run build:icon",
     "build:swift": "swift build -c release --package-path swift",
     "build:native:stealth": "node scripts/build-native-stealth.js",
+    "build:icon": "node scripts/build-icon.js",
     "postinstall": "pnpm run build || true",
     "lint": "echo 'desktop lint not configured yet'",
     "typecheck": "echo 'desktop typecheck not configured yet'"

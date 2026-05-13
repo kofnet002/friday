@@ -12,6 +12,7 @@ const {
   screen,
 } = require('electron');
 const path = require('node:path');
+const fs = require('node:fs');
 
 const { AudioSupervisor } = require('./audio');
 const { CodingCapture } = require('./coding');
@@ -116,12 +117,15 @@ function updateWindowState(patch) {
 }
 
 function makeTrayIcon() {
+  // Owl silhouette — tray icons must be template images (single-color, macOS
+  // recolors to match the menu bar). Body is one filled path with two
+  // eye-shaped subpaths punched out via fill-rule="evenodd"; ear tufts are
+  // separate filled triangles outside the body.
   const svg = `
-    <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
-      <path d="M14.9 4.1c-.6 2.2-1.8 3.8-3.5 4.7l1.3 1.2c.6.6.8 1.3.6 2.1-.1.7-.5 1.3-1.1 1.7-.7.4-1.4.5-2.1.2l-3.1-1.2-2.8 1.5.8-2.9C3.5 10.4 3 9 3 7.4c0-1.8.6-3.2 1.9-4.4C6.2 1.7 7.8 1 9.7 1c2.1 0 3.8 1 5.2 3.1Z" fill="black"/>
-      <path d="M10.2 5.1 16 3.2l-2.2 5.3" fill="black"/>
-      <circle cx="7" cy="6.6" r="0.85" fill="white"/>
-      <path d="M6.3 9.1c1 .6 2 .7 3.1.2" fill="none" stroke="white" stroke-width="1" stroke-linecap="round"/>
+    <svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M5 7 L8 4 L8 10 Z" fill="black"/>
+      <path d="M19 7 L16 4 L16 10 Z" fill="black"/>
+      <path fill-rule="evenodd" d="M3 13 C3 6 21 6 21 13 L21 19 Q12 24 3 19 Z M8 12 m -2 0 a 2 2 0 1 0 4 0 a 2 2 0 1 0 -4 0 M16 12 m -2 0 a 2 2 0 1 0 4 0 a 2 2 0 1 0 -4 0" fill="black"/>
     </svg>
   `.trim();
   const image = nativeImage.createFromDataURL(`data:image/svg+xml;utf8,${encodeURIComponent(svg)}`);
@@ -400,6 +404,10 @@ ipcMain.handle('coding:stop', () => {
 });
 ipcMain.handle('coding:force_extract', () => coding.forceExtract());
 ipcMain.handle('coding:isActive', () => coding.isActive());
+ipcMain.handle('coding:set_provider', (_evt, provider) => {
+  coding.setProvider(provider);
+  return { ok: true, provider: coding.provider };
+});
 ipcMain.handle('window:status', () => buildStatusPayload());
 ipcMain.handle('window:toggle_visibility', () => {
   toggleWindowVisibility();
@@ -454,6 +462,20 @@ app.whenReady().then(async () => {
   ({ default: Store } = await import('electron-store'));
   windowState = createWindowStateStore();
   applyShellPreferences();
+  // Dev dock icon — packaged builds use build/icon.icns via the bundle, but
+  // `electron .` falls back to the default Electron icon unless we set it.
+  // Accessory mode (LSUIElement=true) hides the dock entirely in production,
+  // so this only matters while developing with the dock visible.
+  if (process.platform === 'darwin' && app.dock) {
+    const iconPath = path.join(__dirname, 'build', 'icon.icns');
+    if (fs.existsSync(iconPath)) {
+      try {
+        app.dock.setIcon(iconPath);
+      } catch {
+        // setIcon throws if Electron can't read the .icns — non-fatal in dev.
+      }
+    }
+  }
   await ensurePermissions();
   createWindow();
   createTray();

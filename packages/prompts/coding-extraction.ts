@@ -5,7 +5,7 @@
  * extract the problem into structured JSON for solution generation.
  *
  * Called on significant-change frames when coding mode is active.
- * Target model: gemini-2.5-flash (vision + cheap) OR gpt-5 vision.
+ * Target model: gemini-2.5-flash (vision + cheap) OR gpt-4o vision.
  */
 
 export const CODING_EXTRACTION_VERSION = '1.0.0';

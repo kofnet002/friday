@@ -25,6 +25,10 @@ class ExtractRequest(BaseModel):
     image_base64: str = Field(min_length=16)
     session_id: str = Field(min_length=1)
     force: bool = False
+    # Optional override of the provider used for vision extraction. When
+    # absent the service resolves it from the session's default_provider,
+    # so the user-selected model in the Coding panel reaches the OCR step.
+    provider: str | None = None
 
 
 @router.post("/extract")
@@ -58,7 +62,11 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
             }
 
     try:
-        problem = await extract_problem(request.image_base64, request.session_id)
+        problem = await extract_problem(
+            request.image_base64,
+            request.session_id,
+            provider=request.provider,
+        )
     except Exception as exc:  # noqa: BLE001 - surface the provider error to the client
         log.error("vision.extract_error", session_id=request.session_id, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)[:500]) from exc

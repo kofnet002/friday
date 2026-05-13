@@ -78,6 +78,25 @@ async def get_latest() -> dict[str, Any]:
     return {"session": await latest_session()}
 
 
+@router.get("/{session_id}/usage")
+async def get_session_usage(session_id: str) -> dict[str, Any]:
+    """Aggregate LLM spend for a session — used by the descriptive cost pill
+    in the floating bar. Cheap query (single GROUP BY against usage_log)."""
+    rows = await session_usage_summary(session_id)
+    total_cost = sum((r.get("cost_usd") or 0.0) for r in rows)
+    total_calls = sum(int(r.get("calls") or 0) for r in rows)
+    total_input = sum(int(r.get("input_tokens") or 0) for r in rows)
+    total_output = sum(int(r.get("output_tokens") or 0) for r in rows)
+    return {
+        "session_id": session_id,
+        "rows": rows,
+        "total_cost_usd": total_cost,
+        "total_calls": total_calls,
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+    }
+
+
 @router.get("/{session_id}")
 async def get_session_detail(session_id: str) -> dict[str, Any]:
     row = await get_session(session_id)

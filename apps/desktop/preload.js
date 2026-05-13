@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('friday', {
     stop: () => ipcRenderer.invoke('coding:stop'),
     forceExtract: () => ipcRenderer.invoke('coding:force_extract'),
     isActive: () => ipcRenderer.invoke('coding:isActive'),
+    setProvider: (provider) => ipcRenderer.invoke('coding:set_provider', provider),
     onFrameProcessed: (cb) => {
       codingListeners.frame_processed.add(cb);
       return () => codingListeners.frame_processed.delete(cb);

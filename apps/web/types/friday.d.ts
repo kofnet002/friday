@@ -33,6 +33,9 @@ declare global {
     stop: () => Promise<{ ok: boolean }>;
     forceExtract: () => Promise<{ ok: boolean; error?: string }>;
     isActive: () => Promise<boolean>;
+    setProvider: (
+      provider: 'gemini' | 'openai' | 'deepseek',
+    ) => Promise<{ ok: boolean; provider: string | null }>;
     onFrameProcessed: (cb: (info: FridayCodingFrameInfo) => void) => () => void;
     onExtractionResult: (cb: (payload: FridayCodingExtractionResult) => void) => () => void;
     onError: (cb: (msg: string) => void) => () => void;

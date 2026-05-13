@@ -37,6 +37,35 @@ body {
 .session-bar {
   -webkit-app-region: drag;
 }
+
+/* Markdown text colors driven by CSS variables. The Markdown component
+   uses `style={{ color: 'var(...)' }}` on every rendered tag so colors
+   beat any class-level cascade (Typography plugin, theme overrides, etc).
+   Pinned bright in dark mode so the labels "Question:" / "Answer:" stay
+   crisp on the popover background. */
+:root {
+  --md-fg: 23 23 23; /* neutral-900 */
+  --md-fg-strong: 23 23 23; /* neutral-900 */
+  --md-fg-muted: 82 82 82; /* neutral-600 */
+}
+html.dark {
+  --md-fg: 245 245 245; /* neutral-100 */
+  --md-fg-strong: 255 255 255; /* white */
+  --md-fg-muted: 163 163 163; /* neutral-400 */
+}
+
+/* shiki's <pre> ships with its own padding + radius. When it lives inside
+   our IDE-style card we want it edge-to-edge so there's no double-frame. */
+.friday-code-body .shiki {
+  margin: 0;
+  border-radius: 0;
+  background: transparent !important;
+  padding: 0.75rem 1rem;
+}
+.friday-code-body .shiki code {
+  font-size: inherit;
+  line-height: inherit;
+}
 .session-bar button,
 .session-bar [role='button'],
 .session-bar a,

@@ -124,6 +124,58 @@ export function sessionExportUrl(sessionId: string): string {
   return `${BACKEND_HTTP_URL}/api/sessions/${sessionId}/export`;
 }
 
+export interface SessionUsageRow {
+  kind: string; // 'answer' | 'coding_solution' | 'vision' | 'question_detection' | ...
+  provider: string | null;
+  model: string | null;
+  calls: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+}
+
+export interface SessionUsageSummary {
+  session_id: string;
+  rows: SessionUsageRow[];
+  total_cost_usd: number;
+  total_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+}
+
+/**
+ * Mirror a runtime provider change into the server's session row so
+ * desktop-driven /api/vision/extract calls (which don't otherwise know the
+ * user's current pick) honor it.
+ */
+export async function patchSessionProvider(
+  sessionId: string,
+  provider: 'gemini' | 'openai' | 'deepseek',
+): Promise<boolean> {
+  if (!sessionId) return false;
+  try {
+    const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, default_provider: provider }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchSessionUsage(sessionId: string): Promise<SessionUsageSummary | null> {
+  if (!sessionId) return null;
+  try {
+    const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions/${sessionId}/usage`);
+    if (!res.ok) return null;
+    return (await res.json()) as SessionUsageSummary;
+  } catch {
+    return null;
+  }
+}
+
 export async function uploadResume(
   sessionId: string,
   file: File,

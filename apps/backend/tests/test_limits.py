@@ -62,7 +62,7 @@ async def test_token_budget_blocks_at_limit(isolated_db: Path) -> None:
             session_id="s2",
             kind="coding_solution",
             provider="openai",
-            model="gpt-5",
+            model="gpt-4o",
             input_tokens=400,
             output_tokens=200,
         )

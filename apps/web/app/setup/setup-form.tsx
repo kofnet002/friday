@@ -158,7 +158,7 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
               onChange={(e) => setDefaultProvider(e.target.value as AnswerProvider)}
             >
               <option value="gemini">Gemini 2.5 Pro</option>
-              <option value="openai">GPT-5</option>
+              <option value="openai">GPT-4o</option>
               <option value="deepseek">DeepSeek</option>
             </Select>
           </Labeled>

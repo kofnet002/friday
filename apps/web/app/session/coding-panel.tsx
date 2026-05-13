@@ -1,14 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { AnswerProvider, CodingLanguage, ExtractedProblem } from '@friday/shared-types';
 
-import { Code2, Eye } from 'lucide-react';
+import { Check, Clock, Code2, Copy, Eye, Target } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { friendlyError } from '@/lib/error-messages';
-import { Markdown } from '@/lib/markdown';
+import { Markdown, useHighlightedCode } from '@/lib/markdown';
 import { ALL_CODING_LANGUAGES } from '@/lib/session-context';
 import { cn } from '@/lib/utils';
 
@@ -66,7 +66,9 @@ export function CodingPanel({
   const activeTab = tabs.find((t) => t.fingerprint === activeFingerprint) ?? null;
 
   return (
-    <div className="flex flex-col gap-3 rounded-2xl border border-neutral-200 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/60">
+    // No outer card chrome — the surrounding popover already provides the
+    // glass frame. Adding another border here just nests containers.
+    <div className="flex flex-col gap-4">
       <div className="flex items-center gap-3">
         <span className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">
           Coding Mode
@@ -79,7 +81,7 @@ export function CodingPanel({
           aria-label="model"
         >
           <option value="gemini">Gemini 2.5 Flash</option>
-          <option value="openai">GPT-5</option>
+          <option value="openai">GPT-4o</option>
           <option value="deepseek">DeepSeek</option>
         </Select>
         <Select
@@ -276,25 +278,25 @@ function ActiveProblemView({
   };
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="rounded-lg border border-neutral-200 dark:border-neutral-800">
+    <div className="flex flex-col gap-4">
+      <div>
         <button
           type="button"
           onClick={() => setProblemOpen((v) => !v)}
-          className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.15em] text-neutral-600 dark:text-neutral-400"
+          className="-mx-1 flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-left text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-500 transition-colors hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200"
         >
           <span>
             Problem
             {problem.title ? (
-              <span className="ml-2 normal-case tracking-normal text-neutral-500">
+              <span className="ml-2 normal-case tracking-normal text-neutral-700 dark:text-neutral-300">
                 · {problem.title}
               </span>
             ) : null}
           </span>
-          <span className="text-neutral-400">{problemOpen ? '−' : '+'}</span>
+          <span className="font-mono text-neutral-400">{problemOpen ? '−' : '+'}</span>
         </button>
         {problemOpen ? (
-          <div className="flex flex-col gap-3 border-t border-neutral-200 p-3 text-sm dark:border-neutral-800">
+          <div className="mt-2 flex flex-col gap-3 text-[12px]">
             {problem.problem_statement ? (
               <p className="whitespace-pre-wrap leading-relaxed text-neutral-800 dark:text-neutral-200">
                 {problem.problem_statement}
@@ -374,25 +376,20 @@ function ActiveProblemView({
         </div>
       </div>
 
-      <div
-        className={cn(
-          'rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-950',
-          privacyMode && 'select-none blur-sm',
-        )}
-      >
+      <div className={cn(privacyMode && 'select-none blur-sm')}>
         {status === 'error' ? (
-          <div className="flex items-center justify-between gap-2 text-xs text-red-700 dark:text-red-400">
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-red-400/50 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300">
             <span>{error ?? 'solution failed'}</span>
             <Button type="button" size="sm" variant="outline" onClick={onRegenerate}>
               Retry
             </Button>
           </div>
         ) : solution ? (
-          <Markdown text={solution + (isStreaming ? ' ▍' : '')} />
+          <SolutionView solution={solution} isStreaming={isStreaming} />
         ) : (
-          <p className="text-xs text-neutral-500">
+          <div className="rounded-lg border border-dashed border-neutral-300 bg-neutral-50/60 px-4 py-6 text-center text-xs text-neutral-500 dark:border-neutral-700 dark:bg-neutral-950/40">
             {isStreaming ? 'Generating…' : 'No solution yet. Click Regenerate.'}
-          </p>
+          </div>
         )}
       </div>
       {privacyMode ? (
@@ -401,5 +398,240 @@ function ActiveProblemView({
         </div>
       ) : null}
     </div>
+  );
+}
+
+// ─── Solution rendering ────────────────────────────────────────────────────
+//
+// The solution prompt (CODING_SOLUTION_VERSION 1.1+) emits five fixed H3
+// sections in this order: 🎯 Approach, ⏱️ Complexity, 💻 Code, 💡 Key
+// insight, ⚡ Edge cases. Splitting on those headings lets us render each
+// as a styled sub-card with its own icon and tone instead of one wall of
+// prose. During streaming the parser falls back to plain Markdown until at
+// least one heading has been emitted.
+
+interface ParsedSolution {
+  approach: string;
+  complexity: string;
+  codeRaw: string; // entire markdown body, including the fence
+}
+
+// Section names the parser knows. Match is case-insensitive and tolerates a
+// wide range of heading styles emitted across prompt versions:
+//   ### 🎯 Approach
+//   ### Approach
+//   **Approach**
+//   1. **Approach** — content
+//   3. Code:
+// Insight + Edge cases are intentionally omitted — they crowd the panel
+// and the candidate doesn't read them in a live interview anyway.
+const SECTION_NAMES: { key: keyof ParsedSolution; names: string[] }[] = [
+  { key: 'approach', names: ['approach'] },
+  { key: 'complexity', names: ['complexity'] },
+  { key: 'codeRaw', names: ['code'] },
+];
+
+const HEADING_PREFIX =
+  // optional list marker (1. / 1) / -)
+  '(?:[\\t ]*(?:[-*]|\\d+[.)])\\s+)?' +
+  // optional markdown heading marks
+  '(?:#{1,6}\\s*)?' +
+  // optional leading emoji / unicode glyph
+  '(?:[^\\w\\s\\n]+\\s*)?' +
+  // optional bold open
+  '\\*{0,2}\\s*';
+
+const HEADING_SUFFIX =
+  // optional bold close
+  '\\s*\\*{0,2}' +
+  // optional separator (colon or em-dash) — eats up to but not the rest of the line
+  '\\s*[:—\\-]?\\s*';
+
+function buildHeadingRe(name: string): RegExp {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${HEADING_PREFIX}${escaped}${HEADING_SUFFIX}`, 'gim');
+}
+
+function parseSolution(text: string): ParsedSolution | null {
+  const found: { key: keyof ParsedSolution; lineStart: number; bodyStart: number }[] = [];
+  for (const { key, names } of SECTION_NAMES) {
+    let best: { start: number; end: number } | null = null;
+    for (const name of names) {
+      const re = buildHeadingRe(name);
+      const m = re.exec(text);
+      if (m && (best === null || m.index < best.start)) {
+        best = { start: m.index, end: m.index + m[0].length };
+      }
+    }
+    if (best) found.push({ key, lineStart: best.start, bodyStart: best.end });
+  }
+  if (found.length === 0) return null;
+  found.sort((a, b) => a.lineStart - b.lineStart);
+
+  const out: ParsedSolution = {
+    approach: '',
+    complexity: '',
+    codeRaw: '',
+  };
+  for (let i = 0; i < found.length; i++) {
+    const cur = found[i]!;
+    const next = found[i + 1];
+    out[cur.key] = text.slice(cur.bodyStart, next ? next.lineStart : text.length).trim();
+  }
+  return out;
+}
+
+function extractCodeFromFence(raw: string): { language: string; code: string } {
+  // Match the FIRST fenced block — ignore any prose around it. During
+  // streaming the closing fence may not be present yet; tolerate that.
+  const m = raw.match(/```([a-zA-Z+#0-9_-]*)\n([\s\S]*?)(?:```|$)/);
+  if (!m) return { language: '', code: '' };
+  return { language: (m[1] ?? '').trim(), code: (m[2] ?? '').replace(/\n+$/, '') };
+}
+
+function SolutionView({ solution, isStreaming }: { solution: string; isStreaming: boolean }) {
+  const parsed = useMemo(() => parseSolution(solution), [solution]);
+
+  if (!parsed) {
+    return (
+      <div className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
+        <Markdown text={solution + (isStreaming ? ' ▍' : '')} />
+      </div>
+    );
+  }
+
+  const cursor = isStreaming ? ' ▍' : '';
+
+  return (
+    <div className="flex flex-col gap-4">
+      {parsed.approach || parsed.complexity ? (
+        <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+          {parsed.approach ? (
+            <SolutionField icon={<Target className="h-3 w-3" aria-hidden />} label="Approach">
+              {parsed.approach}
+              {isStreaming && !parsed.complexity ? cursor : null}
+            </SolutionField>
+          ) : null}
+
+          {parsed.complexity ? (
+            <SolutionField icon={<Clock className="h-3 w-3" aria-hidden />} label="Complexity" mono>
+              {parsed.complexity}
+              {isStreaming && !parsed.codeRaw ? cursor : null}
+            </SolutionField>
+          ) : null}
+        </div>
+      ) : null}
+
+      {parsed.codeRaw ? <CodeSection raw={parsed.codeRaw} isStreaming={isStreaming} /> : null}
+    </div>
+  );
+}
+
+// Lightweight label + value pair. No background, no border, no card chrome
+// — just a tiny uppercase label above the content. Body text is forced to
+// 12px so it matches the rest of the dense floating-bar UI.
+function SolutionField({
+  icon,
+  label,
+  children,
+  mono,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  children: React.ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-500 dark:text-neutral-400">
+        {icon}
+        {label}
+      </span>
+      <p
+        className={cn(
+          'text-[12px] leading-relaxed text-neutral-900 dark:text-neutral-100',
+          mono && 'font-mono',
+        )}
+      >
+        {children}
+      </p>
+    </div>
+  );
+}
+
+// IDE-style code card. Single frame (no nested gray backgrounds), traffic
+// lights on the left, language pill + copy button on the right, and the
+// shiki-highlighted code rendered straight into the body so its native
+// theme background carries through edge-to-edge.
+function CodeSection({ raw, isStreaming }: { raw: string; isStreaming: boolean }) {
+  const { language, code } = useMemo(() => extractCodeFromFence(raw), [raw]);
+  const html = useHighlightedCode(code, language);
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = async () => {
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* swallow */
+    }
+  };
+
+  return (
+    <section className="friday-code-card overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm ring-1 ring-black/5 dark:border-neutral-800 dark:bg-[#0d1117] dark:ring-white/5">
+      <header className="flex items-center justify-between gap-2 border-b border-neutral-200 px-3.5 py-2 dark:border-neutral-800/80">
+        <div className="flex items-center gap-2">
+          {/* Traffic lights — purely decorative, hint that this is a code editor */}
+          <span className="flex items-center gap-1" aria-hidden>
+            <span className="h-2.5 w-2.5 rounded-full bg-red-400/90" />
+            <span className="h-2.5 w-2.5 rounded-full bg-amber-400/90" />
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+          </span>
+          <span className="ml-1 inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.14em] text-neutral-500 dark:text-neutral-400">
+            <Code2 className="h-3 w-3" aria-hidden />
+            solution.{language || 'txt'}
+          </span>
+          {isStreaming ? (
+            <span className="ml-1 inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-sky-700 dark:text-sky-300">
+              <span className="h-1 w-1 animate-pulse rounded-full bg-sky-500" />
+              streaming
+            </span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-1.5">
+          {language ? (
+            <span className="rounded-md border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-600 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-300">
+              {language}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={onCopy}
+            disabled={!code}
+            aria-label={copied ? 'Copied' : 'Copy code'}
+            title={copied ? 'Copied' : 'Copy code'}
+            className="inline-flex h-6 items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 text-[10px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-200 dark:hover:bg-neutral-800"
+          >
+            {copied ? (
+              <Check className="h-3 w-3 text-emerald-500" aria-hidden />
+            ) : (
+              <Copy className="h-3 w-3" aria-hidden />
+            )}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+      </header>
+      <div className="friday-code-body relative overflow-x-auto text-[12px] leading-relaxed">
+        {html ? (
+          <div dangerouslySetInnerHTML={{ __html: html }} />
+        ) : (
+          <pre className="px-3 py-2 font-mono text-neutral-800 dark:text-neutral-100">
+            <code>{code || ' '}</code>
+          </pre>
+        )}
+      </div>
+    </section>
   );
 }

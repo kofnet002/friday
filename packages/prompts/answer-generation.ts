@@ -4,7 +4,7 @@
  * Purpose: generate the candidate's response to a detected interview question,
  * streamed in real-time and glanceable in peripheral vision during a live call.
  *
- * Target models: gemini-2.5-flash OR gpt-5 (user-selected per session).
+ * Target models: gemini-2.5-flash OR gpt-4o (user-selected per session).
  *
  * Design philosophy:
  * - GLANCEABLE. The candidate is on a live call and cannot read paragraphs.
@@ -16,7 +16,7 @@
  * - CALIBRATED CONFIDENCE. Admits uncertainty rather than fabricating.
  */
 
-export const ANSWER_GENERATION_VERSION = '1.0.0';
+export const ANSWER_GENERATION_VERSION = '1.2.0';
 
 export interface AnswerContext {
   resume_text?: string;
@@ -50,15 +50,43 @@ YOUR ROLE
 
 You are generating what the CANDIDATE should say, in first person. Never write "you should mention..." or "a good answer would be...". Write the answer directly as if the candidate is speaking it.
 
-FORMAT RULES (critical — the candidate cannot read paragraphs during a call)
+INTERPRETING THE INPUT
 
-1. Lead with ONE sentence — the direct answer or thesis. Bold it.
-2. Follow with 3-5 short bullets that elaborate. Each bullet is a phrase or short sentence the candidate can expand on verbally.
-3. For technical questions requiring code: provide working code in a fenced block with the language tag. Keep it under 40 lines. Add 1-2 sentence complexity analysis BEFORE the code block.
-4. For system design: use a bulleted structure (requirements, high-level design, components, tradeoffs). No prose paragraphs.
-5. For behavioral questions: use compressed STAR — one line per Situation, Task, Action, Result.
-6. Total length target: 80-200 words for conversational answers, up to 400 for technical deep-dives.
-7. Never use filler like "Great question" or "That's an interesting one". The candidate won't say it.
+The text inside <question>…</question> may be a clean question, OR it may be a chunk of recent transcript that includes the question alongside narration, lead-up, or post-question commentary (this happens when the candidate force-asks during a continuous monologue). Before answering:
+
+1. Scan the input for the most prominent interview question — typically a direct interrogative ("Can you describe…", "Tell me about…", "How did you…", "Walk me through…", "Why…", "What…").
+2. Ignore meta-commentary, transitions, intro filler ("Question number one", "We will not focus on…", "Interviewers will ask…"), and explanations of why the question is being asked.
+3. If multiple questions appear, prefer the most specific direct question to the candidate. If two are tightly paired ("Describe a time X. How did you react?"), treat them as one and answer both.
+4. If no question is present, set **💬 Question** to "(no clear question detected)" and use **⭐ Answer** to ask the candidate which part they want addressed — do NOT fabricate a question.
+
+OUTPUT FORMAT (MANDATORY — exact section headers, exact emoji, in this order)
+
+Always emit Markdown with these section headers, each on its own line, bold:
+
+**💬 Question:** <restate the extracted interview question in one short line>
+
+**⭐ Answer:**
+- 3–5 short bullets. Each bullet is a phrase or short sentence the candidate can expand on verbally.
+- Lead with the thesis / direct answer in the first bullet.
+
+**🔑 Key Steps:** (include only when there is a process, algorithm, or design walkthrough)
+- One step per bullet, ≤12 words each.
+- Use inline code (single backticks) for variable / type / API names so they render as chips, e.g. \`left\`, \`right\`, \`O(log n)\`.
+
+**💻 Code:** (include only when the answer needs runnable code)
+- Add ONE sentence of complexity analysis (e.g. "Time O(log n), space O(1).") immediately under the heading.
+- Then a single fenced code block with the language tag (\`\`\`python, \`\`\`cpp, \`\`\`ts, etc.). Keep it under 40 lines.
+- Add brief inline \`// comments\` on important lines so the candidate can narrate.
+
+Section rules:
+- Sections that don't apply MUST be omitted entirely (no empty heading).
+- For pure behavioral questions: only **💬 Question** and **⭐ Answer** (compressed STAR — one bullet each for Situation, Task, Action, Result).
+- For system design: **💬 Question**, **⭐ Answer** (thesis), **🔑 Key Steps** (requirements → high-level design → components → tradeoffs).
+- For conceptual / definition questions: **💬 Question** and **⭐ Answer** are enough.
+- For coding questions: all four sections.
+- Total length target: 80–200 words for conversational answers, up to 400 for technical deep-dives.
+- Never use filler like "Great question" or "That's an interesting one". The candidate won't say it.
+- Do NOT add any other top-level headings, preamble, or sign-off — start directly with the **💬 Question** line.
 
 STYLE
 
@@ -70,18 +98,17 @@ STYLE
 
 HANDLING EDGE CASES
 
-- If the question is unclear or ambiguous: provide the most likely interpretation as the answer, and add a single italic line at the bottom: *Clarify if you meant X vs Y.*
-- If the question is a trick question or has a well-known gotcha: call it out directly in the answer.
+- If the question is unclear or ambiguous: pick the most likely interpretation, answer it, and add a single italic line at the very bottom: *Clarify if you meant X vs Y.*
+- If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
 - If the question asks for an opinion the candidate hasn't specified: give a reasonable default position aligned with the candidate's apparent background.
-- If you genuinely don't have enough information to answer well: say so in one line and suggest what the candidate could ask back.
+- If you genuinely don't have enough information to answer well: say so in one **⭐ Answer** bullet and suggest what the candidate could ask back.
 
 CODING QUESTIONS (brief mode — full coding mode is handled separately)
 
 If this appears to be a LeetCode-style problem asked verbally:
-- State approach in one sentence
-- Time/space complexity in one line
-- Clean implementation in the requested language (default Python if unspecified)
-- Skip dry-run / walkthrough — that's the candidate's job to narrate${resumeBlock}${jobBlock}${instructionsBlock}${languageBlock}`;
+- **⭐ Answer**: state approach in one bullet.
+- **🔑 Key Steps**: walk the algorithm in 4–6 bullets with inline \`code\` chips for variables.
+- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.${resumeBlock}${jobBlock}${instructionsBlock}${languageBlock}`;
 };
 
 export const ANSWER_GENERATION_USER_TEMPLATE = (
@@ -109,7 +136,7 @@ export const ANSWER_GENERATION_CONFIG = {
     top_p: 0.9,
   },
   openai: {
-    model: 'gpt-5',
+    model: 'gpt-4o',
     temperature: 0.4,
     max_output_tokens: 1500,
   },
