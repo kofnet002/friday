@@ -840,7 +840,7 @@ export function SessionClient() {
 
   const submitCustom = (q: string) => askAnswer(q);
 
-  // ─── hotkeys: ⌘⇧␣ (force-ask) and ⌘⇧C (toggle coding mode) ────────────────
+  // ─── hotkeys: ⌘⇧␣ (force-ask), ⌘⇧C (coding), ⌘⇧. (panic blur) ─────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.metaKey || !e.shiftKey) return;
@@ -858,6 +858,19 @@ export function SessionClient() {
       if (e.code === 'KeyC' || e.key?.toLowerCase() === 'c') {
         e.preventDefault();
         toggleCodingMode();
+        return;
+      }
+      // Panic blur — when someone walks behind the screen, hit ⌘⇧. to
+      // (a) flip privacyMode on so all rendered text + answers blur, and
+      // (b) close whatever feature popover is open so the bar collapses
+      // to a small floating pill. Press again to release.
+      if (e.code === 'Period' || e.key === '.') {
+        e.preventDefault();
+        setPrivacyMode((v) => {
+          const next = !v;
+          if (next) setActiveFeature(null);
+          return next;
+        });
         return;
       }
     };
