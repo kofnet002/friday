@@ -14,6 +14,27 @@ TranscriptCallback = Callable[[dict[str, Any]], Awaitable[None]]
 ErrorCallback = Callable[[str], Awaitable[None]]
 
 
+def _dominant_speaker(words: list[Any]) -> int | None:
+    """Pick the speaker id of the segment from per-word labels.
+
+    Deepgram with diarize=True returns each word as an object/dict with a
+    `speaker` attribute (integer 0,1,2,…). We pick the one that appears most
+    often in this segment as the segment's speaker. Returns None when the
+    SDK didn't include speaker info (older responses, or diarize disabled)."""
+    if not words:
+        return None
+    tally: dict[int, int] = {}
+    for w in words:
+        sp = getattr(w, "speaker", None) if not isinstance(w, dict) else w.get("speaker")
+        if isinstance(sp, int):
+            tally[sp] = tally.get(sp, 0) + 1
+    if not tally:
+        return None
+    # Tie-break by lower speaker id so a stable speaker numbering survives
+    # ambiguous mixed-speaker words.
+    return min(tally.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+
 class DeepgramSession:
     """Thin wrapper around Deepgram async streaming with reconnection.
 
@@ -58,6 +79,12 @@ class DeepgramSession:
             endpointing=settings.deepgram_endpointing_ms,
             punctuate=True,
             smart_format=True,
+            # Enable speaker diarization so we can attribute each turn to a
+            # speaker id (0, 1, 2, …). Deepgram emits per-word speaker labels
+            # on result.channel.alternatives[0].words. We treat the dominant
+            # speaker of the segment as the speaker for the whole transcript
+            # turn (see speaker extraction in _on_message).
+            diarize=True,
             encoding="linear16",
             sample_rate=settings.deepgram_sample_rate,
             channels=settings.deepgram_channels,
@@ -79,6 +106,7 @@ class DeepgramSession:
                     "is_final": bool(result.is_final),
                     "text": text,
                     "confidence": float(getattr(alt, "confidence", 0.0) or 0.0),
+                    "speaker": _dominant_speaker(getattr(alt, "words", None) or []),
                     "timestamp": time.time(),
                 }
                 await self._on_transcript(payload)

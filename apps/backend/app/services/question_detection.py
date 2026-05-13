@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -9,6 +10,10 @@ from google import genai
 from google.genai import types as genai_types
 
 from app.logging import log
+from app.prompts.follow_up_classification import (
+    FOLLOW_UP_SYSTEM_PROMPT,
+    follow_up_user_prompt,
+)
 from app.prompts.question_detection import (
     QUESTION_DETECTION_SYSTEM_PROMPT,
     question_detection_user_prompt,
@@ -16,7 +21,18 @@ from app.prompts.question_detection import (
 from app.redis_client import recent_transcript_entries
 from app.settings import settings
 
-QuestionCallback = Callable[[str, float], Awaitable[None]]
+# (question, confidence, is_follow_up)
+QuestionCallback = Callable[[str, float, bool], Awaitable[None]]
+
+# How recent the prior question must be for follow-up classification to fire.
+# Interviewers don't usually wait minutes between a question and its
+# follow-up; beyond this window the new question is overwhelmingly a topic
+# shift, and skipping the classifier saves the Flash-Lite call.
+FOLLOW_UP_WINDOW_S = 90.0
+# Confidence threshold for treating a classifier result as a follow-up. Below
+# this we fall back to is_follow_up=False — opening a new thread is the safer
+# default since the user can always merge later.
+FOLLOW_UP_MIN_CONFIDENCE = 0.75
 
 # Trailing tokens that strongly indicate the speaker is mid-thought. If the
 # newest utterance ends with one of these, we skip detection this round and
@@ -105,6 +121,11 @@ class QuestionDetector:
             if settings.gemini_api_key
             else None
         )
+        # Last fired question + when. Used to decide whether to run the
+        # follow-up classifier and to feed it the prior-question context.
+        # Reset on session close (instance lifetime == ws connection).
+        self._last_question: str | None = None
+        self._last_question_at: float = 0.0
 
     def notify_final(self) -> None:
         """A final transcript just arrived; (re)arm the silence timer."""
@@ -171,7 +192,68 @@ class QuestionDetector:
             and extracted
             and confidence >= settings.question_detection_min_confidence
         ):
-            await self._on_question(str(extracted), confidence)
+            extracted_str = str(extracted)
+            is_follow_up = await self._classify_follow_up(extracted_str)
+            await self._on_question(extracted_str, confidence, is_follow_up)
+            self._last_question = extracted_str
+            self._last_question_at = time.time()
+
+    async def _classify_follow_up(self, new_question: str) -> bool:
+        """Decide if `new_question` extends the most recently fired one.
+
+        Returns False (= new thread) when:
+        - There's no recent prior question (first detection in this session,
+          or the prior one is older than FOLLOW_UP_WINDOW_S).
+        - Classifier is unavailable, errors, or returns low confidence.
+        - The prior question and new question are byte-identical (the dedup
+          path in onTranscribeMessage already handles this, but defending
+          here too keeps the contract clean).
+        """
+        prior = self._last_question
+        if not prior:
+            return False
+        age = time.time() - self._last_question_at
+        if age > FOLLOW_UP_WINDOW_S:
+            return False
+        if prior.strip().lower() == new_question.strip().lower():
+            return False
+        if self._client is None:
+            return False
+        try:
+            user = follow_up_user_prompt(prior, "", new_question)
+            response = await self._client.aio.models.generate_content(
+                model=settings.question_detection_model,
+                contents=user,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=FOLLOW_UP_SYSTEM_PROMPT,
+                    temperature=0.1,
+                    max_output_tokens=128,
+                    response_mime_type="application/json",
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("follow_up.error", error=str(exc))
+            return False
+        text = (response.text or "").strip()
+        if not text:
+            return False
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            log.warning("follow_up.bad_json", raw=text[:200])
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        is_follow_up = bool(parsed.get("is_follow_up"))
+        confidence = float(parsed.get("confidence") or 0.0)
+        log.info(
+            "follow_up.result",
+            session_id=self.session_id,
+            is_follow_up=is_follow_up,
+            confidence=confidence,
+            reasoning=parsed.get("reasoning"),
+        )
+        return is_follow_up and confidence >= FOLLOW_UP_MIN_CONFIDENCE
 
     async def _call_gemini(self, utterances: list[str]) -> dict[str, Any]:
         assert self._client is not None

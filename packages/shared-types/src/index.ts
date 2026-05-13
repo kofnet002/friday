@@ -34,12 +34,21 @@ export interface TranscriptEvent {
   confidence: number;
   /** Seconds since epoch when the backend received/forwarded the transcript. */
   timestamp: number;
+  /** Dominant speaker id for this segment, when Deepgram diarization is on.
+   *  null when only one speaker has been heard so far or diarization was
+   *  unavailable for the segment. */
+  speaker?: number | null;
 }
 
 export interface QuestionDetectedEvent {
   type: 'question_detected';
   question: string;
   confidence: number;
+  /** True when the detector + follow-up classifier think this question
+   *  extends the prior thread rather than starting a new one. Frontend
+   *  routes follow-ups through followUp() (append) instead of askAnswer()
+   *  (new thread). Absent on legacy events. */
+  is_follow_up?: boolean;
 }
 
 // ─── /ws/answer ──────────────────────────────────────────────────────────────

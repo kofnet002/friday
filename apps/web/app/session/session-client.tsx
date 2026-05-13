@@ -406,12 +406,23 @@ export function SessionClient() {
       // The backend detector can fire multiple times for the same
       // question while the speaker keeps talking — the recent transcript
       // window still contains the question, the model still sees it as
-      // a question. Skip if it matches the latest entry's question (a
-      // shallow normalized compare) so we don't create stuck duplicates.
+      // a question. Skip if it matches the latest entry's most recent
+      // user turn (a shallow normalized compare) so we don't create
+      // stuck duplicates.
       const norm = msg.question.trim().toLowerCase();
       const last = entriesRef.current[entriesRef.current.length - 1];
-      if (last && last.question.trim().toLowerCase() === norm) return;
-      askAnswer(msg.question, { autoDetected: true });
+      if (last) {
+        const recentUser = [...last.messages].reverse().find((m) => m.role === 'user')?.content;
+        if (recentUser && recentUser.trim().toLowerCase() === norm) return;
+      }
+      // Backend classifier already decided whether this is a follow-up of
+      // the prior thread; route accordingly. Falling back to askAnswer
+      // when the flag is missing keeps legacy events working.
+      if (msg.is_follow_up && entriesRef.current.length > 0) {
+        followUp(msg.question);
+      } else {
+        askAnswer(msg.question, { autoDetected: true });
+      }
       setActiveFeature('listen');
     }
   }, []);
