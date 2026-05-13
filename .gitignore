@@ -4,11 +4,12 @@ node_modules/
 
 # Build output
 dist/
-build/
 out/
 .next/
 .turbo/
 *.tsbuildinfo
+# `build/` is intentionally NOT broadly ignored — apps/desktop/build/ holds
+# versioned icon assets. Per-app build dirs are listed below.
 
 # Python
 __pycache__/
@@ -40,6 +41,12 @@ pnpm-debug.log*
 # Electron
 apps/desktop/dist/
 apps/desktop/app/
+
+# apps/desktop/build/ holds versioned icon.svg + icon.icns. Everything else
+# under it is regenerable: Release/ is Swift output (build:swift),
+# icon.iconset/ is rasterized PNGs (build:icon).
+apps/desktop/build/Release/
+apps/desktop/build/icon.iconset/
 
 # SQLite (local session/context data)
 apps/backend/data/
