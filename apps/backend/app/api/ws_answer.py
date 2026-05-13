@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.db import append_qa, get_session
 from app.logging import log
-from app.prompts.answer_generation import AnswerContext
+from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import recent_transcript_text
 from app.services.answer import Provider, stream_answer
 from app.services.limits import check_token_budget
@@ -20,6 +20,29 @@ router = APIRouter()
 # client doesn't pass one explicitly. Roomier than question-detection's 30s so
 # the answer can ground in surrounding context.
 ANSWER_TRANSCRIPT_WINDOW_S = 60.0
+
+
+_Role = Literal["user", "assistant"]
+
+
+def _extract_role_content(msg: Any) -> tuple[_Role | None, str | None]:
+    if not isinstance(msg, dict):
+        return None, None
+    role = msg.get("role")
+    content = msg.get("content")
+    if role != "user" and role != "assistant":
+        return None, None
+    if not isinstance(content, str):
+        return None, None
+    return role, content
+
+
+def _last_user_index(messages: list[Any]) -> int | None:
+    for i in range(len(messages) - 1, -1, -1):
+        role, _ = _extract_role_content(messages[i])
+        if role == "user":
+            return i
+    return None
 
 
 @router.websocket("/ws/answer")
@@ -39,7 +62,32 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
 
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
-        question = str(request.get("question") or "").strip()
+        thread_id = request.get("thread_id") or None
+
+        # Accept either the new threaded payload (messages: [...]) or the
+        # legacy one-shot {question: "..."} shape. New shape wins when both
+        # are present.
+        raw_messages = request.get("messages")
+        if isinstance(raw_messages, list) and raw_messages:
+            # Split the thread into prior turns + current question. The
+            # current question is the last user turn; everything before it
+            # is history. Trailing assistant turns (in-flight from a prior
+            # cancel) are dropped — we only want completed turns as context.
+            tail_idx = _last_user_index(raw_messages)
+            if tail_idx is None:
+                await send_json({"type": "error", "message": "no user turn in thread"})
+                return
+            question = str(raw_messages[tail_idx].get("content") or "").strip()
+            prior_turns = tuple(
+                PriorTurn(role=role, content=content)
+                for msg in raw_messages[:tail_idx]
+                for role, content in [_extract_role_content(msg)]
+                if role and content
+            )
+        else:
+            question = str(request.get("question") or "").strip()
+            prior_turns = ()
+
         if not question:
             await send_json({"type": "error", "message": "empty question"})
             return
@@ -81,6 +129,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             company=override.get("company") or persisted.get("company"),
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
+            prior_turns=prior_turns,
         )
 
         auto_detected = bool(request.get("auto_detected", False))
@@ -91,7 +140,14 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         else:
             model = settings.openai_model
 
-        await send_json({"type": "started", "question": question, "provider": provider})
+        await send_json(
+            {
+                "type": "started",
+                "question": question,
+                "provider": provider,
+                "thread_id": thread_id,
+            }
+        )
         collected: list[str] = []
         try:
             async for token in stream_answer(provider, question, context):
@@ -116,8 +172,9 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                     provider=provider,
                     model=model,
                     auto_detected=auto_detected,
+                    thread_id=thread_id,
                 )
-                await send_json({"type": "saved", "id": row_id})
+                await send_json({"type": "saved", "id": row_id, "thread_id": thread_id})
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws_answer.save_failed", error=str(exc))
 

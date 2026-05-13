@@ -55,24 +55,58 @@ export interface AnswerSessionContext {
   recent_transcript?: string;
 }
 
-/** Client → server. */
+/** A single turn in an Answer thread. The tail of `messages` is always the
+ *  current user turn the backend should respond to; everything before it is
+ *  rendered as prior conversation in the prompt. */
+export type AnswerRole = 'user' | 'assistant';
+export interface AnswerMessage {
+  role: AnswerRole;
+  content: string;
+}
+
+/** Client → server. The legacy `{type:'question', question}` shape is still
+ *  accepted by the backend (treated as a one-turn thread) so old clients
+ *  keep working during a deploy. New clients should use `messages`. */
 export type AnswerClientMessage =
   | {
       type: 'question';
-      question: string;
+      /** Full thread including the new user turn at the end. */
+      messages?: AnswerMessage[];
+      /** Legacy single-question payload. Used when `messages` is absent. */
+      question?: string;
+      /** Identifier shared across every turn in the same thread. Persisted
+       *  on each qa_history row so the server-side history view can group
+       *  follow-ups back into the conversation that produced them. */
+      thread_id?: string;
       provider: AnswerProvider;
       session_context?: AnswerSessionContext;
+      auto_detected?: boolean;
     }
   | { type: 'cancel' }
   | { type: 'ping' };
 
-/** Server → client. */
+/** Server → client. `started.question` is the latest user turn (for legacy
+ *  rendering); `started.thread_id` echoes the client's thread_id when one is
+ *  provided so the client can correlate `saved` rows. */
 export type AnswerServerMessage =
-  | { type: 'started'; question: string; provider: AnswerProvider }
+  | {
+      type: 'started';
+      question: string;
+      provider: AnswerProvider;
+      thread_id?: string;
+    }
   | { type: 'token'; text: string }
   | { type: 'done' }
   | { type: 'cancelled' }
   | { type: 'pong' }
+  | { type: 'saved'; id: number; thread_id?: string }
+  | {
+      type: 'limit_exceeded';
+      kind: 'tokens' | 'audio';
+      message: string;
+      used: number;
+      limit: number;
+    }
   | { type: 'error'; message: string };
 
 // ─── /setup / context API ────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
-import type { AnswerProvider } from '@friday/shared-types';
+import type { AnswerMessage, AnswerProvider } from '@friday/shared-types';
 
 import {
   Bot,
@@ -10,9 +10,13 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Code2,
   Copy,
+  CornerDownLeft,
   Eraser,
   Loader2,
+  Maximize2,
+  Minimize2,
   MoreHorizontal,
   RotateCcw,
   Send,
@@ -34,6 +38,9 @@ export interface AnswerPanelProps {
   onProviderChange: (p: AnswerProvider) => void;
   question: string | null;
   answer: string;
+  /** Full thread for the current entry, oldest first. Used to render
+   *  multi-turn conversation history above the streaming answer. */
+  messages: AnswerMessage[];
   status: AnswerStatus;
   error: string | null;
   marked: boolean;
@@ -42,6 +49,9 @@ export interface AnswerPanelProps {
   onClear: () => void;
   onReask: () => void;
   onSubmitCustom: (question: string) => void;
+  /** Append a user turn to the current thread and stream the next answer.
+   *  Different from onSubmitCustom which always starts a new thread. */
+  onFollowUp: (question: string) => void;
   connected: boolean;
   privacyMode: boolean;
   /** 1-based position of the displayed entry; 0 when there are no entries. */
@@ -64,6 +74,7 @@ export function AnswerPanel({
   onProviderChange,
   question,
   answer,
+  messages,
   status,
   error,
   marked,
@@ -72,6 +83,7 @@ export function AnswerPanel({
   onClear,
   onReask,
   onSubmitCustom,
+  onFollowUp,
   connected,
   privacyMode,
   entryIndex,
@@ -92,16 +104,47 @@ export function AnswerPanel({
     [],
   );
 
+  const isStreaming = status === 'streaming';
+  const hasAnswer = Boolean(answer);
+  // Follow-up mode kicks in once the current entry has accrued at least one
+  // completed assistant turn — the submit button becomes "Follow up" and
+  // routes through onFollowUp (append to thread) instead of onSubmitCustom
+  // (start a new thread). hasAnswer alone is enough because the streaming
+  // turn's content lives in `answer` from the first token onward.
+  const isFollowUpMode = hasAnswer;
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     const trimmed = customPrompt.trim();
     if (!trimmed) return;
-    onSubmitCustom(trimmed);
+    if (isFollowUpMode) {
+      onFollowUp(trimmed);
+    } else {
+      onSubmitCustom(trimmed);
+    }
     setCustomPrompt('');
   };
 
-  const isStreaming = status === 'streaming';
-  const hasAnswer = Boolean(answer);
+  // Reaction shortcuts — pre-filled follow-up prompts. Kept short so the
+  // model treats them as instructions rather than questions; the system
+  // prompt's existing format rules take care of structure.
+  const reactions: { label: string; icon: ReactNode; prompt: string }[] = [
+    {
+      label: 'Shorter',
+      icon: <Minimize2 className="h-3 w-3" aria-hidden />,
+      prompt: 'Make that shorter and tighter — keep only the most important points.',
+    },
+    {
+      label: 'More detail',
+      icon: <Maximize2 className="h-3 w-3" aria-hidden />,
+      prompt: 'Give me more detail — expand each point with specifics, examples, and tradeoffs.',
+    },
+    {
+      label: 'Code example',
+      icon: <Code2 className="h-3 w-3" aria-hidden />,
+      prompt: 'Show a concrete code example illustrating the answer.',
+    },
+  ];
 
   const copyAnswer = async () => {
     if (!answer) return;
@@ -241,6 +284,7 @@ export function AnswerPanel({
             <AnswerBody
               answer={answer}
               question={question}
+              messages={messages}
               isStreaming={isStreaming}
               marked={marked}
               privacyMode={privacyMode}
@@ -251,6 +295,7 @@ export function AnswerPanel({
         <AnswerBody
           answer={answer}
           question={question}
+          messages={messages}
           isStreaming={isStreaming}
           marked={marked}
           privacyMode={privacyMode}
@@ -263,11 +308,37 @@ export function AnswerPanel({
         </div>
       ) : null}
 
+      {/* Reaction shortcuts — visible once the thread has at least one answer
+          and isn't actively streaming. Each one fires a pre-filled follow-up
+          so the candidate can shape the answer without typing. */}
+      {isFollowUpMode && !isStreaming ? (
+        <div className="-mb-2 flex items-center gap-1.5 text-[11px] text-neutral-500 dark:text-neutral-400">
+          <span className="text-[10px] uppercase tracking-wider opacity-70">React:</span>
+          {reactions.map((r) => (
+            <button
+              key={r.label}
+              type="button"
+              onClick={() => onFollowUp(r.prompt)}
+              disabled={!connected}
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-white/70 px-2 py-0.5 transition-colors hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700',
+                'dark:border-neutral-800 dark:bg-neutral-900/60 dark:hover:border-sky-500/60 dark:hover:bg-sky-950/40 dark:hover:text-sky-300',
+                'disabled:cursor-not-allowed disabled:opacity-50',
+              )}
+              title={r.prompt}
+            >
+              {r.icon}
+              <span>{r.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       <form onSubmit={handleSubmit} className="flex items-center gap-2">
         <Input
           value={customPrompt}
           onChange={(e) => setCustomPrompt(e.target.value)}
-          placeholder="Ask the copilot directly…"
+          placeholder={isFollowUpMode ? 'Follow up…' : 'Ask the copilot directly…'}
           className="flex-1"
           disabled={isStreaming}
         />
@@ -280,9 +351,17 @@ export function AnswerPanel({
             Cancel
           </Button>
         ) : (
-          <Button type="submit" disabled={!customPrompt.trim() || !connected} aria-label="Send">
-            <Send className="mr-1 h-3.5 w-3.5" aria-hidden />
-            Send
+          <Button
+            type="submit"
+            disabled={!customPrompt.trim() || !connected}
+            aria-label={isFollowUpMode ? 'Follow up' : 'Send'}
+          >
+            {isFollowUpMode ? (
+              <CornerDownLeft className="mr-1 h-3.5 w-3.5" aria-hidden />
+            ) : (
+              <Send className="mr-1 h-3.5 w-3.5" aria-hidden />
+            )}
+            {isFollowUpMode ? 'Follow up' : 'Send'}
           </Button>
         )}
 
@@ -372,16 +451,26 @@ export function AnswerPanel({
 function AnswerBody({
   answer,
   question,
+  messages,
   isStreaming,
   marked,
   privacyMode,
 }: {
   answer: string;
   question: string | null;
+  messages: AnswerMessage[];
   isStreaming: boolean;
   marked: boolean;
   privacyMode: boolean;
 }) {
+  // Prior turns to show above the current streaming/finished answer. We
+  // skip:
+  //   - the very first user turn (already implied by the body — the LLM's
+  //     `**💬 Question:**` block restates it)
+  //   - the trailing assistant turn (that's what `answer` renders as)
+  // Anything in between is real conversation history that should be visible.
+  const priorTurns = messages.slice(1, -1);
+
   return (
     <div
       className={cn(
@@ -392,6 +481,14 @@ function AnswerBody({
         privacyMode && 'select-none blur-sm',
       )}
     >
+      {priorTurns.length > 0 ? (
+        <div className="mb-4 flex flex-col gap-3 border-b border-neutral-200/70 pb-3 dark:border-neutral-800/70">
+          {priorTurns.map((turn, i) => (
+            <ThreadTurn key={i} turn={turn} />
+          ))}
+        </div>
+      ) : null}
+
       {answer ? (
         <Markdown text={answer + (isStreaming ? ' ▍' : '')} />
       ) : isStreaming ? (
@@ -427,6 +524,24 @@ function AnswerBody({
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+function ThreadTurn({ turn }: { turn: AnswerMessage }) {
+  if (turn.role === 'user') {
+    return (
+      <div className="flex items-start gap-2">
+        <span className="rounded-md bg-sky-100/70 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">
+          You
+        </span>
+        <p className="flex-1 text-sm text-neutral-700 dark:text-neutral-200">{turn.content}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-lg bg-neutral-100/60 p-2.5 dark:bg-neutral-900/40">
+      <Markdown text={turn.content} />
     </div>
   );
 }

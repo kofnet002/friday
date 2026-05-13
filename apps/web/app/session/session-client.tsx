@@ -26,6 +26,7 @@ import {
   Square,
 } from 'lucide-react';
 import type {
+  AnswerMessage,
   AnswerProvider,
   AnswerServerMessage,
   CodingLanguage,
@@ -73,7 +74,20 @@ type Status = 'idle' | 'starting' | 'recording' | 'paused' | 'error';
 
 interface AnswerEntry {
   id: string;
+  /** Multi-turn thread — first message is always a user turn (the original
+   *  question), and the conversation alternates from there. `question` and
+   *  `answer` are derived caches over this array; everything that needs the
+   *  full thread (follow-ups, persistence) reads `messages` directly. */
+  messages: AnswerMessage[];
+  /** Stable identifier shared by every turn in this thread. Sent on each WS
+   *  payload so the backend can persist follow-ups against the same row
+   *  group in qa_history (idx_qa_thread). */
+  threadId: string;
+  /** First user message, cached for the panel header and history list. */
   question: string;
+  /** Most recent assistant content. Tokens stream into this as they arrive
+   *  AND into messages[messages.length-1].content so the two stay in sync.
+   *  Cached separately so panel re-renders are cheap. */
   answer: string;
   status: AnswerStatus;
   error: string | null;
@@ -327,11 +341,32 @@ export function SessionClient() {
       const id = streamingIdRef.current;
       if (!id) return;
       if (msg.type === 'started') {
-        updateEntry(id, { answer: '', error: null, marked: false, status: 'streaming' });
+        // Reset the pending assistant turn — askAnswer/followUp already
+        // appended an empty {role:'assistant', content:''} placeholder to
+        // messages, so we just clear it here. error/marked reset belongs on
+        // the entry (thread-level) not the turn.
+        updateEntry(id, (e) => ({
+          answer: '',
+          error: null,
+          marked: false,
+          status: 'streaming',
+          messages: e.messages.map((m, i) =>
+            i === e.messages.length - 1 && m.role === 'assistant' ? { ...m, content: '' } : m,
+          ),
+        }));
         return;
       }
       if (msg.type === 'token') {
-        updateEntry(id, (e) => ({ answer: e.answer + msg.text }));
+        updateEntry(id, (e) => {
+          const last = e.messages[e.messages.length - 1];
+          const updated =
+            last && last.role === 'assistant'
+              ? e.messages.map((m, i) =>
+                  i === e.messages.length - 1 ? { ...m, content: m.content + msg.text } : m,
+                )
+              : [...e.messages, { role: 'assistant' as const, content: msg.text }];
+          return { answer: e.answer + msg.text, messages: updated };
+        });
         return;
       }
       if (msg.type === 'done') {
@@ -376,7 +411,7 @@ export function SessionClient() {
       const norm = msg.question.trim().toLowerCase();
       const last = entriesRef.current[entriesRef.current.length - 1];
       if (last && last.question.trim().toLowerCase() === norm) return;
-      askAnswer(msg.question);
+      askAnswer(msg.question, { autoDetected: true });
       setActiveFeature('listen');
     }
   }, []);
@@ -489,29 +524,40 @@ export function SessionClient() {
     }
   };
 
-  const askAnswer = (q: string) => {
+  const cancelInFlight = () => {
+    const ws = answerRef.current;
+    if (!streamingIdRef.current || !ws) return;
+    const oldId = streamingIdRef.current;
+    ws.cancel?.();
+    updateEntry(oldId, { status: 'cancelled' });
+    streamingIdRef.current = null;
+  };
+
+  const newId = () =>
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const askAnswer = (q: string, opts: { autoDetected?: boolean } = {}) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
       return;
     }
-    // If there's already a stream in flight, cancel it before starting a
-    // new one. Otherwise tokens for the new question land on the new
-    // entry but the old entry is stuck at status='streaming' forever
-    // because the WS only routes via streamingIdRef.current (single
-    // pointer). Mark it cancelled so the chevron'd older view is honest.
-    if (streamingIdRef.current) {
-      const oldId = streamingIdRef.current;
-      ws.cancel?.();
-      updateEntry(oldId, { status: 'cancelled' });
-      streamingIdRef.current = null;
-    }
-    const id =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    // Cancel any in-flight stream before starting a new thread — tokens
+    // route by streamingIdRef so otherwise the old entry would hang in
+    // status='streaming' forever.
+    cancelInFlight();
+    const id = newId();
+    const threadId = newId();
+    const messages: AnswerMessage[] = [
+      { role: 'user', content: q },
+      { role: 'assistant', content: '' },
+    ];
     const entry: AnswerEntry = {
       id,
+      messages,
+      threadId,
       question: q,
       answer: '',
       status: 'streaming',
@@ -528,7 +574,59 @@ export function SessionClient() {
       return next;
     });
     streamingIdRef.current = id;
-    ws.send({ type: 'question', question: q, provider: providerRef.current });
+    ws.send({
+      type: 'question',
+      messages: [{ role: 'user', content: q }],
+      thread_id: threadId,
+      provider: providerRef.current,
+      auto_detected: opts.autoDetected,
+    });
+  };
+
+  const followUp = (q: string) => {
+    const ws = answerRef.current;
+    if (!ws || !ws.isOpen()) {
+      setPanelError('copilot WS not connected');
+      return;
+    }
+    const current = entriesRef.current[entryIndex];
+    if (!current) {
+      // No active thread — treat as a fresh ask. Matches what a user
+      // probably means when they hit "More detail" on an empty panel.
+      askAnswer(q);
+      return;
+    }
+    // Stream might still be in flight for THIS entry; cancel it so the
+    // new follow-up replaces the trailing assistant turn cleanly.
+    cancelInFlight();
+    const prior = current.messages.filter(
+      (m, i) =>
+        // Drop the trailing placeholder/in-progress assistant turn if it's
+        // empty (i.e. user fired a follow-up before the previous answer
+        // settled). The completed assistant turns are kept.
+        !(i === current.messages.length - 1 && m.role === 'assistant' && m.content === ''),
+    );
+    const nextMessages: AnswerMessage[] = [
+      ...prior,
+      { role: 'user', content: q },
+      { role: 'assistant', content: '' },
+    ];
+    setPanelError(null);
+    updateEntry(current.id, {
+      messages: nextMessages,
+      answer: '',
+      status: 'streaming',
+      error: null,
+    });
+    streamingIdRef.current = current.id;
+    ws.send({
+      type: 'question',
+      // Send the full thread minus the trailing empty assistant placeholder
+      // so the backend sees user/assistant/user… with the new turn last.
+      messages: nextMessages.slice(0, -1),
+      thread_id: current.threadId,
+      provider: providerRef.current,
+    });
   };
 
   // ─── transcribe lifecycle ──────────────────────────────────────────────────
@@ -951,6 +1049,7 @@ export function SessionClient() {
             onProviderChange={onProviderChange}
             question={currentEntry?.question ?? null}
             answer={currentEntry?.answer ?? ''}
+            messages={currentEntry?.messages ?? []}
             status={currentEntry?.status ?? 'idle'}
             error={currentEntry?.error ?? panelError}
             marked={Boolean(currentEntry?.marked)}
@@ -963,6 +1062,7 @@ export function SessionClient() {
             onPrev={goPrev}
             onNext={goNext}
             onSubmitCustom={submitCustom}
+            onFollowUp={followUp}
             connected={answerConnected}
             privacyMode={privacyMode}
             transcriptSlot={

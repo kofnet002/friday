@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
-ANSWER_GENERATION_VERSION = "1.2.0"
+ANSWER_GENERATION_VERSION = "1.3.0"
+
+Role = Literal["user", "assistant"]
+
+
+@dataclass(frozen=True)
+class PriorTurn:
+    role: Role
+    content: str
 
 
 @dataclass(frozen=True)
@@ -15,6 +24,10 @@ class AnswerContext:
     company: str | None = None
     language: str | None = None
     recent_transcript: str | None = None
+    # Earlier turns in the same thread, oldest first. Excludes the current
+    # user turn (that's `question` in answer_user_prompt). Empty list for a
+    # one-shot question.
+    prior_turns: tuple[PriorTurn, ...] = field(default_factory=tuple)
 
 
 def answer_system_prompt(ctx: AnswerContext) -> str:
@@ -107,13 +120,42 @@ If this appears to be a LeetCode-style problem asked verbally:
 - **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.{resume_block}{job_block}{instructions_block}{language_block}"""
 
 
-def answer_user_prompt(question: str, recent_transcript: str | None = None) -> str:
+def answer_user_prompt(
+    question: str,
+    recent_transcript: str | None = None,
+    prior_turns: tuple[PriorTurn, ...] | None = None,
+) -> str:
     context_block = (
         f"<recent_conversation>\n{recent_transcript.strip()}\n</recent_conversation>\n\n"
         if recent_transcript
         else ""
     )
-    return (
-        f"{context_block}<question>\n{question}\n</question>\n\n"
+    # Prior turns render as a labeled thread the model can refer back to. We
+    # tag the assistant role as "previous_answer" rather than "model" so the
+    # system prompt's "you are generating what the CANDIDATE should say"
+    # framing keeps working: prior assistant content is presented as previous
+    # candidate output to extend / refine, not as another speaker.
+    if prior_turns:
+        lines = ["<thread>"]
+        for turn in prior_turns:
+            tag = "candidate_followup" if turn.role == "user" else "previous_answer"
+            lines.append(f"<{tag}>\n{turn.content.strip()}\n</{tag}>")
+        lines.append("</thread>\n")
+        thread_block = "\n".join(lines) + "\n"
+    else:
+        thread_block = ""
+
+    # When there are prior turns we also nudge the model toward extending the
+    # conversation rather than restarting from the **💬 Question** header.
+    instructions = (
+        "Continue the thread above. The new <question> is a follow-up — "
+        "extend or refine the previous answer rather than restating it from "
+        "scratch. Keep the same section structure when relevant.\n\n"
         "Generate the candidate's response now."
+        if prior_turns
+        else "Generate the candidate's response now."
+    )
+    return (
+        f"{context_block}{thread_block}<question>\n{question}\n</question>\n\n"
+        f"{instructions}"
     )
