@@ -189,17 +189,106 @@ function CodeBlock({ children, className }: { children: string; className?: stri
 
 export function Markdown({ text, className }: { text: string; className?: string }) {
   return (
-    <div
-      className={cn(
-        // prose-sm clamps the body to ~12px in our font-size system; everything
-        // else (headings, lists, code) scales proportionally.
-        'prose prose-sm prose-neutral max-w-none dark:prose-invert prose-headings:mt-4 prose-headings:font-semibold prose-p:my-2 prose-ul:my-2 prose-li:my-0.5 prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.85em] dark:prose-code:bg-neutral-800 prose-pre:bg-transparent prose-pre:p-0',
-        className,
-      )}
-    >
+    // Deliberately NOT using `prose` — every prose selector tied or beat
+    // our overrides on specificity, washing out the answer text. We
+    // instead drive every element's styling through ReactMarkdown's
+    // component map so colors live as inline classNames on the tags
+    // themselves and can't lose. Spacing/font-size is reproduced here
+    // by hand to keep parity with the old prose-sm look.
+    <div className={cn('not-prose text-[12px] leading-relaxed', className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          // Colors come from CSS variables via inline `style` — beats any
+          // class-level cascade including the Typography plugin defaults.
+          // See globals.css for the variable definitions.
+          p: ({ children, ...rest }) => (
+            <p className="my-3" style={{ color: 'rgb(var(--md-fg))' }} {...rest}>
+              {children}
+            </p>
+          ),
+          ul: ({ children, ...rest }) => (
+            <ul
+              className="my-3 ml-5 list-disc space-y-1.5 marker:[color:rgb(var(--md-fg-muted))]"
+              style={{ color: 'rgb(var(--md-fg))' }}
+              {...rest}
+            >
+              {children}
+            </ul>
+          ),
+          ol: ({ children, ...rest }) => (
+            <ol
+              className="my-3 ml-5 list-decimal space-y-1.5 marker:[color:rgb(var(--md-fg-muted))]"
+              style={{ color: 'rgb(var(--md-fg))' }}
+              {...rest}
+            >
+              {children}
+            </ol>
+          ),
+          li: ({ children, ...rest }) => (
+            <li style={{ color: 'rgb(var(--md-fg))' }} {...rest}>
+              {children}
+            </li>
+          ),
+          strong: ({ children, ...rest }) => (
+            <strong
+              className="font-semibold"
+              style={{ color: 'rgb(var(--md-fg-strong))' }}
+              {...rest}
+            >
+              {children}
+            </strong>
+          ),
+          em: ({ children, ...rest }) => (
+            <em className="italic" style={{ color: 'rgb(var(--md-fg))' }} {...rest}>
+              {children}
+            </em>
+          ),
+          h1: ({ children, ...rest }) => (
+            <h1
+              className="mt-5 text-base font-semibold"
+              style={{ color: 'rgb(var(--md-fg-strong))' }}
+              {...rest}
+            >
+              {children}
+            </h1>
+          ),
+          h2: ({ children, ...rest }) => (
+            <h2
+              className="mt-5 text-[13px] font-semibold"
+              style={{ color: 'rgb(var(--md-fg-strong))' }}
+              {...rest}
+            >
+              {children}
+            </h2>
+          ),
+          h3: ({ children, ...rest }) => (
+            <h3
+              className="mt-4 text-[12px] font-semibold uppercase tracking-wide"
+              style={{ color: 'rgb(var(--md-fg-strong))' }}
+              {...rest}
+            >
+              {children}
+            </h3>
+          ),
+          blockquote: ({ children, ...rest }) => (
+            <blockquote
+              className="my-3 border-l-2 border-neutral-300 pl-3 italic dark:border-neutral-700"
+              style={{ color: 'rgb(var(--md-fg-muted))' }}
+              {...rest}
+            >
+              {children}
+            </blockquote>
+          ),
+          a: ({ children, href, ...rest }) => (
+            <a
+              href={href}
+              className="text-sky-700 underline-offset-2 hover:underline dark:text-sky-300"
+              {...rest}
+            >
+              {children}
+            </a>
+          ),
           code({ className: cls, children, ...rest }) {
             const text = String(children ?? '');
             // react-markdown v9: no `inline` prop. A fenced block always has a
@@ -207,7 +296,11 @@ export function Markdown({ text, className }: { text: string; className?: string
             const isBlock = Boolean(cls && /language-/.test(cls));
             if (!isBlock) {
               return (
-                <code className={cls} {...rest}>
+                <code
+                  className="rounded bg-neutral-200/70 px-1 py-0.5 font-mono text-[0.85em] dark:bg-neutral-800"
+                  style={{ color: 'rgb(var(--md-fg-strong))' }}
+                  {...rest}
+                >
                   {text}
                 </code>
               );

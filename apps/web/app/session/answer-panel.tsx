@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import type { AnswerProvider } from '@friday/shared-types';
 
@@ -50,6 +50,13 @@ export interface AnswerPanelProps {
   entryCount: number;
   onPrev: () => void;
   onNext: () => void;
+  /**
+   * When provided, renders alongside the answer body in a 2-column split
+   * (transcript on the left, answer on the right). Used by the Listen
+   * feature to keep the live transcript visible while the candidate reads
+   * the streamed answer.
+   */
+  transcriptSlot?: ReactNode;
 }
 
 export function AnswerPanel({
@@ -71,6 +78,7 @@ export function AnswerPanel({
   entryCount,
   onPrev,
   onNext,
+  transcriptSlot,
 }: AnswerPanelProps) {
   const [customPrompt, setCustomPrompt] = useState('');
   const [copied, setCopied] = useState(false);
@@ -212,51 +220,42 @@ export function AnswerPanel({
           })()
         : null}
 
-      <div
-        className={cn(
-          // Transparent answer body — no nested card chrome. Vertical
-          // padding only; the popover's frame handles the rest.
-          'min-h-[200px] flex-1 overflow-y-auto py-1 transition-opacity',
-          marked && 'opacity-50',
-          privacyMode && 'select-none blur-sm',
-        )}
-      >
-        {answer ? (
-          <Markdown text={answer + (isStreaming ? ' ▍' : '')} />
-        ) : isStreaming ? (
-          <div className="flex items-center gap-2 text-sm text-sky-600 dark:text-sky-400">
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            <span>Generating…</span>
-          </div>
-        ) : question ? (
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">Ready.</p>
-        ) : (
-          <div className="flex h-full flex-col items-start justify-center gap-3 py-2">
-            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">
-              <Sparkles className="h-3.5 w-3.5" aria-hidden />
-              Awaiting a question
+      {/* Body. With transcriptSlot present we run a 2-column split:
+          transcript on the left, answer on the right. Both scroll
+          independently so a long answer doesn't push the transcript off
+          screen and vice-versa. Without transcriptSlot we keep the
+          original single-column layout. */}
+      {transcriptSlot ? (
+        // Always-row layout. The Listen popover defaults to ~50rem so
+        // there's room for both columns; below ~480px the column shrinks
+        // toward the transcript's min-width, which is fine on the very
+        // narrow widths the user can resize down to.
+        <div className="flex min-h-0 flex-1 flex-row gap-4">
+          <div className="relative min-h-0 w-[30%] min-w-[13rem] max-w-[22rem] shrink-0 overflow-hidden rounded-xl border border-neutral-200/70 bg-white/40 dark:border-neutral-800/70 dark:bg-neutral-900/30">
+            <div className="pointer-events-none absolute left-3 top-2 z-10 inline-flex items-center gap-1 rounded-md bg-white/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500 shadow-sm backdrop-blur dark:bg-neutral-900/90 dark:text-neutral-400">
+              Transcript
             </div>
-            <ul className="flex flex-col gap-1.5 text-sm text-neutral-600 dark:text-neutral-300">
-              <li className="flex gap-2">
-                <span className="text-neutral-400">·</span>
-                Auto-fires when an interview question is detected on transcription.
-              </li>
-              <li className="flex gap-2">
-                <span className="text-neutral-400">·</span>
-                Press{' '}
-                <kbd className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 font-mono text-[11px] text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200">
-                  ⌘⇧␣
-                </kbd>{' '}
-                to force-ask from the latest transcript.
-              </li>
-              <li className="flex gap-2">
-                <span className="text-neutral-400">·</span>
-                Or type a custom prompt below and hit Send.
-              </li>
-            </ul>
+            <div className="h-full overflow-hidden">{transcriptSlot}</div>
           </div>
-        )}
-      </div>
+          <div className="flex min-h-0 flex-1 flex-col">
+            <AnswerBody
+              answer={answer}
+              question={question}
+              isStreaming={isStreaming}
+              marked={marked}
+              privacyMode={privacyMode}
+            />
+          </div>
+        </div>
+      ) : (
+        <AnswerBody
+          answer={answer}
+          question={question}
+          isStreaming={isStreaming}
+          marked={marked}
+          privacyMode={privacyMode}
+        />
+      )}
 
       {privacyMode ? (
         <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-300">
@@ -366,6 +365,68 @@ export function AnswerPanel({
           </Popover.Root>
         ) : null}
       </form>
+    </div>
+  );
+}
+
+function AnswerBody({
+  answer,
+  question,
+  isStreaming,
+  marked,
+  privacyMode,
+}: {
+  answer: string;
+  question: string | null;
+  isStreaming: boolean;
+  marked: boolean;
+  privacyMode: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        // Transparent answer body — no nested card chrome. Vertical
+        // padding only; the popover's frame handles the rest.
+        'min-h-[200px] flex-1 overflow-y-auto py-1 transition-opacity',
+        marked && 'opacity-50',
+        privacyMode && 'select-none blur-sm',
+      )}
+    >
+      {answer ? (
+        <Markdown text={answer + (isStreaming ? ' ▍' : '')} />
+      ) : isStreaming ? (
+        <div className="flex items-center gap-2 text-sm text-sky-600 dark:text-sky-400">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+          <span>Generating…</span>
+        </div>
+      ) : question ? (
+        <p className="text-sm text-neutral-500 dark:text-neutral-400">Ready.</p>
+      ) : (
+        <div className="flex h-full flex-col items-start justify-center gap-3 py-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">
+            <Sparkles className="h-3.5 w-3.5" aria-hidden />
+            Awaiting a question
+          </div>
+          <ul className="flex flex-col gap-1.5 text-sm text-neutral-600 dark:text-neutral-300">
+            <li className="flex gap-2">
+              <span className="text-neutral-400">·</span>
+              Auto-fires when an interview question is detected on transcription.
+            </li>
+            <li className="flex gap-2">
+              <span className="text-neutral-400">·</span>
+              Press{' '}
+              <kbd className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 font-mono text-[11px] text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200">
+                ⌘⇧␣
+              </kbd>{' '}
+              to force-ask from the latest transcript.
+            </li>
+            <li className="flex gap-2">
+              <span className="text-neutral-400">·</span>
+              Or type a custom prompt below and hit Send.
+            </li>
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
