@@ -199,11 +199,29 @@ export interface CodingProblemDetectedEvent {
   fingerprint: string;
 }
 
-// /ws/coding-solution protocol
+/** Operating modes for /ws/coding-solution. `solve` is the existing
+ *  problem→solution path. `explain` walks through a code snippet, `debug`
+ *  diagnoses + fixes a snippet given an error message, `tests` generates
+ *  edge-case test inputs for a problem. */
+export type CodingMode = 'solve' | 'explain' | 'debug' | 'tests';
+
+// /ws/coding-solution protocol. The legacy {type:'solve'} payload still
+// works; new modes route via {type:'solve' with mode:'…'} so the WS
+// frame type stays a single 'solve' string the server already handles.
 export type CodingSolutionClientMessage =
   | {
       type: 'solve';
-      problem: ExtractedProblem;
+      /** Defaults to 'solve' when absent — keeps legacy clients working. */
+      mode?: CodingMode;
+      /** Required for solve and tests modes. */
+      problem?: ExtractedProblem;
+      /** Required for explain and debug modes. */
+      code?: string;
+      /** Required for debug mode (the error message / stack trace). */
+      error?: string;
+      /** Optional free-text context for any mode (e.g. file name, function
+       *  the user has selected, what they were trying to do). */
+      hint?: string;
       language: CodingLanguage;
       provider: AnswerProvider;
       extra_instructions?: string;
@@ -212,7 +230,13 @@ export type CodingSolutionClientMessage =
   | { type: 'ping' };
 
 export type CodingSolutionServerMessage =
-  | { type: 'started'; provider: AnswerProvider; language: CodingLanguage; model: string }
+  | {
+      type: 'started';
+      provider: AnswerProvider;
+      language: CodingLanguage;
+      model: string;
+      mode?: CodingMode;
+    }
   | { type: 'token'; text: string }
   | { type: 'done' }
   | { type: 'cancelled' }

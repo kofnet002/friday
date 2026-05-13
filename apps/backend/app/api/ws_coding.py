@@ -9,9 +9,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app import session_bus
 from app.db import record_coding_solution
 from app.logging import log
+from app.prompts.coding_modes import CodingMode
 from app.redis_client import store_solution
 from app.services.coding_extraction import problem_fingerprint
-from app.services.coding_solution import Provider, resolved_model, stream_solution
+from app.services.coding_solution import Provider, resolved_model, stream_coding
 from app.services.limits import check_token_budget
 from app.services.usage import record_solution_call
 
@@ -43,10 +44,25 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
         language = str(request.get("language") or "Python")
+        mode: CodingMode = request.get("mode") or "solve"
         problem = request.get("problem") or {}
+        code = request.get("code")
+        error_text = request.get("error")
+        hint = request.get("hint")
         extra = request.get("extra_instructions")
-        if not problem.get("problem_statement"):
+
+        # Pre-flight required-input validation. The service raises on
+        # missing fields too but we want a clean per-mode error before any
+        # tokens fly. Solve and tests need a problem statement; explain and
+        # debug need a code snippet (and debug additionally needs an error).
+        if mode in ("solve", "tests") and not problem.get("problem_statement"):
             await send_json({"type": "error", "message": "problem.problem_statement required"})
+            return
+        if mode in ("explain", "debug") and not (code and code.strip()):
+            await send_json({"type": "error", "message": "code required"})
+            return
+        if mode == "debug" and not (error_text and error_text.strip()):
+            await send_json({"type": "error", "message": "error required"})
             return
 
         budget = await check_token_budget(session_id)
@@ -64,13 +80,35 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
 
         model = resolved_model(provider)
         await send_json(
-            {"type": "started", "provider": provider, "language": language, "model": model}
+            {
+                "type": "started",
+                "provider": provider,
+                "language": language,
+                "model": model,
+                "mode": mode,
+            }
         )
         collected: list[str] = []
-        input_tokens = len((problem.get("problem_statement") or "")) // 4  # rough proxy
+        # Rough input-token proxy. Use the largest available input source per
+        # mode so the usage estimate isn't wildly off for explain/debug.
+        input_blob = (
+            problem.get("problem_statement")
+            if mode in ("solve", "tests")
+            else (code or "") + ("\n" + error_text if mode == "debug" and error_text else "")
+        ) or ""
+        input_tokens = max(1, len(input_blob) // 4)
 
         try:
-            async for token in stream_solution(provider, problem, language, extra):
+            async for token in stream_coding(
+                provider=provider,
+                mode=mode,
+                problem=problem if mode in ("solve", "tests") else None,
+                code=code,
+                error=error_text,
+                hint=hint,
+                language=language,
+                extra_instructions=extra,
+            ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})
             await send_json({"type": "done"})
@@ -78,12 +116,16 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
             await send_json({"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001
-            log.error("ws_coding.stream_error", error=str(exc))
+            log.error("ws_coding.stream_error", error=str(exc), mode=mode)
             await send_json({"type": "error", "message": str(exc)})
             return
 
         solution_text = "".join(collected).strip()
-        if solution_text and session_id:
+        # Only `solve` mode persists to the coding_solutions table — the
+        # other modes are ephemeral (no fingerprintable problem state, or
+        # transient debug context that becomes stale once the candidate
+        # moves on).
+        if solution_text and session_id and mode == "solve":
             fp = _fingerprint(problem)
             try:
                 await store_solution(session_id, fp, solution_text)

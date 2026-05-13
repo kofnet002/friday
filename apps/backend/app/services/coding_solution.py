@@ -7,6 +7,16 @@ from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
+from app.prompts.coding_modes import (
+    CodingMode,
+    CodingModeContext,
+    debug_system_prompt,
+    debug_user_prompt,
+    explain_system_prompt,
+    explain_user_prompt,
+    tests_system_prompt,
+    tests_user_prompt,
+)
 from app.prompts.coding_solution import (
     CodingSolutionContext,
     SOLUTION_DEEPSEEK_MODEL,
@@ -23,6 +33,43 @@ from app.settings import settings
 Provider = Literal["gemini", "openai", "deepseek"]
 
 
+def _build_prompts_for_mode(
+    mode: CodingMode,
+    *,
+    problem: dict[str, Any] | None,
+    code: str | None,
+    error: str | None,
+    hint: str | None,
+    language: str,
+    extra_instructions: str | None,
+) -> tuple[str, str]:
+    """Pick the system + user prompt pair for a coding mode. Raises on
+    missing required inputs so the caller surfaces a clean error to the
+    client rather than the model hallucinating from empty fields."""
+    if mode == "solve":
+        if not problem or not problem.get("problem_statement"):
+            raise ValueError("solve mode requires problem.problem_statement")
+        ctx = CodingSolutionContext(language=language, extra_instructions=extra_instructions)
+        return coding_solution_system_prompt(ctx), coding_solution_user_prompt(problem)
+
+    mode_ctx = CodingModeContext(language=language, extra_instructions=extra_instructions)
+    if mode == "explain":
+        if not (code and code.strip()):
+            raise ValueError("explain mode requires code")
+        return explain_system_prompt(mode_ctx), explain_user_prompt(code, hint)
+    if mode == "debug":
+        if not (code and code.strip()):
+            raise ValueError("debug mode requires code")
+        if not (error and error.strip()):
+            raise ValueError("debug mode requires error")
+        return debug_system_prompt(mode_ctx), debug_user_prompt(code, error, hint)
+    if mode == "tests":
+        if not problem or not problem.get("problem_statement"):
+            raise ValueError("tests mode requires problem.problem_statement")
+        return tests_system_prompt(mode_ctx), tests_user_prompt(problem)
+    raise ValueError(f"unknown coding mode: {mode!r}")
+
+
 def resolved_model(provider: Provider) -> str:
     if provider == "gemini":
         return SOLUTION_GEMINI_MODEL
@@ -37,16 +84,48 @@ async def stream_solution(
     language: str,
     extra_instructions: str | None = None,
 ) -> AsyncIterator[str]:
-    ctx = CodingSolutionContext(language=language, extra_instructions=extra_instructions)
-    system = coding_solution_system_prompt(ctx)
-    user = coding_solution_user_prompt(problem)
+    # Backwards-compat thin wrapper around stream_coding. Existing callers
+    # that only do problem→solution don't need to know about modes.
+    async for tok in stream_coding(
+        provider=provider,
+        mode="solve",
+        problem=problem,
+        language=language,
+        extra_instructions=extra_instructions,
+    ):
+        yield tok
+
+
+async def stream_coding(
+    *,
+    provider: Provider,
+    mode: CodingMode,
+    language: str,
+    problem: dict[str, Any] | None = None,
+    code: str | None = None,
+    error: str | None = None,
+    hint: str | None = None,
+    extra_instructions: str | None = None,
+) -> AsyncIterator[str]:
+    """Unified streamer for all four coding panel modes (solve/explain/
+    debug/tests). The system+user prompts come from _build_prompts_for_mode;
+    the provider dispatch and retry logic are shared."""
+    system, user = _build_prompts_for_mode(
+        mode,
+        problem=problem,
+        code=code,
+        error=error,
+        hint=hint,
+        language=language,
+        extra_instructions=extra_instructions,
+    )
     if provider == "gemini":
         factory = lambda: _stream_gemini(system, user)  # noqa: E731
     elif provider == "deepseek":
         factory = lambda: _stream_deepseek(system, user)  # noqa: E731
     else:
         factory = lambda: _stream_openai(system, user)  # noqa: E731
-    async for tok in retry_stream(factory, label=f"coding.{provider}"):
+    async for tok in retry_stream(factory, label=f"coding.{mode}.{provider}"):
         yield tok
 
 
