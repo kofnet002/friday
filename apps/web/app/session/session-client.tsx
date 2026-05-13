@@ -11,12 +11,14 @@ import {
   useState,
 } from 'react';
 import {
+  ChevronDown,
+  ChevronUp,
   Download,
   Eraser,
-  GripVertical,
   Keyboard,
   Loader2,
-  Mic,
+  MoreVertical,
+  Move,
   Pause,
   Play,
   ShieldAlert,
@@ -56,7 +58,7 @@ import { cn } from '@/lib/utils';
 import { SetupForm } from '../setup/setup-form';
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
 import { CodingPanel, type CodingProblemTab } from './coding-panel';
-import { FeatureBar, getFeatureWidth, type FeatureKey } from './feature-bar';
+import { FeatureBar, SECONDARY_FEATURES, getFeatureWidth, type FeatureKey } from './feature-bar';
 import {
   ConnectionPill,
   HistoryList,
@@ -136,6 +138,10 @@ export function SessionClient() {
   const [stealthMode, setStealthMode] = useState(false);
   const [shieldOpen, setShieldOpen] = useState(false);
   const [stealthDisableConfirmOpen, setStealthDisableConfirmOpen] = useState(false);
+  // Parakeet-style chrome: ⋮ overflow holds non-hero actions; ^ collapses
+  // the bar to brand+capture for a minimal footprint.
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   const transcribeRef = useRef<TranscribeWs | null>(null);
   const answerRef = useRef<AnswerWs | null>(null);
@@ -150,12 +156,14 @@ export function SessionClient() {
   const codingTabsRef = useRef<CodingProblemTab[]>([]);
   const toastTimerRef = useRef<number | null>(null);
   const shieldRef = useRef<HTMLDivElement>(null);
+  const entriesRef = useRef<AnswerEntry[]>([]);
 
   finalsRef.current = finals;
   providerRef.current = provider;
   codingLanguageRef.current = codingLanguage;
   activeFingerprintRef.current = activeFingerprint;
   codingTabsRef.current = codingTabs;
+  entriesRef.current = entries;
 
   const currentEntry = entryIndex >= 0 && entryIndex < entries.length ? entries[entryIndex] : null;
 
@@ -360,6 +368,14 @@ export function SessionClient() {
       return;
     }
     if (msg.type === 'question_detected') {
+      // The backend detector can fire multiple times for the same
+      // question while the speaker keeps talking — the recent transcript
+      // window still contains the question, the model still sees it as
+      // a question. Skip if it matches the latest entry's question (a
+      // shallow normalized compare) so we don't create stuck duplicates.
+      const norm = msg.question.trim().toLowerCase();
+      const last = entriesRef.current[entriesRef.current.length - 1];
+      if (last && last.question.trim().toLowerCase() === norm) return;
       askAnswer(msg.question);
       setActiveFeature('listen');
     }
@@ -478,6 +494,17 @@ export function SessionClient() {
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
       return;
+    }
+    // If there's already a stream in flight, cancel it before starting a
+    // new one. Otherwise tokens for the new question land on the new
+    // entry but the old entry is stuck at status='streaming' forever
+    // because the WS only routes via streamingIdRef.current (single
+    // pointer). Mark it cancelled so the chevron'd older view is honest.
+    if (streamingIdRef.current) {
+      const oldId = streamingIdRef.current;
+      ws.cancel?.();
+      updateEntry(oldId, { status: 'cancelled' });
+      streamingIdRef.current = null;
     }
     const id =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -919,35 +946,35 @@ export function SessionClient() {
     if (key === 'listen') {
       return (
         <PanelErrorBoundary label="Listen">
-          <div className="flex flex-col gap-3">
-            <Transcript
-              status={status}
-              finals={finals}
-              interim={interim}
-              privacyMode={privacyMode}
-              compact
-            />
-            <AnswerPanel
-              provider={provider}
-              onProviderChange={onProviderChange}
-              question={currentEntry?.question ?? null}
-              answer={currentEntry?.answer ?? ''}
-              status={currentEntry?.status ?? 'idle'}
-              error={currentEntry?.error ?? panelError}
-              marked={Boolean(currentEntry?.marked)}
-              onMarkAnswered={onMarkAnswered}
-              onCancel={cancelAnswer}
-              onClear={clearAnswer}
-              onReask={onReask}
-              entryIndex={entries.length === 0 ? 0 : entryIndex + 1}
-              entryCount={entries.length}
-              onPrev={goPrev}
-              onNext={goNext}
-              onSubmitCustom={submitCustom}
-              connected={answerConnected}
-              privacyMode={privacyMode}
-            />
-          </div>
+          <AnswerPanel
+            provider={provider}
+            onProviderChange={onProviderChange}
+            question={currentEntry?.question ?? null}
+            answer={currentEntry?.answer ?? ''}
+            status={currentEntry?.status ?? 'idle'}
+            error={currentEntry?.error ?? panelError}
+            marked={Boolean(currentEntry?.marked)}
+            onMarkAnswered={onMarkAnswered}
+            onCancel={cancelAnswer}
+            onClear={clearAnswer}
+            onReask={onReask}
+            entryIndex={entries.length === 0 ? 0 : entryIndex + 1}
+            entryCount={entries.length}
+            onPrev={goPrev}
+            onNext={goNext}
+            onSubmitCustom={submitCustom}
+            connected={answerConnected}
+            privacyMode={privacyMode}
+            transcriptSlot={
+              <Transcript
+                status={status}
+                finals={finals}
+                interim={interim}
+                privacyMode={privacyMode}
+                fill
+              />
+            }
+          />
         </PanelErrorBoundary>
       );
     }
@@ -998,88 +1025,166 @@ export function SessionClient() {
 
   return (
     <div className="pointer-events-none mx-auto flex w-fit max-w-full flex-col items-center gap-2 px-3 py-3">
-      {/* Top control bar — brand · status · capture+transcript · other features.
-          The Popover anchor lives on the utility row below so feature
-          popovers open BENEATH that row instead of overlapping it. */}
+      {/* Top control bar — single Parakeet-style opaque pill. The Popover
+          anchor sits on the bar itself so feature panels drop straight
+          beneath it. Secondary chrome (stealth, connection, cost, etc.)
+          lives inside the ⋮ overflow popover to keep this row short. */}
       <Popover.Root
         open={activeFeature !== null}
         onOpenChange={(open) => {
           if (!open) setActiveFeature(null);
         }}
       >
-        <div
-          data-interactive="true"
-          className="session-bar pointer-events-auto flex items-center gap-x-2 rounded-2xl border border-white/40 bg-white/55 px-3 py-2 shadow-[0_12px_36px_rgba(15,23,42,0.12)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_12px_36px_rgba(0,0,0,0.55)]"
-        >
-          {/* Brand */}
-          <span
-            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-semibold text-neutral-800 dark:text-neutral-100"
-            aria-label="Friday"
+        <Popover.Anchor asChild>
+          <div
+            data-interactive="true"
+            className="session-bar pointer-events-auto flex items-center gap-x-2 rounded-2xl bg-white/55 px-3 py-2 backdrop-blur-2xl backdrop-saturate-150 dark:bg-neutral-900/55"
           >
-            <span className="relative flex h-2 w-2">
-              <span
-                className={cn(
-                  'absolute inline-flex h-full w-full rounded-full opacity-75',
-                  isRecording ? 'animate-ping bg-sky-400' : 'bg-transparent',
-                )}
-              />
-              <span
-                className={cn(
-                  'relative inline-flex h-2 w-2 rounded-full',
-                  isRecording
-                    ? 'bg-sky-500'
-                    : isPaused
-                      ? 'bg-amber-500'
-                      : 'bg-neutral-400 dark:bg-neutral-600',
-                )}
-              />
+            {/* Brand cluster: status dot + name + mic-state glyph. */}
+            <span
+              className="flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[13px] font-semibold text-neutral-800 dark:text-neutral-100"
+              aria-label="Friday"
+            >
+              {/* Parakeet-style brand cluster: mascot → wordmark → status dot.
+                  The dot was on the left before; moving it after the wordmark
+                  matches Parakeet's pattern (avatar + name first, small status
+                  indicators trail). */}
+              <FridayMark className="h-5 w-5" />
+              <span>Friday</span>
+              <span className="relative flex h-2 w-2" aria-hidden>
+                <span
+                  className={cn(
+                    'absolute inline-flex h-full w-full rounded-full opacity-75',
+                    isRecording ? 'animate-ping bg-red-400' : 'bg-transparent',
+                  )}
+                />
+                <span
+                  className={cn(
+                    'relative inline-flex h-2 w-2 rounded-full',
+                    isRecording
+                      ? 'bg-red-500'
+                      : isPaused
+                        ? 'bg-amber-500'
+                        : 'bg-neutral-400 dark:bg-neutral-600',
+                  )}
+                />
+              </span>
             </span>
-            Friday
-          </span>
 
-          <ClusterDivider />
+            {/* Hero features collapse away so the minimal bar is just
+                brand + capture + trailing controls. */}
+            {!collapsed ? (
+              <>
+                <ClusterDivider />
+                <FeatureBar
+                  active={activeFeature}
+                  onChange={(next) => {
+                    // AI Help doubles as the start-listening CTA when idle —
+                    // there's no separate Listen button on the bar anymore.
+                    if (next === 'listen' && status === 'idle') {
+                      start();
+                    }
+                    setActiveFeature(next);
+                  }}
+                  badges={{
+                    listen:
+                      entries.some((e) => e.status === 'streaming') ||
+                      (isLive && (finals.length > 0 || Boolean(interim))),
+                    coding: codingTabs.some((t) => t.status === 'streaming'),
+                  }}
+                />
+              </>
+            ) : null}
 
-          {/* Capture cluster — single mic when idle; segmented pill with
-                live timer + pause/resume + stop when active. Encodes status
-                via tint (red = recording, amber = paused), so we no longer
-                need a separate status badge or a standalone timer. */}
-          <CaptureCluster
-            status={status}
-            elapsedDisplay={elapsedDisplay}
-            onStart={start}
-            onPause={pause}
-            onResume={resume}
-            onStop={stop}
-          />
+            {/* Capture cluster — appears only while live (timer + pause + stop)
+                or briefly during the starting handshake. AI Help is the start
+                CTA when idle, so this slot is empty in the resting state. */}
+            {status !== 'idle' ? (
+              <>
+                <ClusterDivider />
+                <CaptureCluster
+                  status={status}
+                  elapsedDisplay={elapsedDisplay}
+                  onPause={pause}
+                  onResume={resume}
+                  onStop={stop}
+                />
+              </>
+            ) : null}
 
-          <ClusterDivider />
+            {/* Trailing trio: ⋮ overflow · ✥ move · ^ collapse */}
+            <span aria-hidden className="mx-0.5 h-5 w-px bg-neutral-300/60 dark:bg-white/10" />
 
-          {/* Feature cluster — all features share one anchored popover */}
-          <FeatureBar
-            active={activeFeature}
-            onChange={setActiveFeature}
-            badges={{
-              listen:
-                entries.some((e) => e.status === 'streaming') ||
-                (isLive && (finals.length > 0 || Boolean(interim))),
-              coding: codingTabs.some((t) => t.status === 'streaming'),
-            }}
-          />
+            <OverflowMenu
+              open={overflowOpen}
+              onOpenChange={setOverflowOpen}
+              desktopStatus={desktopStatus}
+              stealthMode={stealthMode}
+              shieldOpen={shieldOpen}
+              onShieldToggle={() => setShieldOpen((v) => !v)}
+              transcribeStatus={
+                status === 'recording' || status === 'paused'
+                  ? 'live'
+                  : status === 'error'
+                    ? 'error'
+                    : 'idle'
+              }
+              answerConnected={answerConnected}
+              codingConnected={codingConnected}
+              latencyMs={latencyMs}
+              usage={usage}
+              sessionId={sessionId}
+              activeSecondaryFeature={
+                activeFeature && SECONDARY_FEATURES.some((f) => f.key === activeFeature)
+                  ? activeFeature
+                  : null
+              }
+              onSecondaryFeature={(key) => {
+                setActiveFeature(key);
+                setOverflowOpen(false);
+              }}
+              onClearTranscript={() => {
+                clearTranscript();
+                setOverflowOpen(false);
+              }}
+              onShortcuts={() => {
+                setShortcutsOpen(true);
+                setOverflowOpen(false);
+              }}
+              onExport={() => {
+                exportSession();
+                setOverflowOpen(false);
+              }}
+            />
 
-          <ClusterDivider />
+            {/* Drag handle — the entire .session-bar already has
+                -webkit-app-region:drag, so this is purely an affordance.
+                Kept as a non-button span so the drag region applies; matched
+                visually to the overflow/collapse buttons either side of it. */}
+            <span
+              role="presentation"
+              aria-label="Drag to move"
+              title="Drag to move"
+              className="flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 active:cursor-grabbing dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+            >
+              <Move className="h-3.5 w-3.5" aria-hidden />
+            </span>
 
-          {/* Drag handle — empty bar pixels also drag thanks to .session-bar,
-                but this gives the user an obvious target. The span is a non-
-                button element, so the .session-bar drag region applies. */}
-          <span
-            role="presentation"
-            aria-label="Drag to move"
-            title="Drag to move"
-            className="flex h-7 cursor-move items-center justify-center rounded-md px-1 text-neutral-500 hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-200"
-          >
-            <GripVertical className="h-4 w-4" aria-hidden />
-          </span>
-        </div>
+            <button
+              type="button"
+              onClick={() => setCollapsed((v) => !v)}
+              aria-label={collapsed ? 'Expand bar' : 'Collapse bar'}
+              title={collapsed ? 'Expand' : 'Collapse'}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+            >
+              {collapsed ? (
+                <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+              ) : (
+                <ChevronUp className="h-3.5 w-3.5" aria-hidden />
+              )}
+            </button>
+          </div>
+        </Popover.Anchor>
         <Popover.Portal>
           {activeFeature ? (
             <Popover.Content
@@ -1095,11 +1200,7 @@ export function SessionClient() {
               }}
               data-interactive="true"
               className={cn(
-                'pointer-events-auto z-50 resize overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl',
-                // Default height is generous so the user sees a usable
-                // workspace immediately. The resize handle (bottom-right
-                // corner from `resize: both`) lets them grow OR shrink in
-                // either dimension, clamped by min/max.
+                'pointer-events-auto z-50 resize overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl backdrop-saturate-150',
                 'h-[68vh] min-h-[20rem] min-w-[24rem] max-h-[92vh]',
                 'data-[state=open]:animate-in data-[state=closed]:animate-out',
                 'data-[state=open]:fade-in data-[state=closed]:fade-out',
@@ -1114,69 +1215,6 @@ export function SessionClient() {
             </Popover.Content>
           ) : null}
         </Popover.Portal>
-        {/* Utility row — sits centered beneath the main bar AND is the popover
-          anchor, so feature popovers drop down beneath it instead of
-          covering it. */}
-        <Popover.Anchor asChild>
-          <div
-            data-interactive="true"
-            className="pointer-events-auto flex items-center gap-2 rounded-full border border-white/40 bg-white/55 px-3 py-1 text-[11px] shadow-[0_8px_24px_rgba(15,23,42,0.10)] backdrop-blur-2xl backdrop-saturate-150 dark:border-white/10 dark:bg-neutral-900/55 dark:shadow-[0_8px_24px_rgba(0,0,0,0.45)]"
-          >
-            <StealthIndicator
-              ref={shieldRef}
-              desktopStatus={desktopStatus}
-              stealthMode={stealthMode}
-              open={shieldOpen}
-              onToggle={() => setShieldOpen((value) => !value)}
-            />
-            <ConnectionPill
-              transcribe={
-                status === 'recording' || status === 'paused'
-                  ? 'live'
-                  : status === 'error'
-                    ? 'error'
-                    : 'idle'
-              }
-              answer={answerConnected}
-              coding={codingConnected}
-            />
-            <LatencyBadge ms={latencyMs} />
-            <CostPill usage={usage} />
-            {sessionId ? (
-              <span className="rounded-full bg-white/60 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-600 dark:bg-white/5 dark:text-neutral-300">
-                {sessionId.slice(0, 8)}
-              </span>
-            ) : null}
-            <span aria-hidden className="h-3.5 w-px bg-neutral-300/50 dark:bg-white/10" />
-            <button
-              type="button"
-              onClick={clearTranscript}
-              aria-label="clear transcript"
-              title="Clear transcript"
-              className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
-            >
-              <Eraser className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setShortcutsOpen(true)}
-              aria-label="keyboard shortcuts"
-              title="Shortcuts (⌘/)"
-              className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
-            >
-              <Keyboard className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={exportSession}
-              aria-label="export session"
-              title="Export session"
-              className="rounded-md p-1 text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
-            >
-              <Download className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </Popover.Anchor>
       </Popover.Root>
 
       {/* Banners */}
@@ -1238,17 +1276,40 @@ export function SessionClient() {
   );
 }
 
+// FridayMark — the Owl mascot. Pairs with the "Friday" wordmark in the brand
+// cluster, the home hero, the favicon, and the macOS app icon. The /mascots
+// page keeps Owl/Bat/Fox drafts side by side for the record.
+function FridayMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden>
+      <path d="M14 16 Q12 4 22 8 L20 20 Z" fill="#075985" />
+      <path d="M50 16 Q52 4 42 8 L44 20 Z" fill="#075985" />
+      <ellipse cx="32" cy="36" rx="20" ry="22" fill="#0284c7" />
+      <ellipse cx="32" cy="42" rx="11" ry="14" fill="#7dd3fc" />
+      <circle cx="23" cy="28" r="10" fill="#f0f9ff" />
+      <circle cx="41" cy="28" r="10" fill="#f0f9ff" />
+      <circle cx="23" cy="28" r="6" fill="#0c4a6e" />
+      <circle cx="41" cy="28" r="6" fill="#0c4a6e" />
+      <circle cx="23" cy="28" r="3" fill="#1e293b" />
+      <circle cx="41" cy="28" r="3" fill="#1e293b" />
+      <circle cx="24.5" cy="26.5" r="1.2" fill="white" />
+      <circle cx="42.5" cy="26.5" r="1.2" fill="white" />
+      <path d="M29 34 L35 34 L32 40 Z" fill="#f59e0b" />
+      <path d="M14 36 Q10 44 14 50 Q18 46 16 40 Z" fill="#075985" />
+      <path d="M50 36 Q54 44 50 50 Q46 46 48 40 Z" fill="#075985" />
+    </svg>
+  );
+}
+
 function CaptureCluster({
   status,
   elapsedDisplay,
-  onStart,
   onPause,
   onResume,
   onStop,
 }: {
   status: Status;
   elapsedDisplay: string;
-  onStart: () => void;
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
@@ -1259,45 +1320,37 @@ function CaptureCluster({
   const isStarting = status === 'starting';
 
   if (!isLive) {
+    // Idle: nothing here — AI Help is the entry point and starts the session
+    // when clicked. We still surface a small "Starting…" indicator so the user
+    // gets feedback while the WS handshake / Deepgram connection comes up.
+    if (!isStarting) return null;
     return (
-      <button
-        type="button"
-        onClick={onStart}
-        disabled={isStarting}
-        aria-label={isStarting ? 'Starting…' : 'Start listening'}
-        title={isStarting ? 'Starting…' : 'Start listening (⌘⇧Space)'}
+      <span
         className={cn(
-          'group inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors',
-          'border-sky-300/60 bg-sky-500/10 text-sky-700 hover:bg-sky-500/20',
-          'dark:border-sky-500/40 dark:text-sky-300 dark:hover:bg-sky-500/20',
-          'disabled:cursor-not-allowed disabled:opacity-60',
+          'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium',
+          'border-sky-300/60 bg-sky-500/10 text-sky-700 dark:border-sky-500/40 dark:text-sky-300',
         )}
+        aria-label="Starting"
+        title="Starting…"
       >
-        {isStarting ? (
-          <>
-            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-            <span>Starting…</span>
-          </>
-        ) : (
-          <>
-            <Mic className="h-3.5 w-3.5 transition-transform group-hover:scale-110" aria-hidden />
-            <span>Listen</span>
-          </>
-        )}
-      </button>
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+        <span>Starting…</span>
+      </span>
     );
   }
 
-  // Live (recording or paused) — segmented pill with timer + pause/resume + stop.
+  // Live (recording or paused) — segmented pill: timer · pause/resume · stop.
+  // Tint encodes status (red = recording, amber = paused). Pause stays on the
+  // bar so the user can pause without opening the overflow menu.
   const tone = isRecording
     ? {
-        wrap: 'border-red-400/40 bg-red-500/10',
+        wrap: 'border-red-400/40 bg-red-500/10 dark:border-red-500/40',
         text: 'text-red-700 dark:text-red-300',
         dot: 'animate-pulse bg-red-500',
         primaryHover: 'hover:bg-red-500/20',
       }
     : {
-        wrap: 'border-amber-400/40 bg-amber-500/10',
+        wrap: 'border-amber-400/40 bg-amber-500/10 dark:border-amber-500/40',
         text: 'text-amber-700 dark:text-amber-300',
         dot: 'bg-amber-500',
         primaryHover: 'hover:bg-amber-500/20',
@@ -1470,7 +1523,7 @@ function ClusterDivider() {
   return (
     <span
       aria-hidden
-      className="hidden h-5 w-px bg-neutral-200 dark:bg-neutral-800 sm:inline-block"
+      className="hidden h-5 w-px bg-neutral-300/60 dark:bg-white/10 sm:inline-block"
     />
   );
 }
@@ -1558,12 +1611,222 @@ function LatencyBadge({ ms }: { ms: number | null }) {
   );
 }
 
+// Overflow menu — Parakeet's ⋮ trigger. Holds the secondary chrome that
+// used to live on the second utility row: stealth status, connection pills,
+// latency, cost, session id, the non-hero features (Setup, History,
+// Settings), and the trio of session actions (clear, shortcuts, export).
+//
+// Built on a manual relative+absolute container rather than Radix Popover.
+// We used to nest a Popover.Root here inside the feature Popover.Root's
+// Anchor; that combination would silently swallow secondary-feature opens
+// (Setup / History / Settings would not surface their popover when picked
+// from inside the overflow). Plain divs sidestep the issue entirely.
+function OverflowMenu({
+  open,
+  onOpenChange,
+  desktopStatus,
+  stealthMode,
+  shieldOpen,
+  onShieldToggle,
+  transcribeStatus,
+  answerConnected,
+  codingConnected,
+  latencyMs,
+  usage,
+  sessionId,
+  activeSecondaryFeature,
+  onSecondaryFeature,
+  onClearTranscript,
+  onShortcuts,
+  onExport,
+}: {
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  desktopStatus: FridayWindowStatus | null;
+  stealthMode: boolean;
+  shieldOpen: boolean;
+  onShieldToggle: () => void;
+  transcribeStatus: 'idle' | 'live' | 'error';
+  answerConnected: boolean;
+  codingConnected: boolean;
+  latencyMs: number | null;
+  usage: SessionUsageSummary | null;
+  sessionId: string;
+  activeSecondaryFeature: FeatureKey | null;
+  onSecondaryFeature: (key: FeatureKey) => void;
+  onClearTranscript: () => void;
+  onShortcuts: () => void;
+  onExport: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (panelRef.current?.contains(target)) return;
+      if (triggerRef.current?.contains(target)) return;
+      onOpenChange(false);
+    };
+    const escHandler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onOpenChange(false);
+    };
+    window.addEventListener('mousedown', handler);
+    window.addEventListener('keydown', escHandler);
+    return () => {
+      window.removeEventListener('mousedown', handler);
+      window.removeEventListener('keydown', escHandler);
+    };
+  }, [open, onOpenChange]);
+
+  return (
+    <div className="relative">
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-label="More"
+        aria-expanded={open}
+        title="More"
+        onClick={() => onOpenChange(!open)}
+        className={cn(
+          'flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100',
+          open && 'bg-white/60 text-neutral-800 dark:bg-white/10 dark:text-neutral-100',
+        )}
+      >
+        <MoreVertical className="h-4 w-4" aria-hidden />
+      </button>
+      {open ? (
+        <div
+          ref={panelRef}
+          data-interactive="true"
+          className="pointer-events-auto absolute right-0 top-full z-50 mt-2 w-72 rounded-xl bg-white/85 p-3 text-[12px] text-neutral-700 shadow-[0_20px_50px_rgba(15,23,42,0.16)] backdrop-blur-2xl backdrop-saturate-150 dark:bg-neutral-900/85 dark:text-neutral-200 dark:shadow-[0_20px_50px_rgba(0,0,0,0.55)]"
+        >
+          {/* Status section */}
+          <div className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-500">
+            Status
+          </div>
+          <div className="flex flex-col gap-1.5 px-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-neutral-600 dark:text-neutral-400">Stealth</span>
+              <StealthIndicator
+                desktopStatus={desktopStatus}
+                stealthMode={stealthMode}
+                open={shieldOpen}
+                onToggle={onShieldToggle}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-neutral-600 dark:text-neutral-400">Connection</span>
+              <ConnectionPill
+                transcribe={transcribeStatus}
+                answer={answerConnected}
+                coding={codingConnected}
+              />
+            </div>
+            {latencyMs !== null ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-neutral-600 dark:text-neutral-400">Latency</span>
+                <LatencyBadge ms={latencyMs} />
+              </div>
+            ) : null}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-neutral-600 dark:text-neutral-400">Cost</span>
+              <CostPill usage={usage} />
+            </div>
+            {sessionId ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-neutral-600 dark:text-neutral-400">Session</span>
+                <span className="rounded-full bg-black/5 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-600 dark:bg-white/5 dark:text-neutral-300">
+                  {sessionId.slice(0, 8)}
+                </span>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="my-3 h-px bg-neutral-300/60 dark:bg-white/10" />
+
+          {/* Secondary features */}
+          <div className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-500">
+            Open
+          </div>
+          <div className="flex flex-col">
+            {SECONDARY_FEATURES.map((f) => {
+              const Icon = f.icon;
+              const isActive = activeSecondaryFeature === f.key;
+              return (
+                <button
+                  key={f.key}
+                  type="button"
+                  data-feature-trigger
+                  onClick={() => onSecondaryFeature(f.key)}
+                  className={cn(
+                    'flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/10',
+                    isActive && 'bg-black/5 text-neutral-900 dark:bg-white/10 dark:text-white',
+                  )}
+                >
+                  <Icon
+                    className="h-3.5 w-3.5 text-neutral-500 dark:text-neutral-400"
+                    aria-hidden
+                  />
+                  <span>{f.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="my-3 h-px bg-neutral-300/60 dark:bg-white/10" />
+
+          {/* Actions */}
+          <div className="flex flex-col">
+            <button
+              type="button"
+              onClick={onClearTranscript}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/10"
+            >
+              <Eraser className="h-3.5 w-3.5 text-neutral-500 dark:text-neutral-400" aria-hidden />
+              <span>Clear transcript</span>
+            </button>
+            <button
+              type="button"
+              onClick={onShortcuts}
+              className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/10"
+            >
+              <span className="flex items-center gap-2">
+                <Keyboard
+                  className="h-3.5 w-3.5 text-neutral-500 dark:text-neutral-400"
+                  aria-hidden
+                />
+                <span>Shortcuts</span>
+              </span>
+              <span className="font-mono text-[10px] text-neutral-500">⌘/</span>
+            </button>
+            <button
+              type="button"
+              onClick={onExport}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/10"
+            >
+              <Download
+                className="h-3.5 w-3.5 text-neutral-500 dark:text-neutral-400"
+                aria-hidden
+              />
+              <span>Export session</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Transcript({
   status,
   finals,
   interim,
   privacyMode,
   compact = false,
+  fill = false,
 }: {
   status: Status;
   finals: string[];
@@ -1571,6 +1834,9 @@ function Transcript({
   privacyMode: boolean;
   /** Slim layout for embedded use inside the Listen panel. */
   compact?: boolean;
+  /** Fills the parent column instead of using a fixed height (used in
+   *  the side-by-side Listen layout where the column controls height). */
+  fill?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
@@ -1611,7 +1877,16 @@ function Transcript({
   }, [status]);
 
   return (
-    <div className="relative overflow-hidden rounded-xl">
+    <div
+      className={cn(
+        'relative overflow-hidden rounded-xl',
+        // In fill mode the outer wrapper must take the full height of its
+        // parent column — otherwise the inner scroll div's `h-full` resolves
+        // to the wrapper's intrinsic (content) height and nothing scrolls,
+        // so newly-arriving transcript lines stack off the bottom edge.
+        fill && 'flex h-full flex-col',
+      )}
+    >
       <div
         aria-hidden
         className={cn(
@@ -1624,13 +1899,19 @@ function Transcript({
         onScroll={onScroll}
         className={cn(
           'relative z-10 overflow-y-auto scroll-smooth',
-          compact ? 'h-[22vh] px-5 py-4' : 'h-[60vh] px-8 py-8',
+          fill
+            ? 'min-h-0 flex-1 px-4 pb-4 pt-8'
+            : compact
+              ? 'h-[22vh] px-5 py-4'
+              : 'h-[60vh] px-8 py-8',
         )}
       >
         <div
           className={cn(
             'mx-auto flex flex-col gap-4 tracking-normal',
-            compact ? 'max-w-[64ch] text-sm leading-snug' : 'max-w-[60ch] text-lg leading-relaxed',
+            compact || fill
+              ? 'max-w-[64ch] text-sm leading-snug'
+              : 'max-w-[60ch] text-lg leading-relaxed',
           )}
         >
           {empty ? (
@@ -1698,7 +1979,6 @@ function Transcript({
               clipRule="evenodd"
             />
           </svg>
-          Jump to latest
         </button>
       ) : null}
     </div>
