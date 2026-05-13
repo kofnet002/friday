@@ -148,9 +148,36 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 "thread_id": thread_id,
             }
         )
+        # Track the effective provider — we report cost / usage against
+        # whichever one actually produced tokens, not the user's original
+        # selection. Mutated by the on_fallback hook below.
+        effective_provider: Provider = provider
+        effective_model = model
+
+        async def _on_fallback(prev: Provider, nxt: Provider, reason: str) -> None:
+            nonlocal effective_provider, effective_model
+            effective_provider = nxt
+            if nxt == "gemini":
+                effective_model = settings.gemini_model
+            elif nxt == "deepseek":
+                effective_model = settings.deepseek_model
+            else:
+                effective_model = settings.openai_model
+            await send_json(
+                {
+                    "type": "provider_changed",
+                    "from": prev,
+                    "to": nxt,
+                    "reason": reason,
+                }
+            )
+            log.info("answer.fallback", session_id=session_id, prev=prev, next=nxt)
+
         collected: list[str] = []
         try:
-            async for token in stream_answer(provider, question, context):
+            async for token in stream_answer(
+                provider, question, context, on_fallback=_on_fallback
+            ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})
             await send_json({"type": "done"})
@@ -169,8 +196,8 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                     session_id=session_id,
                     question=question,
                     answer=answer_text,
-                    provider=provider,
-                    model=model,
+                    provider=effective_provider,
+                    model=effective_model,
                     auto_detected=auto_detected,
                     thread_id=thread_id,
                 )

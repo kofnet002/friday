@@ -88,6 +88,25 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 "mode": mode,
             }
         )
+        # Track the effective provider/model so we credit usage + persist
+        # solve-mode rows against whichever provider actually delivered.
+        effective_provider: Provider = provider
+        effective_model = model
+
+        async def _on_fallback(prev: Provider, nxt: Provider, reason: str) -> None:
+            nonlocal effective_provider, effective_model
+            effective_provider = nxt
+            effective_model = resolved_model(nxt)
+            await send_json(
+                {
+                    "type": "provider_changed",
+                    "from": prev,
+                    "to": nxt,
+                    "reason": reason,
+                }
+            )
+            log.info("ws_coding.fallback", session_id=session_id, prev=prev, next=nxt, mode=mode)
+
         collected: list[str] = []
         # Rough input-token proxy. Use the largest available input source per
         # mode so the usage estimate isn't wildly off for explain/debug.
@@ -108,6 +127,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 hint=hint,
                 language=language,
                 extra_instructions=extra,
+                on_fallback=_on_fallback,
             ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})
@@ -137,8 +157,8 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                     fingerprint=fp,
                     problem=problem,
                     language=language,
-                    provider=provider,
-                    model=model,
+                    provider=effective_provider,
+                    model=effective_model,
                     solution_text=solution_text,
                 )
                 await send_json({"type": "saved", "id": row_id, "fingerprint": fp})
@@ -156,8 +176,8 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
             try:
                 await record_solution_call(
                     session_id=session_id,
-                    provider=provider,
-                    model=model,
+                    provider=effective_provider,
+                    model=effective_model,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )

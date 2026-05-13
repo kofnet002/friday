@@ -400,9 +400,26 @@ export function SessionClient() {
         updateEntry(id, { status: 'error', error: msg.message });
         streamingIdRef.current = null;
       }
+      if (msg.type === 'provider_changed') {
+        // Backend auto-fell-back to a different provider mid-call (primary
+        // returned 503 or similar). Show a small ephemeral toast so the
+        // user understands why the cost pill / badge shifted. The provider
+        // selector in the panel does NOT change — the next call still
+        // tries the user's choice first.
+        showFallbackToast(`${msg.from} → ${msg.to} · fallback`);
+      }
     },
     [updateEntry],
   );
+
+  const showFallbackToast = (message: string) => {
+    setDesktopToast(message);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setDesktopToast(null);
+      toastTimerRef.current = null;
+    }, 2400);
+  };
 
   // ─── transcribe WS message handling ────────────────────────────────────────
   const onTranscribeMessage = useCallback((msg: WsServerMessage) => {
@@ -461,6 +478,12 @@ export function SessionClient() {
     // backend). Route to tabs.
     if (msg.type === 'saved') {
       updateTab(msg.fingerprint, (t) => ({ ...t, savedId: msg.id }));
+      return;
+    }
+    if (msg.type === 'provider_changed') {
+      // Mirror of the answer-side toast — surfaces a coding-WS fallback
+      // (e.g. Gemini overloaded, switched to OpenAI mid-solve).
+      showFallbackToast(`${msg.from} → ${msg.to} · fallback`);
       return;
     }
 

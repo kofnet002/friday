@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
 
 from google import genai
@@ -27,10 +27,30 @@ from app.prompts.coding_solution import (
     coding_solution_system_prompt,
     coding_solution_user_prompt,
 )
+from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek"]
+
+# Coding shares the same fallback ordering as answer (primary → other two).
+_CODING_FALLBACK_ORDER: dict[Provider, list[Provider]] = {
+    "gemini": ["gemini", "openai", "deepseek"],
+    "openai": ["openai", "gemini", "deepseek"],
+    "deepseek": ["deepseek", "gemini", "openai"],
+}
+
+
+def _coding_provider_chain(primary: Provider) -> list[Provider]:
+    available: set[str] = set()
+    if settings.gemini_api_key:
+        available.add("gemini")
+    if settings.openai_api_key:
+        available.add("openai")
+    if settings.deepseek_api_key:
+        available.add("deepseek")
+    chain = [p for p in _CODING_FALLBACK_ORDER[primary] if p in available]
+    return chain or [primary]
 
 
 def _build_prompts_for_mode(
@@ -106,10 +126,16 @@ async def stream_coding(
     error: str | None = None,
     hint: str | None = None,
     extra_instructions: str | None = None,
+    on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
 ) -> AsyncIterator[str]:
     """Unified streamer for all four coding panel modes (solve/explain/
     debug/tests). The system+user prompts come from _build_prompts_for_mode;
-    the provider dispatch and retry logic are shared."""
+    the provider dispatch and retry logic are shared.
+
+    Falls back to the next provider in the chain when the primary fails
+    before emitting any tokens; on_fallback fires per switch so the WS can
+    notify the client.
+    """
     system, user = _build_prompts_for_mode(
         mode,
         problem=problem,
@@ -119,13 +145,23 @@ async def stream_coding(
         language=language,
         extra_instructions=extra_instructions,
     )
-    if provider == "gemini":
-        factory = lambda: _stream_gemini(system, user)  # noqa: E731
-    elif provider == "deepseek":
-        factory = lambda: _stream_deepseek(system, user)  # noqa: E731
-    else:
-        factory = lambda: _stream_openai(system, user)  # noqa: E731
-    async for tok in retry_stream(factory, label=f"coding.{mode}.{provider}"):
+
+    def make_factory(p: Provider) -> AsyncIterator[str]:
+        if p == "gemini":
+            base = lambda: _stream_gemini(system, user)  # noqa: E731
+        elif p == "deepseek":
+            base = lambda: _stream_deepseek(system, user)  # noqa: E731
+        else:
+            base = lambda: _stream_openai(system, user)  # noqa: E731
+        return retry_stream(base, label=f"coding.{mode}.{p}")
+
+    chain = _coding_provider_chain(provider)
+    async for tok in stream_with_fallback(
+        providers=chain,
+        factory=make_factory,
+        on_fallback=on_fallback,
+        label=f"coding.{mode}",
+    ):
         yield tok
 
 

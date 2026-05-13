@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
 from google import genai
@@ -14,16 +14,46 @@ from app.prompts.answer_generation import (
     answer_system_prompt,
     answer_user_prompt,
 )
+from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek"]
+
+# Default fallback chain. If the user picks gemini and it 503s through all
+# in-provider retries, we try openai next, then deepseek. Different primaries
+# get their own chain — the primary is always tried first.
+_FALLBACK_ORDER: dict[Provider, list[Provider]] = {
+    "gemini": ["gemini", "openai", "deepseek"],
+    "openai": ["openai", "gemini", "deepseek"],
+    "deepseek": ["deepseek", "gemini", "openai"],
+}
+
+
+def _provider_chain(primary: Provider) -> list[Provider]:
+    """Return the ordered list of providers to try for a given primary,
+    skipping any that don't have an API key configured (so we don't waste
+    a retry round on a guaranteed RuntimeError)."""
+    available: set[str] = set()
+    if settings.gemini_api_key:
+        available.add("gemini")
+    if settings.openai_api_key:
+        available.add("openai")
+    if settings.deepseek_api_key:
+        available.add("deepseek")
+    chain = [p for p in _FALLBACK_ORDER[primary] if p in available]
+    # If only the primary is available, the chain has one entry — no
+    # fallback. If even the primary is missing, return [primary] so the
+    # caller hits the existing "API_KEY not set" RuntimeError cleanly.
+    return chain or [primary]
 
 
 async def stream_answer(
     provider: Provider,
     question: str,
     context: AnswerContext,
+    *,
+    on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
 ) -> AsyncIterator[str]:
     """Yield answer tokens for the given question using the selected provider.
 
@@ -34,24 +64,42 @@ async def stream_answer(
     prompt via answer_user_prompt(...); Gemini's `contents` array supports
     multi-turn too, but embedding keeps the prompt template the single source
     of truth for how prior turns are framed (see PriorTurn handling there).
+
+    When `on_fallback` is provided and the primary provider fails before
+    emitting any tokens, the next provider in the chain is tried. The
+    callback fires once per switch so the WS layer can notify the client.
     """
     system = answer_system_prompt(context)
-    if provider == "gemini":
-        # Gemini path: embed the thread inside the user prompt. We don't use
-        # Gemini's native multi-turn contents array here to keep prior_turns
-        # framing centralized in the prompt template.
-        user = answer_user_prompt(question, context.recent_transcript, context.prior_turns)
-        factory = lambda: _stream_gemini(system, user)  # noqa: E731
-    else:
-        # OpenAI / DeepSeek path: pass prior turns as real assistant/user
-        # messages on the wire. Strip <thread> from the user prompt so we
-        # don't duplicate the history.
-        user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
-        if provider == "deepseek":
-            factory = lambda: _stream_deepseek(system, user, context.prior_turns)  # noqa: E731
+    # Build a per-provider factory that handles in-provider transient
+    # retries (`retry_stream`). The outer fallback helper switches providers
+    # only after these retries are exhausted or hit a hard error.
+    def make_factory(p: Provider) -> AsyncIterator[str]:
+        if p == "gemini":
+            # Gemini path: embed the thread inside the user prompt. We don't
+            # use Gemini's native multi-turn contents array here to keep
+            # prior_turns framing centralized in the prompt template.
+            user = answer_user_prompt(
+                question, context.recent_transcript, context.prior_turns
+            )
+            base = lambda: _stream_gemini(system, user)  # noqa: E731
         else:
-            factory = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
-    async for token in retry_stream(factory, label=f"answer.{provider}"):
+            # OpenAI / DeepSeek path: pass prior turns as real assistant/user
+            # messages on the wire. Strip <thread> from the user prompt so
+            # we don't duplicate the history.
+            user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
+            if p == "deepseek":
+                base = lambda: _stream_deepseek(system, user, context.prior_turns)  # noqa: E731
+            else:
+                base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
+        return retry_stream(base, label=f"answer.{p}")
+
+    chain = _provider_chain(provider)
+    async for token in stream_with_fallback(
+        providers=chain,
+        factory=make_factory,
+        on_fallback=on_fallback,
+        label="answer",
+    ):
         yield token
 
 

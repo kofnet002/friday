@@ -116,6 +116,15 @@ export type AnswerServerMessage =
       used: number;
       limit: number;
     }
+  /** Auto-fallback fired before any tokens streamed. The client should
+   *  update its provider badge / cost attribution to `to`. `reason` is the
+   *  trimmed error string from the failing upstream call. */
+  | {
+      type: 'provider_changed';
+      from: AnswerProvider;
+      to: AnswerProvider;
+      reason: string;
+    }
   | { type: 'error'; message: string };
 
 // ─── /setup / context API ────────────────────────────────────────────────────
@@ -243,4 +252,5 @@ export type CodingSolutionServerMessage =
   | { type: 'pong' }
   | { type: 'error'; message: string }
   | { type: 'saved'; id: number; fingerprint: string }
+  | { type: 'provider_changed'; from: AnswerProvider; to: AnswerProvider; reason: string }
   | CodingProblemDetectedEvent;
