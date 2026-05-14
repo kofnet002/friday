@@ -111,15 +111,13 @@ def resolved_model(provider: Provider, *, deep: bool = False) -> str:
     """Return the model name the streamers will actually call. `deep=True`
     selects the reasoning / Pro tier per provider — used for refine calls
     where the failure signals we need more capability than the default
-    Flash / 4o / chat tier. For OpenAI the reasoning model is settings-
-    configurable (default o1-mini); fall back to REFINE_OPENAI_MODEL if
-    the setting is blank."""
+    Flash / 4o / chat tier. OpenAI deep is currently the same gpt-4o
+    (reasoning models require paid-tier access we don't assume); see
+    _stream_openai for the rationale."""
     if provider == "gemini":
         return REFINE_GEMINI_MODEL if deep else SOLUTION_GEMINI_MODEL
     if provider == "deepseek":
         return REFINE_DEEPSEEK_MODEL if deep else SOLUTION_DEEPSEEK_MODEL
-    if deep:
-        return settings.openai_reasoning_model or REFINE_OPENAI_MODEL
     return SOLUTION_OPENAI_MODEL
 
 
@@ -250,39 +248,23 @@ async def _stream_openai(system: str, user: str, *, deep: bool = False) -> Async
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
-    if deep:
-        # Reasoning model path (o1-mini / o3-mini / o1). Different API
-        # surface from gpt-4o:
-        #   - no `temperature` (only 1.0 is supported; passing anything
-        #     else 400s on some models, so we omit it entirely)
-        #   - `max_completion_tokens` instead of `max_tokens`
-        #   - streaming is supported on o1-mini (2024-09+) and the o3
-        #     family, returning a normal token stream on delta.content
-        # If the configured reasoning model isn't available the call will
-        # 404 and stream_with_fallback will rotate to the next provider —
-        # we don't try to silently retry with gpt-4o, because the whole
-        # point of deep mode is the reasoning step.
-        model = settings.openai_reasoning_model or REFINE_OPENAI_MODEL
-        stream = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            stream=True,
-            max_completion_tokens=REFINE_MAX_OUTPUT_TOKENS,
-        )
-    else:
-        stream = await client.chat.completions.create(
-            model=SOLUTION_OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            stream=True,
-            temperature=SOLUTION_TEMPERATURE,
-            max_tokens=SOLUTION_MAX_OUTPUT_TOKENS,
-        )
+    # OpenAI deep refine used to switch to o1-mini / o3-mini for actual
+    # reasoning. Reverted because reasoning models require a paid-tier
+    # OpenAI account and the user didn't have balance. Deep on OpenAI is
+    # now just gpt-4o with a bumped token budget — same model as solve.
+    # This is a real ceiling for OpenAI users on LeetCode Hard; switch to
+    # the Gemini provider (Pro + thinking) when refining hard problems.
+    max_tokens = REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS
+    stream = await client.chat.completions.create(
+        model=SOLUTION_OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        stream=True,
+        temperature=SOLUTION_TEMPERATURE,
+        max_tokens=max_tokens,
+    )
     async for chunk in stream:
         if not chunk.choices:
             continue
