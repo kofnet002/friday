@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4o")
     deepseek_model: str = Field(default="deepseek-chat")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
+    # Reasoning-tier model for OpenAI used only by coding-mode refine
+    # ("Didn't pass?"). GPT-4o without a reasoning trace is genuinely
+    # shaky on LeetCode-Hard; o1-mini actually traces the failing input
+    # before writing the fix. The reasoning models have a different API:
+    # no temperature, max_completion_tokens instead of max_tokens. See
+    # _stream_openai(... deep=True) in services/coding_solution.py.
+    openai_reasoning_model: str = Field(default="o1-mini")
 
     # Deepgram streaming config
     deepgram_model: str = Field(default="nova-3")

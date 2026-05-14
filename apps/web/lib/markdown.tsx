@@ -125,7 +125,7 @@ function CopyButton({ getText }: { getText: () => string }) {
       onClick={onClick}
       aria-label={copied ? 'Copied' : 'Copy code'}
       title={copied ? 'Copied' : 'Copy code'}
-      className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-md border border-neutral-300/60 bg-white/80 text-neutral-600 opacity-0 shadow-sm backdrop-blur transition-opacity hover:text-neutral-900 group-hover:opacity-100 focus-visible:opacity-100 dark:border-neutral-700/60 dark:bg-neutral-900/80 dark:text-neutral-300 dark:hover:text-neutral-50"
+      className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-md border border-neutral-300/60 bg-white/80 text-neutral-600 opacity-80 shadow-sm backdrop-blur transition-opacity hover:opacity-100 hover:text-neutral-900 focus-visible:opacity-100 dark:border-neutral-700/60 dark:bg-neutral-900/80 dark:text-neutral-300 dark:hover:text-neutral-50"
     >
       {copied ? (
         <Check className="h-3 w-3" aria-hidden />

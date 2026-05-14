@@ -447,7 +447,10 @@ function ScratchView({
       {scratch.output || isStreaming ? (
         <div
           className={cn(
-            'rounded-lg border border-neutral-200 bg-white/40 p-3 dark:border-neutral-800 dark:bg-neutral-900/30',
+            // Match SolutionView's outer chrome so the modes feel like
+            // siblings of Solve. Fully opaque card so the always-visible
+            // copy buttons on code blocks have a clean backdrop.
+            'rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950',
             privacyMode && 'select-none blur-sm',
           )}
         >

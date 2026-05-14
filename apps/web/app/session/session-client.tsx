@@ -97,6 +97,11 @@ interface AnswerEntry {
 }
 
 const AUTOSCROLL_THRESHOLD_PX = 48;
+
+// The three non-solve coding modes. Carved out as a type alias because
+// codingScratchByMode keys against this set — solve uses tabs, not the
+// scratch buffer, so it's excluded.
+type ScratchMode = Exclude<CodingMode, 'solve'>;
 // Force-ask (⌘⇧Space) sends the last N finalized transcript chunks to the
 // copilot. The interviewer's question often isn't the *last* thing said —
 // they ask, then keep narrating. Keep this window wide enough that the
@@ -134,12 +139,13 @@ export function SessionClient() {
   } | null>(null);
   const [codingError, setCodingError] = useState<string | null>(null);
   const [codingConnected, setCodingConnected] = useState(false);
-  // Coding panel mode (solve / explain / debug / tests). The non-solve
-  // modes share a single scratch buffer below — switching modes preserves
-  // the input the user typed so they can ping-pong without retyping code.
+  // Coding panel mode (solve / explain / debug / tests). Each non-solve
+  // mode keeps its OWN scratch buffer — switching from Explain to Debug
+  // (or back) preserves both inputs AND output for the mode you left.
+  // Solve mode uses the tab list, not this buffer.
   const [codingMode, setCodingMode] = useState<CodingMode>('solve');
-  const [codingScratch, setCodingScratch] = useState<CodingScratchState>({
-    mode: 'solve',
+  const blankScratch = (m: ScratchMode): CodingScratchState => ({
+    mode: m,
     code: '',
     error: '',
     hint: '',
@@ -147,9 +153,17 @@ export function SessionClient() {
     status: 'idle',
     errorMessage: null,
   });
-  // True while a non-solve coding stream is in flight — the WS handler
-  // routes incoming tokens to codingScratch instead of the active tab.
-  const codingScratchActiveRef = useRef(false);
+  const [codingScratchByMode, setCodingScratchByMode] = useState<
+    Record<ScratchMode, CodingScratchState>
+  >({
+    explain: blankScratch('explain'),
+    debug: blankScratch('debug'),
+    tests: blankScratch('tests'),
+  });
+  // Which mode (if any) is currently streaming. The WS handler reads this
+  // ref to route incoming tokens to the right scratch slice. null = no
+  // scratch stream in flight (tokens go to the solve-mode active tab).
+  const codingScratchStreamingModeRef = useRef<ScratchMode | null>(null);
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
@@ -488,35 +502,42 @@ export function SessionClient() {
     }
 
     // Stream routing: when a non-solve mode is in flight, the entire stream
-    // belongs to the scratch buffer until done/cancelled/error. Solve mode
-    // continues to route by active fingerprint.
-    if (codingScratchActiveRef.current) {
-      if (msg.type === 'started') {
-        setCodingScratch((s) => ({
-          ...s,
-          output: '',
-          status: 'streaming',
-          errorMessage: null,
+    // belongs to that mode's scratch slice until done/cancelled/error.
+    // Solve mode continues to route by active fingerprint.
+    const streamingMode = codingScratchStreamingModeRef.current;
+    if (streamingMode) {
+      const patchScratch = (patch: Partial<CodingScratchState>) =>
+        setCodingScratchByMode((prev) => ({
+          ...prev,
+          [streamingMode]: { ...prev[streamingMode], ...patch },
         }));
+      if (msg.type === 'started') {
+        patchScratch({ output: '', status: 'streaming', errorMessage: null });
         return;
       }
       if (msg.type === 'token') {
-        setCodingScratch((s) => ({ ...s, output: s.output + msg.text }));
+        setCodingScratchByMode((prev) => ({
+          ...prev,
+          [streamingMode]: {
+            ...prev[streamingMode],
+            output: prev[streamingMode].output + msg.text,
+          },
+        }));
         return;
       }
       if (msg.type === 'done') {
-        setCodingScratch((s) => ({ ...s, status: 'done' }));
-        codingScratchActiveRef.current = false;
+        patchScratch({ status: 'done' });
+        codingScratchStreamingModeRef.current = null;
         return;
       }
       if (msg.type === 'cancelled') {
-        setCodingScratch((s) => ({ ...s, status: 'cancelled' }));
-        codingScratchActiveRef.current = false;
+        patchScratch({ status: 'cancelled' });
+        codingScratchStreamingModeRef.current = null;
         return;
       }
       if (msg.type === 'error') {
-        setCodingScratch((s) => ({ ...s, status: 'error', errorMessage: msg.message }));
-        codingScratchActiveRef.current = false;
+        patchScratch({ status: 'error', errorMessage: msg.message });
+        codingScratchStreamingModeRef.current = null;
         return;
       }
       return;
@@ -1008,46 +1029,44 @@ export function SessionClient() {
 
   // Non-solve mode runner. Sends a {type:'solve', mode:'explain' | 'debug' |
   // 'tests', …} payload over the coding WS; the backend dispatches to the
-  // correct prompt. We set codingScratchActiveRef so the WS handler routes
-  // tokens to codingScratch instead of the active tab.
+  // correct prompt. Sets codingScratchStreamingModeRef so the WS handler
+  // routes tokens to the scratch slice belonging to THIS mode (not the
+  // active tab, not whichever mode is currently visible if the user has
+  // already switched away).
   const runCodingScratch = () => {
     if (codingMode === 'solve') return;
+    const scratchMode = codingMode satisfies ScratchMode;
+    const patchSlice = (patch: Partial<CodingScratchState>) =>
+      setCodingScratchByMode((prev) => ({
+        ...prev,
+        [scratchMode]: { ...prev[scratchMode], ...patch },
+      }));
     const ws = codingWsRef.current;
     if (!ws || !ws.isOpen()) {
-      setCodingScratch((s) => ({
-        ...s,
-        status: 'error',
-        errorMessage: 'coding WS not connected',
-      }));
+      patchSlice({ status: 'error', errorMessage: 'coding WS not connected' });
       return;
     }
     // For tests mode the problem comes from the currently-active solve tab.
     const activeTab = codingTabsRef.current.find(
       (t) => t.fingerprint === activeFingerprintRef.current,
     );
-    if (codingMode === 'tests' && !activeTab) {
-      setCodingScratch((s) => ({
-        ...s,
+    if (scratchMode === 'tests' && !activeTab) {
+      patchSlice({
         status: 'error',
         errorMessage: 'tests mode needs a detected problem — switch to Solve first.',
-      }));
+      });
       return;
     }
-    setCodingScratch((s) => ({
-      ...s,
-      mode: codingMode,
-      output: '',
-      status: 'streaming',
-      errorMessage: null,
-    }));
-    codingScratchActiveRef.current = true;
+    const slice = codingScratchByMode[scratchMode];
+    patchSlice({ output: '', status: 'streaming', errorMessage: null });
+    codingScratchStreamingModeRef.current = scratchMode;
     ws.send({
       type: 'solve',
-      mode: codingMode,
-      problem: codingMode === 'tests' && activeTab ? activeTab.problem : undefined,
-      code: codingMode === 'explain' || codingMode === 'debug' ? codingScratch.code : undefined,
-      error: codingMode === 'debug' ? codingScratch.error : undefined,
-      hint: codingScratch.hint || undefined,
+      mode: scratchMode,
+      problem: scratchMode === 'tests' && activeTab ? activeTab.problem : undefined,
+      code: scratchMode === 'explain' || scratchMode === 'debug' ? slice.code : undefined,
+      error: scratchMode === 'debug' ? slice.error : undefined,
+      hint: slice.hint || undefined,
       language: codingLanguageRef.current,
       provider: providerRef.current,
     });
@@ -1058,19 +1077,24 @@ export function SessionClient() {
   };
 
   const updateCodingScratch = (patch: Partial<CodingScratchState>) => {
-    setCodingScratch((s) => ({ ...s, ...patch }));
+    if (codingMode === 'solve') return;
+    const m = codingMode satisfies ScratchMode;
+    setCodingScratchByMode((prev) => ({
+      ...prev,
+      [m]: { ...prev[m], ...patch },
+    }));
   };
 
   const onCodingModeChange = (next: CodingMode) => {
-    // Switching modes while a scratch stream is in flight: cancel it so
-    // tokens don't keep landing in the wrong slot. Mode change should be
-    // a clean break — no ambiguous half-streamed content.
-    if (codingScratchActiveRef.current) {
+    // Switching modes only cancels the in-flight stream — it does NOT
+    // clear the other modes' scratch state. That's the whole point: the
+    // user can flip Explain → Debug → Explain and find their prior output
+    // intact on each side.
+    if (codingScratchStreamingModeRef.current) {
       codingWsRef.current?.cancel();
-      codingScratchActiveRef.current = false;
+      codingScratchStreamingModeRef.current = null;
     }
     setCodingMode(next);
-    setCodingScratch((s) => ({ ...s, mode: next, output: '', status: 'idle', errorMessage: null }));
   };
 
   const refreshHistory = useCallback(async () => {
@@ -1298,7 +1322,12 @@ export function SessionClient() {
             privacyMode={privacyMode}
             mode={codingMode}
             onModeChange={onCodingModeChange}
-            scratch={codingScratch}
+            scratch={
+              // Solve mode has no scratch view (tabs handle output) — pass
+              // an empty slice so the prop stays typed; CodingPanel
+              // ignores it when isSolveMode is true.
+              codingMode === 'solve' ? blankScratch('explain') : codingScratchByMode[codingMode]
+            }
             onScratchChange={updateCodingScratch}
             onRunScratch={runCodingScratch}
             onCancelScratch={cancelCodingScratch}
