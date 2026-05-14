@@ -37,7 +37,10 @@ CREATE TABLE IF NOT EXISTS qa_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_qa_session ON qa_history(session_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_qa_thread ON qa_history(thread_id, created_at);
+-- idx_qa_thread is created in init_db() AFTER _ensure_columns migrates
+-- existing databases — putting it here breaks startup on any DB that
+-- pre-dates the thread_id column because executescript() runs before
+-- the migration and SQLite rejects an index on a missing column.
 
 CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +100,15 @@ async def init_db() -> None:
             {"interview_type": "TEXT", "default_provider": "TEXT"},
         )
         await _ensure_columns(db, "qa_history", {"thread_id": "TEXT"})
+        # Indexes that depend on migrated columns must run AFTER the
+        # _ensure_columns step — see the comment in SCHEMA next to the
+        # idx_qa_thread placeholder. CREATE INDEX IF NOT EXISTS is a
+        # no-op once the index already exists, so this is safe on
+        # repeat startups.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_qa_thread "
+            "ON qa_history(thread_id, created_at)"
+        )
         await db.commit()
 
 
