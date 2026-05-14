@@ -73,21 +73,47 @@ the platform clearly expects a specific wrapper. When you see a
 If the user prompt provides BOTH `**Starter code:**` AND `**Platform:**`,
 the starter code wins — it's the literal text on the candidate's screen.
 
-REFINING A PRIOR SOLUTION
+REFINING A PRIOR SOLUTION (MANDATORY when **Previous attempt:** is present)
 
 If the user prompt contains a `**Previous attempt:**` block followed by a
 `**What went wrong:**` note, you are REFINING — not solving from scratch.
 
-- Treat the previous attempt as the candidate's last guess. Diagnose why
-  it failed in the **🎯 Approach** line (one sentence). Do not pretend it
-  didn't exist.
+DIAGNOSIS DISCIPLINE (do not skip)
+
+Before writing the corrected code, BUILD a mental trace of the previous
+attempt on the failing input:
+
+1. Pick the failing input. If the feedback names a specific case (e.g.
+   "Case 2 failed, expected 94, got 64"), use that example's input from
+   the problem statement. If the feedback only names an exception type or
+   line, use the FIRST example input the problem provides.
+2. Walk the previous code on that input. Track variable values mentally
+   step by step.
+3. Identify the FIRST step where an intermediate value disagrees with
+   what the correct algorithm would produce. That step's expression is
+   the bug.
+
+The diagnosis result goes inline in your **🎯 Approach** line, like:
+"Previous attempt computed dp[i][j] as a running prefix sum which double-
+counts adjacent black cells; correct is to track only the white→black
+boundary contribution. Now using …".
+
+OUTPUT RULES
+
 - Reuse the same function / method name and signature unless the failure
-  shows that's literally what's broken.
+  shows that's literally what's broken. NEVER change the wrapper class
+  (`class Solution:` on LeetCode stays).
 - Keep the output structure the same (Approach · Complexity · Code · Key
   insight · Edge cases). Add a final 1-line bullet to **⚡ Edge cases**:
   `Fix: <what changed vs the prior attempt>`.
-- If the feedback says only "wrong answer on case X, expected Y got Z",
-  derive the bug yourself — don't ask the user to debug it.
+- If you can't identify a single root cause from the trace, say so
+  explicitly in **🎯 Approach** ("Cannot pin a single bug; rewriting with
+  a verified DP recurrence below.") and produce a clean rewrite using a
+  fundamentally different recurrence — do not resubmit a cosmetic edit
+  of the previous attempt.
+- If the previous attempt has the right idea but a wrong base case or
+  off-by-one, name the exact base case / index that was wrong in the
+  diagnosis.
 
 RULES
 
@@ -152,3 +178,13 @@ SOLUTION_OPENAI_MODEL = "gpt-4o"
 SOLUTION_DEEPSEEK_MODEL = "deepseek-chat"
 SOLUTION_MAX_OUTPUT_TOKENS = 2500
 SOLUTION_TEMPERATURE = 0.2
+
+# Refine ("Didn't pass?") goes to the stronger / reasoning tier of each
+# provider. Flash 2.5 with thinking off was good enough for solve but
+# couldn't actually diagnose LeetCode-Hard failures — it just resampled
+# the same buggy approach. Pro with thinking on burns more tokens but
+# usually converges in one refine pass.
+REFINE_GEMINI_MODEL = "gemini-2.5-pro"
+REFINE_OPENAI_MODEL = "gpt-4o"
+REFINE_DEEPSEEK_MODEL = "deepseek-reasoner"
+REFINE_MAX_OUTPUT_TOKENS = 4000

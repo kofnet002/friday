@@ -19,6 +19,10 @@ from app.prompts.coding_modes import (
 )
 from app.prompts.coding_solution import (
     CodingSolutionContext,
+    REFINE_DEEPSEEK_MODEL,
+    REFINE_GEMINI_MODEL,
+    REFINE_MAX_OUTPUT_TOKENS,
+    REFINE_OPENAI_MODEL,
     SOLUTION_DEEPSEEK_MODEL,
     SOLUTION_GEMINI_MODEL,
     SOLUTION_MAX_OUTPUT_TOKENS,
@@ -103,12 +107,24 @@ def _build_prompts_for_mode(
     raise ValueError(f"unknown coding mode: {mode!r}")
 
 
-def resolved_model(provider: Provider) -> str:
+def resolved_model(provider: Provider, *, deep: bool = False) -> str:
+    """Return the model name the streamers will actually call. `deep=True`
+    selects the reasoning / Pro tier per provider — used for refine calls
+    where the failure signals we need more capability than the default
+    Flash / 4o / chat tier."""
     if provider == "gemini":
-        return SOLUTION_GEMINI_MODEL
+        return REFINE_GEMINI_MODEL if deep else SOLUTION_GEMINI_MODEL
     if provider == "deepseek":
-        return SOLUTION_DEEPSEEK_MODEL
-    return SOLUTION_OPENAI_MODEL
+        return REFINE_DEEPSEEK_MODEL if deep else SOLUTION_DEEPSEEK_MODEL
+    return REFINE_OPENAI_MODEL if deep else SOLUTION_OPENAI_MODEL
+
+
+def _is_refine(prior_solution: str | None, feedback: str | None) -> bool:
+    """A coding call is a refine when EITHER input is non-empty. Both
+    arrive together in practice — UI sends prior_solution alongside
+    feedback — but the WS handler only sets them for solve mode so it's
+    safe to treat the union as the trigger."""
+    return bool((prior_solution and prior_solution.strip()) or (feedback and feedback.strip()))
 
 
 async def stream_solution(
@@ -166,15 +182,19 @@ async def stream_coding(
         prior_solution=prior_solution,
         feedback=feedback,
     )
+    # Refine calls go to the reasoning tier of each provider. Without this
+    # the streamer just resamples the same Flash output and the failure
+    # repeats — see the LeetCode-3225 case that motivated this branch.
+    deep = mode == "solve" and _is_refine(prior_solution, feedback)
 
     def make_factory(p: Provider) -> AsyncIterator[str]:
         if p == "gemini":
-            base = lambda: _stream_gemini(system, user)  # noqa: E731
+            base = lambda: _stream_gemini(system, user, deep=deep)  # noqa: E731
         elif p == "deepseek":
-            base = lambda: _stream_deepseek(system, user)  # noqa: E731
+            base = lambda: _stream_deepseek(system, user, deep=deep)  # noqa: E731
         else:
-            base = lambda: _stream_openai(system, user)  # noqa: E731
-        return retry_stream(base, label=f"coding.{mode}.{p}")
+            base = lambda: _stream_openai(system, user, deep=deep)  # noqa: E731
+        return retry_stream(base, label=f"coding.{mode}.{p}{'.deep' if deep else ''}")
 
     chain = _coding_provider_chain(provider)
     async for tok in stream_with_fallback(
@@ -186,20 +206,34 @@ async def stream_coding(
         yield tok
 
 
-async def _stream_gemini(system: str, user: str) -> AsyncIterator[str]:
+async def _stream_gemini(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     client = genai.Client(api_key=settings.gemini_api_key)
+    # Deep refine: switch to Pro and let thinking run (-1 = auto budget).
+    # Pro's reasoning is what actually unlocks LeetCode-Hard diagnoses;
+    # without it we just resample Flash's original bug.
+    if deep:
+        model = REFINE_GEMINI_MODEL
+        max_tokens = REFINE_MAX_OUTPUT_TOKENS
+        thinking = genai_types.ThinkingConfig(thinking_budget=-1)
+    else:
+        model = SOLUTION_GEMINI_MODEL
+        max_tokens = SOLUTION_MAX_OUTPUT_TOKENS
+        # Disable Gemini 2.5 thinking on the default solve path — its
+        # thinking tokens consume the output budget and were truncating
+        # the visible code mid-function. We pay for thinking only when
+        # refining, where the budget bump (REFINE_MAX_OUTPUT_TOKENS)
+        # accommodates both reasoning + code.
+        thinking = genai_types.ThinkingConfig(thinking_budget=0)
     stream = await client.aio.models.generate_content_stream(
-        model=SOLUTION_GEMINI_MODEL,
+        model=model,
         contents=user,
         config=genai_types.GenerateContentConfig(
             system_instruction=system,
             temperature=SOLUTION_TEMPERATURE,
-            max_output_tokens=SOLUTION_MAX_OUTPUT_TOKENS,
-            # Disable Gemini 2.5 thinking — its thinking tokens consume the
-            # output budget and were truncating the visible code mid-function.
-            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            max_output_tokens=max_tokens,
+            thinking_config=thinking,
         ),
     )
     async for chunk in stream:
@@ -208,19 +242,21 @@ async def _stream_gemini(system: str, user: str) -> AsyncIterator[str]:
             yield text
 
 
-async def _stream_openai(system: str, user: str) -> AsyncIterator[str]:
+async def _stream_openai(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
+    model = REFINE_OPENAI_MODEL if deep else SOLUTION_OPENAI_MODEL
+    max_tokens = REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS
     stream = await client.chat.completions.create(
-        model=SOLUTION_OPENAI_MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         stream=True,
         temperature=SOLUTION_TEMPERATURE,
-        max_tokens=SOLUTION_MAX_OUTPUT_TOKENS,
+        max_tokens=max_tokens,
     )
     async for chunk in stream:
         if not chunk.choices:
@@ -230,22 +266,29 @@ async def _stream_openai(system: str, user: str) -> AsyncIterator[str]:
             yield delta.content
 
 
-async def _stream_deepseek(system: str, user: str) -> AsyncIterator[str]:
+async def _stream_deepseek(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
     if not settings.deepseek_api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
     client = AsyncOpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
     )
+    # deepseek-reasoner returns reasoning tokens in `delta.reasoning_content`
+    # (separate from `delta.content`). We don't surface them — the model's
+    # final answer is in `.content` which is what the prompt's output
+    # structure rules apply to. Just bumping the model + max_tokens is
+    # enough to get the reasoning benefit on refine.
+    model = REFINE_DEEPSEEK_MODEL if deep else SOLUTION_DEEPSEEK_MODEL
+    max_tokens = REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS
     stream = await client.chat.completions.create(
-        model=SOLUTION_DEEPSEEK_MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         stream=True,
         temperature=SOLUTION_TEMPERATURE,
-        max_tokens=SOLUTION_MAX_OUTPUT_TOKENS,
+        max_tokens=max_tokens,
     )
     async for chunk in stream:
         if not chunk.choices:

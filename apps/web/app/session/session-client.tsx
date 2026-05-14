@@ -590,7 +590,12 @@ export function SessionClient() {
     if (!tab) return;
     requestSolve(fp, tab.problem, codingLanguageRef.current, {
       feedback,
-      priorSolution: tab.solution,
+      // Send ONLY the code block, not the full Markdown response. With the
+      // full response the model treats `**Previous attempt:**` as "extend
+      // this finished answer" and cosmetically refines instead of
+      // diagnosing. Code-only framing makes "this is the buggy code you
+      // need to fix" unambiguous.
+      priorSolution: extractFirstCodeBlock(tab.solution),
     });
   };
 
@@ -1700,6 +1705,14 @@ function CaptureCluster({
       </button>
     </div>
   );
+}
+
+// Pull the first fenced code block (```lang … ```) from a Markdown
+// response. Falls back to the full string if no fence is found — better
+// to send something than nothing.
+function extractFirstCodeBlock(markdown: string): string {
+  const fence = markdown.match(/```[a-zA-Z+#]*\n([\s\S]*?)```/);
+  return (fence?.[1] ?? markdown).trim();
 }
 
 function formatElapsed(ms: number): string {
