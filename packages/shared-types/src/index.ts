@@ -231,6 +231,12 @@ export type CodingSolutionClientMessage =
       /** Optional free-text context for any mode (e.g. file name, function
        *  the user has selected, what they were trying to do). */
       hint?: string;
+      /** Refine inputs for solve mode — the previous solution that failed
+       *  and the user's note about what went wrong (e.g. "Case 2 failed,
+       *  expected 94 got 64"). When either is set the solve prompt flips
+       *  into refine framing. */
+      prior_solution?: string;
+      feedback?: string;
       language: CodingLanguage;
       provider: AnswerProvider;
       extra_instructions?: string;

@@ -50,6 +50,12 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         error_text = request.get("error")
         hint = request.get("hint")
         extra = request.get("extra_instructions")
+        # Refine-mode inputs — only meaningful when mode == "solve" and the
+        # user is re-running an existing tab with feedback ("Case 2 failed,
+        # expected 94 got 64"). The prompt flips into refine framing when
+        # either is present.
+        prior_solution = request.get("prior_solution")
+        feedback = request.get("feedback")
 
         # Pre-flight required-input validation. The service raises on
         # missing fields too but we want a clean per-mode error before any
@@ -127,6 +133,8 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 hint=hint,
                 language=language,
                 extra_instructions=extra,
+                prior_solution=prior_solution if mode == "solve" else None,
+                feedback=feedback if mode == "solve" else None,
                 on_fallback=_on_fallback,
             ):
                 collected.append(token)

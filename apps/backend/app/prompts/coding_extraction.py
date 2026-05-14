@@ -5,7 +5,7 @@ Kept in sync with the TS file; update both when the schema changes.
 
 from __future__ import annotations
 
-CODING_EXTRACTION_VERSION = "1.0.0"
+CODING_EXTRACTION_VERSION = "1.1.0"
 
 CODING_EXTRACTION_SYSTEM_PROMPT = """\
 You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
@@ -30,7 +30,7 @@ RULES
 - is_coding_problem: true only if the screenshot clearly contains a coding problem statement. An empty IDE, a problem list, or a code editor without a visible problem = false.
 - Extract the problem statement verbatim. Preserve formatting of input/output examples.
 - If constraints are present (e.g., "1 <= n <= 10^5"), extract as individual strings.
-- If a function signature / starter code is visible, extract it exactly.
+- function_signature: capture the COMPLETE starter shown in the editor pane, including any class wrapper, the full method signature with every parameter name and type annotation, and the empty method body line if present. LeetCode signatures are always inside `class Solution:` with `self` as the first parameter — if the editor pane is visible at all, include the full `class Solution: / def methodName(self, …) -> …:` block. If only the method line is visible without the class wrapper but the platform is leetcode, still emit a `class Solution:` line above it (LeetCode never deviates from that wrapper). Leave null only when the editor pane isn't visible OR you can't read it confidently.
 - language_hint: the language the starter code is in, if visible.
 - confidence: your certainty that extraction is complete and accurate. 0.9+ = full problem visible; 0.5-0.9 = partial; below 0.5 = don't trust.
 

@@ -62,15 +62,28 @@ def _build_prompts_for_mode(
     hint: str | None,
     language: str,
     extra_instructions: str | None,
+    prior_solution: str | None = None,
+    feedback: str | None = None,
 ) -> tuple[str, str]:
     """Pick the system + user prompt pair for a coding mode. Raises on
     missing required inputs so the caller surfaces a clean error to the
-    client rather than the model hallucinating from empty fields."""
+    client rather than the model hallucinating from empty fields.
+
+    `prior_solution` + `feedback` are only used by solve mode — they flip
+    the prompt into refine framing (the system prompt's "REFINING A PRIOR
+    SOLUTION" section). The other modes ignore them."""
     if mode == "solve":
         if not problem or not problem.get("problem_statement"):
             raise ValueError("solve mode requires problem.problem_statement")
         ctx = CodingSolutionContext(language=language, extra_instructions=extra_instructions)
-        return coding_solution_system_prompt(ctx), coding_solution_user_prompt(problem)
+        return (
+            coding_solution_system_prompt(ctx),
+            coding_solution_user_prompt(
+                problem,
+                prior_solution=prior_solution,
+                feedback=feedback,
+            ),
+        )
 
     mode_ctx = CodingModeContext(language=language, extra_instructions=extra_instructions)
     if mode == "explain":
@@ -126,6 +139,8 @@ async def stream_coding(
     error: str | None = None,
     hint: str | None = None,
     extra_instructions: str | None = None,
+    prior_solution: str | None = None,
+    feedback: str | None = None,
     on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
 ) -> AsyncIterator[str]:
     """Unified streamer for all four coding panel modes (solve/explain/
@@ -135,6 +150,10 @@ async def stream_coding(
     Falls back to the next provider in the chain when the primary fails
     before emitting any tokens; on_fallback fires per switch so the WS can
     notify the client.
+
+    `prior_solution` + `feedback` flip solve mode into refine framing — the
+    user reports a failing test or compilation error and we regenerate with
+    that context so the candidate doesn't have to retype the problem.
     """
     system, user = _build_prompts_for_mode(
         mode,
@@ -144,6 +163,8 @@ async def stream_coding(
         hint=hint,
         language=language,
         extra_instructions=extra_instructions,
+        prior_solution=prior_solution,
+        feedback=feedback,
     )
 
     def make_factory(p: Provider) -> AsyncIterator[str]:

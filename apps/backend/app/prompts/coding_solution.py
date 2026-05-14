@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-CODING_SOLUTION_VERSION = "1.1.0"
+CODING_SOLUTION_VERSION = "1.2.0"
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,43 @@ If the user prompt contains a `**Starter code:**` block, it is the function sign
 - NEVER rename, drop, or add parameters. NEVER restructure into a different API.
 This is critical — the candidate will paste your body into the editor's existing signature; mismatches mean the answer is graded wrong.
 
+PLATFORM-SPECIFIC BOILERPLATE (use when **Starter code:** is missing)
+
+Vision sometimes captures only the left-hand problem statement and misses
+the editor pane on the right, so `**Starter code:**` can be empty even when
+the platform clearly expects a specific wrapper. When you see a
+`**Platform:**` line in the user prompt:
+
+- `leetcode`: MANDATORY. Wrap your solution in `class Solution:` and use
+  `self` as the first parameter of the method. The method name comes from
+  the problem statement (e.g. "implement maximumScore" → `def maximumScore`).
+  Type hints are required and should match the parameter names shown in
+  the problem. Never emit a bare module-level function for LeetCode.
+- `hackerrank`: typically a module-level function — do NOT wrap in a class
+  unless the problem text explicitly shows one.
+- `coderpad` / `turing` / `other` / null: follow whatever the problem
+  statement implies; default to a bare function with the language's
+  idiomatic style.
+
+If the user prompt provides BOTH `**Starter code:**` AND `**Platform:**`,
+the starter code wins — it's the literal text on the candidate's screen.
+
+REFINING A PRIOR SOLUTION
+
+If the user prompt contains a `**Previous attempt:**` block followed by a
+`**What went wrong:**` note, you are REFINING — not solving from scratch.
+
+- Treat the previous attempt as the candidate's last guess. Diagnose why
+  it failed in the **🎯 Approach** line (one sentence). Do not pretend it
+  didn't exist.
+- Reuse the same function / method name and signature unless the failure
+  shows that's literally what's broken.
+- Keep the output structure the same (Approach · Complexity · Code · Key
+  insight · Edge cases). Add a final 1-line bullet to **⚡ Edge cases**:
+  `Fix: <what changed vs the prior attempt>`.
+- If the feedback says only "wrong answer on case X, expected Y got Z",
+  derive the bug yourself — don't ask the user to debug it.
+
 RULES
 
 - Prefer the OPTIMAL known solution.
@@ -65,11 +102,21 @@ RULES
 LENGTH TARGET: 250-500 words total including code.{extra}"""
 
 
-def coding_solution_user_prompt(problem: dict[str, Any]) -> str:
+def coding_solution_user_prompt(
+    problem: dict[str, Any],
+    *,
+    prior_solution: str | None = None,
+    feedback: str | None = None,
+) -> str:
     parts: list[str] = []
     title = problem.get("title")
     if title:
         parts.append(f"**{title}**\n")
+    # Surface platform so the system prompt's platform-conditional rule
+    # has a hook. Vision sets this to "leetcode" / "hackerrank" / etc.
+    platform = problem.get("platform")
+    if platform:
+        parts.append(f"**Platform:** {platform}\n")
     statement = problem.get("problem_statement") or ""
     parts.append(statement)
     examples = problem.get("examples") or []
@@ -91,6 +138,12 @@ def coding_solution_user_prompt(problem: dict[str, Any]) -> str:
     signature = problem.get("function_signature")
     if signature:
         parts.append(f"\n**Starter code:**\n```\n{signature}\n```")
+    # Refine mode: previous attempt + failure note attach at the end so
+    # the model sees the problem first, then the artifact-to-improve.
+    if prior_solution:
+        parts.append(f"\n**Previous attempt:**\n```\n{prior_solution.strip()}\n```")
+    if feedback:
+        parts.append(f"\n**What went wrong:**\n{feedback.strip()}")
     return "\n".join(parts)
 
 

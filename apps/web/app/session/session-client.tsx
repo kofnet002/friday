@@ -551,7 +551,12 @@ export function SessionClient() {
     }
   }, []);
 
-  const requestSolve = (fingerprint: string, problem: ExtractedProblem, lang: CodingLanguage) => {
+  const requestSolve = (
+    fingerprint: string,
+    problem: ExtractedProblem,
+    lang: CodingLanguage,
+    opts: { feedback?: string; priorSolution?: string } = {},
+  ) => {
     const ws = codingWsRef.current;
     if (!ws || !ws.isOpen()) {
       setCodingError('coding WS not connected');
@@ -562,6 +567,12 @@ export function SessionClient() {
       problem,
       language: lang,
       provider: providerRef.current,
+      // When the user fires "Refine with feedback" we forward the prior
+      // attempt + their note so the backend flips into refine framing.
+      // Empty strings are normalized to undefined so they don't trigger
+      // the refine path on a stray click.
+      feedback: opts.feedback?.trim() || undefined,
+      prior_solution: opts.priorSolution?.trim() || undefined,
     });
     updateTab(fingerprint, (t) => ({
       ...t,
@@ -570,6 +581,17 @@ export function SessionClient() {
       status: 'streaming',
       error: null,
     }));
+  };
+
+  const onCodingRefine = (feedback: string) => {
+    const fp = activeFingerprintRef.current;
+    if (!fp) return;
+    const tab = codingTabsRef.current.find((t) => t.fingerprint === fp);
+    if (!tab) return;
+    requestSolve(fp, tab.problem, codingLanguageRef.current, {
+      feedback,
+      priorSolution: tab.solution,
+    });
   };
 
   const onCodingProblemDetected = (problem: ExtractedProblem, fingerprint: string) => {
@@ -1265,6 +1287,7 @@ export function SessionClient() {
             onRegenerate={onCodingRegenerate}
             onReExtract={onCodingReExtract}
             onCancel={onCodingCancel}
+            onRefine={onCodingRefine}
             frameInfo={codingFrame}
             error={codingError}
             privacyMode={privacyMode}

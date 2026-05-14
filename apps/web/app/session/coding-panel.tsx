@@ -76,6 +76,10 @@ export interface CodingPanelProps {
   onRegenerate: () => void;
   onReExtract: () => void;
   onCancel: () => void;
+  /** Re-runs solve mode with the current solution as `prior_solution` and
+   *  the user's note as `feedback`. Used when LeetCode-style test cases
+   *  fail against the streamed answer. */
+  onRefine: (feedback: string) => void;
   frameInfo: { changed_bits: number; interval_ms: number } | null;
   error: string | null;
   privacyMode: boolean;
@@ -104,6 +108,7 @@ export function CodingPanel({
   onRegenerate,
   onReExtract,
   onCancel,
+  onRefine,
   frameInfo,
   error,
   privacyMode,
@@ -280,6 +285,7 @@ export function CodingPanel({
           onRegenerate={onRegenerate}
           onReExtract={onReExtract}
           onCancel={onCancel}
+          onRefine={onRefine}
           privacyMode={privacyMode}
         />
       ) : null}
@@ -494,6 +500,7 @@ function ActiveProblemView({
   onRegenerate,
   onReExtract,
   onCancel,
+  onRefine,
   privacyMode,
 }: {
   tab: CodingProblemTab;
@@ -501,12 +508,23 @@ function ActiveProblemView({
   onRegenerate: () => void;
   onReExtract: () => void;
   onCancel: () => void;
+  onRefine: (feedback: string) => void;
   privacyMode: boolean;
 }) {
   const { problem, solution, status, error } = tab;
   const [copied, setCopied] = useState(false);
   const [problemOpen, setProblemOpen] = useState(true);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedback, setFeedback] = useState('');
   const isStreaming = status === 'streaming';
+
+  const submitFeedback = () => {
+    const trimmed = feedback.trim();
+    if (!trimmed) return;
+    onRefine(trimmed);
+    setFeedback('');
+    setFeedbackOpen(false);
+  };
 
   const copyCode = async () => {
     const match = solution.match(/```[a-zA-Z+#]*\n([\s\S]*?)```/);
@@ -596,6 +614,20 @@ function ActiveProblemView({
         <Button type="button" size="sm" variant="outline" onClick={onReExtract}>
           Re-extract
         </Button>
+        {/* Refine-with-feedback — only useful once we've actually produced a
+            solution to refine. Hidden while streaming for the same reason
+            Regenerate is disabled (the prior solution is still mutating). */}
+        {solution && !isStreaming ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => setFeedbackOpen((v) => !v)}
+            title="Tell Friday why the current solution didn't pass — it'll re-run with that context"
+          >
+            {feedbackOpen ? 'Cancel feedback' : "Didn't pass?"}
+          </Button>
+        ) : null}
         {isStreaming ? (
           <Button type="button" size="sm" variant="outline" onClick={onCancel}>
             Cancel
@@ -618,6 +650,30 @@ function ActiveProblemView({
           </span>
         </div>
       </div>
+
+      {feedbackOpen ? (
+        <div className="flex flex-col gap-2 rounded-lg border border-amber-300/70 bg-amber-50/60 p-3 dark:border-amber-500/30 dark:bg-amber-950/30">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-800 dark:text-amber-200">
+            What went wrong?
+          </p>
+          <Textarea
+            value={feedback}
+            onChange={(e) => setFeedback(e.target.value)}
+            placeholder={`e.g. "Case 2 failed — expected 94, got 64" or "TypeError on line 7"`}
+            rows={3}
+            className="text-[12px]"
+            autoFocus
+          />
+          <div className="flex items-center gap-2">
+            <Button type="button" size="sm" onClick={submitFeedback} disabled={!feedback.trim()}>
+              Refine with feedback
+            </Button>
+            <span className="text-[11px] text-amber-800/80 dark:text-amber-200/80">
+              Friday will re-run with the current solution + your note.
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       <div className={cn(privacyMode && 'select-none blur-sm')}>
         {status === 'error' ? (
