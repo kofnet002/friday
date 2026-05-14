@@ -80,23 +80,41 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         and problem.problem_statement
     ):
         fingerprint = problem_fingerprint(problem)
-        is_new = await add_seen_problem_fingerprint(request.session_id, fingerprint)
-        if is_new or request.force:
-            await set_current_problem(request.session_id, problem.model_dump_json())
-            emitted = await session_bus.publish(
-                request.session_id,
-                {
-                    "type": "coding_problem_detected",
-                    "problem": problem.model_dump(),
-                    "fingerprint": fingerprint,
-                },
-            )
-            log.info(
-                "vision.problem_emitted",
-                session_id=request.session_id,
-                fingerprint=fingerprint,
-                emitted=emitted,
-            )
+        # The seen-set is informational now (used for usage analytics) —
+        # NOT a publish gate. The frontend's onCodingProblemDetected
+        # dedupes by fingerprint when matching against the current tabs,
+        # so emitting on every valid detection is safe and ensures that
+        # re-extracts always reach the panel even after a 1-hour Redis
+        # TTL or a tab close. Pre-this fix, a fingerprint already in the
+        # Redis seen-set silently blocked emission and the panel sat
+        # idle while vision kept burning tokens.
+        is_first = await add_seen_problem_fingerprint(request.session_id, fingerprint)
+        await set_current_problem(request.session_id, problem.model_dump_json())
+        emitted = await session_bus.publish(
+            request.session_id,
+            {
+                "type": "coding_problem_detected",
+                "problem": problem.model_dump(),
+                "fingerprint": fingerprint,
+            },
+        )
+        log.info(
+            "vision.problem_emitted",
+            session_id=request.session_id,
+            fingerprint=fingerprint,
+            emitted=emitted,
+            first_seen=is_first,
+        )
+    else:
+        # Log the skip reason so "vision detected but nothing happened"
+        # is debuggable without a code dive.
+        log.info(
+            "vision.problem_not_emitted",
+            session_id=request.session_id,
+            is_coding_problem=problem.is_coding_problem,
+            confidence=problem.confidence,
+            has_statement=bool(problem.problem_statement),
+        )
 
     return {
         "problem": problem.model_dump(),

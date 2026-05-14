@@ -541,8 +541,31 @@ function ActiveProblemView({
     }
   };
 
+  // Heuristic for "the screenshot only got the top of a scrollable problem":
+  // a real LeetCode-class problem always has examples + constraints, and
+  // usually a function signature from the right-side editor. If none of
+  // those came through but the extractor was still confident enough to
+  // emit, the page probably extended below the viewport. Surface a hint
+  // pointing at Re-extract so the user knows the recovery path.
+  const looksTruncated =
+    !problem.examples?.length && !problem.constraints?.length && !problem.function_signature;
+
   return (
     <div className="flex flex-col gap-4">
+      {looksTruncated ? (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-[12px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/30 dark:text-amber-100">
+          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-amber-200/80 font-semibold dark:bg-amber-500/20">
+            !
+          </span>
+          <div className="flex flex-col gap-1">
+            <span className="font-medium">Looks like the problem was partially captured.</span>
+            <span className="text-amber-900/80 dark:text-amber-100/80">
+              Screen capture only sees the visible viewport — scroll the LeetCode page so the
+              examples / constraints / editor are on screen, then click <b>Re-extract</b>.
+            </span>
+          </div>
+        </div>
+      ) : null}
       <div>
         <button
           type="button"
