@@ -1,6 +1,7 @@
 #include <node_api.h>
 
 #import <AppKit/AppKit.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <dispatch/dispatch.h>
 
 namespace {
@@ -94,9 +95,45 @@ napi_value SetWindowStealth(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value MoveCursor(napi_env env, napi_callback_info info) {
+  // Snaps the OS cursor to (x, y) in global screen coordinates. Called
+  // from stealth.js when the user has opted into "move cursor to corner
+  // on stealth enable" — keeps the cursor off the Friday window during
+  // a screen-share so its position doesn't leak the overlay.
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_status status = napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  if (status != napi_ok || argc < 2) {
+    ThrowTypeError(env, "Expected x and y numbers");
+    return nullptr;
+  }
+
+  double x = 0;
+  double y = 0;
+  if (napi_get_value_double(env, argv[0], &x) != napi_ok ||
+      napi_get_value_double(env, argv[1], &y) != napi_ok) {
+    ThrowTypeError(env, "x and y must be numbers");
+    return nullptr;
+  }
+
+  // CGWarpMouseCursorPosition decouples the system cursor from mouse
+  // input briefly; CGAssociateMouseAndMouseCursorPosition(true) restores
+  // the linkage so subsequent mouse movement still moves the cursor.
+  // Without the re-associate the cursor would freeze until the next
+  // mouse event.
+  CGPoint point = CGPointMake(x, y);
+  CGError err = CGWarpMouseCursorPosition(point);
+  CGAssociateMouseAndMouseCursorPosition(true);
+
+  napi_value result;
+  SetBoolResult(env, err == kCGErrorSuccess, &result);
+  return result;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor descriptors[] = {
     {"setWindowStealth", nullptr, SetWindowStealth, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"moveCursor", nullptr, MoveCursor, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(descriptors) / sizeof(*descriptors), descriptors);
   return exports;

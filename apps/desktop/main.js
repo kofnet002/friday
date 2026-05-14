@@ -36,6 +36,11 @@ const DEFAULT_WINDOW_STATE = Object.freeze({
     dockHidden: true,
     visibleOnAllWorkspaces: true,
     hideWindowControls: true,
+    // Opt-in: when stealth enables, snap the cursor to a screen corner
+    // so it doesn't sit over the Friday window during a screen-share.
+    // Off by default because moving the cursor unprompted is disorienting
+    // — flip it on in Settings if the gain is worth the surprise.
+    moveCursorOnStealth: false,
   },
 });
 
@@ -178,9 +183,34 @@ function applyShellPreferences() {
 }
 
 function applyStealthProtection() {
+  const prev = stealthStatus?.enabled === true;
   stealthStatus = stealth.applyToWindow(mainWindow, stealthEnabled);
   publishStatus();
+  // Cursor masking — only fires on the OFF→ON transition (so a no-op
+  // re-apply during preference changes doesn't keep snapping the cursor
+  // every time), and only when the user has opted in via the
+  // moveCursorOnStealth preference.
+  if (stealthEnabled && !prev && getWindowState().preferences.moveCursorOnStealth) {
+    snapCursorToCorner();
+  }
   return stealthStatus;
+}
+
+function snapCursorToCorner() {
+  if (process.platform !== 'darwin') return;
+  // Bottom-right of the display the Friday window is on, inset 8px so
+  // the cursor isn't literally at (W, H) which some macOS versions snap
+  // into menu bar gestures. screen.getCursorScreenPoint gives us the
+  // current monitor; getDisplayNearestPoint resolves bounds.
+  try {
+    const point = screen.getCursorScreenPoint();
+    const display = screen.getDisplayNearestPoint(point);
+    const x = display.bounds.x + display.bounds.width - 8;
+    const y = display.bounds.y + display.bounds.height - 8;
+    stealth.moveCursor(x, y);
+  } catch (err) {
+    console.warn('stealth.move_cursor_failed', err);
+  }
 }
 
 function persistWindowBounds() {

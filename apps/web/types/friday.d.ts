@@ -48,6 +48,9 @@ declare global {
     dockHidden: boolean;
     visibleOnAllWorkspaces: boolean;
     hideWindowControls: boolean;
+    /** Snap the OS cursor to the bottom-right corner on the OFF→ON
+     *  stealth transition. Off by default; surprises users on first use. */
+    moveCursorOnStealth: boolean;
   }
 
   interface FridayWindowStatus {

@@ -113,6 +113,18 @@ export function SessionClient() {
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  // Per-provider latency for the answer stream. answerLatencyByProvider
+  // holds the most-recent elapsed_ms keyed by the EFFECTIVE provider
+  // (post-fallback). answerLatencyMs + answerLatencyProvider hold the
+  // single most-recent value for the bar badge; the full map is shown
+  // on hover.
+  const [answerLatencyMs, setAnswerLatencyMs] = useState<number | null>(null);
+  const [answerLatencyProvider, setAnswerLatencyProvider] = useState<AnswerProvider | null>(null);
+  const [answerLatencyByProvider, setAnswerLatencyByProvider] = useState<
+    Partial<Record<AnswerProvider, number>>
+  >({});
+  const answerStartedAtRef = useRef<number | null>(null);
+  const answerEffectiveProviderRef = useRef<AnswerProvider | null>(null);
   const [finals, setFinals] = useState<string[]>([]);
   const [interim, setInterim] = useState<string>('');
 
@@ -376,6 +388,8 @@ export function SessionClient() {
         // appended an empty {role:'assistant', content:''} placeholder to
         // messages, so we just clear it here. error/marked reset belongs on
         // the entry (thread-level) not the turn.
+        answerStartedAtRef.current = performance.now();
+        answerEffectiveProviderRef.current = msg.provider;
         updateEntry(id, (e) => ({
           answer: '',
           error: null,
@@ -401,16 +415,29 @@ export function SessionClient() {
         return;
       }
       if (msg.type === 'done') {
+        // Record per-provider answer latency. Only fires on a real stream
+        // completion so cancellations / errors don't pollute the map.
+        const startedAt = answerStartedAtRef.current;
+        const provider = answerEffectiveProviderRef.current;
+        if (startedAt !== null && provider) {
+          const elapsed = Math.max(0, performance.now() - startedAt);
+          setAnswerLatencyMs(elapsed);
+          setAnswerLatencyProvider(provider);
+          setAnswerLatencyByProvider((prev) => ({ ...prev, [provider]: elapsed }));
+        }
+        answerStartedAtRef.current = null;
         updateEntry(id, { status: 'done' });
         streamingIdRef.current = null;
         return;
       }
       if (msg.type === 'cancelled') {
+        answerStartedAtRef.current = null;
         updateEntry(id, { status: 'cancelled' });
         streamingIdRef.current = null;
         return;
       }
       if (msg.type === 'error') {
+        answerStartedAtRef.current = null;
         updateEntry(id, { status: 'error', error: msg.message });
         streamingIdRef.current = null;
       }
@@ -419,7 +446,12 @@ export function SessionClient() {
         // returned 503 or similar). Show a small ephemeral toast so the
         // user understands why the cost pill / badge shifted. The provider
         // selector in the panel does NOT change — the next call still
-        // tries the user's choice first.
+        // tries the user's choice first. We also re-anchor the latency
+        // start time so the answerLatencyMs we record on `done` reflects
+        // the time the EFFECTIVE provider took, not the failed primary +
+        // the new one (which would punish the fallback unfairly).
+        answerEffectiveProviderRef.current = msg.to;
+        answerStartedAtRef.current = performance.now();
         showFallbackToast(`${msg.from} → ${msg.to} · fallback`);
       }
     },
@@ -1464,6 +1496,9 @@ export function SessionClient() {
               answerConnected={answerConnected}
               codingConnected={codingConnected}
               latencyMs={latencyMs}
+              answerLatencyMs={answerLatencyMs}
+              answerLatencyProvider={answerLatencyProvider}
+              answerLatencyByProvider={answerLatencyByProvider}
               usage={usage}
               sessionId={sessionId}
               activeSecondaryFeature={
@@ -1951,6 +1986,50 @@ function LatencyBadge({ ms }: { ms: number | null }) {
   );
 }
 
+// Answer-stream latency, tagged with the effective provider (which can
+// differ from the user's selection after auto-fallback). Hovering shows
+// the per-provider history so you can compare Gemini vs OpenAI etc.
+// Thresholds intentionally higher than transcribe latency — answer
+// generation is bound by model latency (1–10s typical), not network.
+function AnswerLatencyBadge({
+  ms,
+  provider,
+  byProvider,
+}: {
+  ms: number;
+  provider: AnswerProvider;
+  byProvider: Partial<Record<AnswerProvider, number>>;
+}) {
+  const tone =
+    ms < 1500
+      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+      : ms < 4000
+        ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+        : 'bg-red-500/15 text-red-700 dark:text-red-400';
+  const dot = ms < 1500 ? 'bg-emerald-500' : ms < 4000 ? 'bg-amber-500' : 'bg-red-500';
+  const shortName: Record<AnswerProvider, string> = {
+    gemini: 'gem',
+    openai: 'gpt',
+    deepseek: 'ds',
+  };
+  // Tooltip: list every provider we've seen with their most recent
+  // elapsed_ms. Useful when comparing providers or debugging slow runs.
+  const tooltip = (Object.keys(byProvider) as AnswerProvider[])
+    .map((p) => `${p}: ${Math.round(byProvider[p] ?? 0)} ms`)
+    .join('\n');
+  return (
+    <div
+      className={cn('flex items-center gap-1.5 rounded-full px-2 py-1', tone)}
+      title={tooltip || undefined}
+    >
+      <span className={cn('h-1.5 w-1.5 rounded-full', dot)} />
+      <span className="font-mono">
+        {shortName[provider]} · {Math.round(ms)} ms
+      </span>
+    </div>
+  );
+}
+
 // Overflow menu — Parakeet's ⋮ trigger. Holds the secondary chrome that
 // used to live on the second utility row: stealth status, connection pills,
 // latency, cost, session id, the non-hero features (Setup, History,
@@ -1972,6 +2051,9 @@ function OverflowMenu({
   answerConnected,
   codingConnected,
   latencyMs,
+  answerLatencyMs,
+  answerLatencyProvider,
+  answerLatencyByProvider,
   usage,
   sessionId,
   activeSecondaryFeature,
@@ -1990,6 +2072,9 @@ function OverflowMenu({
   answerConnected: boolean;
   codingConnected: boolean;
   latencyMs: number | null;
+  answerLatencyMs: number | null;
+  answerLatencyProvider: AnswerProvider | null;
+  answerLatencyByProvider: Partial<Record<AnswerProvider, number>>;
   usage: SessionUsageSummary | null;
   sessionId: string;
   activeSecondaryFeature: FeatureKey | null;
@@ -2067,8 +2152,18 @@ function OverflowMenu({
             </div>
             {latencyMs !== null ? (
               <div className="flex items-center justify-between gap-2">
-                <span className="text-neutral-600 dark:text-neutral-400">Latency</span>
+                <span className="text-neutral-600 dark:text-neutral-400">Transcribe</span>
                 <LatencyBadge ms={latencyMs} />
+              </div>
+            ) : null}
+            {answerLatencyMs !== null && answerLatencyProvider ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-neutral-600 dark:text-neutral-400">Answer</span>
+                <AnswerLatencyBadge
+                  ms={answerLatencyMs}
+                  provider={answerLatencyProvider}
+                  byProvider={answerLatencyByProvider}
+                />
               </div>
             ) : null}
             <div className="flex items-center justify-between gap-2">

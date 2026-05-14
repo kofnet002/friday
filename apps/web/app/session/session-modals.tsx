@@ -9,6 +9,7 @@ import {
   Keyboard,
   MessageSquareText,
   MonitorUp,
+  MousePointer2,
   Shield,
   ShieldAlert,
   VenetianMask,
@@ -268,6 +269,14 @@ export function SettingsBody({
           description="Blur transcript, answers, and coding output inside the visible window."
           checked={privacyMode}
           onChange={onPrivacyModeChange}
+        />
+        <ToggleRow
+          icon={<MousePointer2 className="h-4 w-4" />}
+          title="Move cursor on stealth"
+          description="When stealth turns on, snap the OS cursor to the bottom-right corner so its position doesn't reveal the Friday overlay during a screen-share. Off by default — it's disorienting until you expect it."
+          checked={Boolean(prefs?.moveCursorOnStealth)}
+          disabled={!desktopStatus}
+          onChange={(checked) => onPreferenceChange({ moveCursorOnStealth: checked })}
         />
         <div className="flex items-center justify-between rounded-lg border border-neutral-200 px-3 py-2 dark:border-neutral-800">
           <div>

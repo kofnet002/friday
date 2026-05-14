@@ -12,8 +12,9 @@ When updating, also update the TS mirror so any frontend consumers stay in sync.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
-QUESTION_DETECTION_VERSION = "1.1.0"
+QUESTION_DETECTION_VERSION = "1.2.0"
 
 QUESTION_DETECTION_SYSTEM_PROMPT = """\
 You classify whether an interviewer has just finished asking the candidate a question that requires a response, and — when they have — reconstruct it.
@@ -75,6 +76,28 @@ Correct output:
   "reasoning": "Trails off mid-phrase after 'curious about'"
 }
 
+SPEAKER LABELS (when present)
+
+Utterances may be prefixed with `[N, Speaker M]` instead of just `[N]`.
+Speaker IDs come from Deepgram diarization on the system-audio stream
+and are stable within a session. Use them as follows:
+
+- The transcript is captured from system audio (what comes out of the
+  candidate's speakers), so the DOMINANT speaker — the one with the
+  most utterances and the longest runs — is the interviewer. Their
+  interrogatives are the questions to reconstruct.
+- The candidate's own voice usually does NOT appear (their mic
+  isn't routed into system output). If you see a second speaker who
+  ONLY answers or never asks, treat them as the candidate and IGNORE
+  their utterances for question-detection purposes.
+- When utterances from different speakers are intermixed, only walk
+  backward through utterances that share the most-recent speaker's id
+  when reconstructing the question — do NOT splice a candidate
+  acknowledgment ("got it", "right") into the interviewer's question.
+- If speaker labels are absent (single-speaker capture or older
+  recordings), treat all utterances as the interviewer and fall back
+  to the multi-utterance reconstruction rules above.
+
 CONFIDENCE SCALE
 
 - 0.9+: Clearly complete, clearly directed at the candidate, terminal punctuation present
@@ -95,11 +118,48 @@ Return ONLY a JSON object, no markdown fences, no prose:
 Keep `reasoning` under 15 words. It is used only for debugging."""
 
 
-def question_detection_user_prompt(utterances: Sequence[str]) -> str:
-    """Format utterances as a numbered list for the classifier."""
+@dataclass(frozen=True)
+class Utterance:
+    """One row of the recent-transcript window passed to the classifier.
+
+    `speaker` is the diarized speaker id from Deepgram (0, 1, …) when
+    available, or None for older entries / single-speaker captures.
+    """
+
+    text: str
+    speaker: int | None = None
+
+
+def question_detection_user_prompt(utterances: Sequence[Utterance | str]) -> str:
+    """Format utterances as a numbered list for the classifier.
+
+    Accepts either the new Utterance dataclass (with speaker info) or
+    plain strings (legacy). When ANY entry carries a speaker id, every
+    line gets a `[N, Speaker M]` prefix so the model can use the SPEAKER
+    LABELS section of the system prompt; otherwise we fall back to the
+    plain `[N]` numbering and the system prompt's fallback rule kicks in.
+    """
     if not utterances:
-        return "Last 30 seconds of transcript: (empty)\n\nClassify the interviewer's most recent question."
-    listing = "\n".join(f"[{i + 1}] {text}" for i, text in enumerate(utterances))
+        return (
+            "Last 30 seconds of transcript: (empty)\n\n"
+            "Classify the interviewer's most recent question."
+        )
+    # Normalize to Utterance and check whether any speaker is known.
+    norm: list[Utterance] = []
+    for u in utterances:
+        if isinstance(u, Utterance):
+            norm.append(u)
+        else:
+            norm.append(Utterance(text=str(u), speaker=None))
+    has_speakers = any(u.speaker is not None for u in norm)
+
+    if has_speakers:
+        listing = "\n".join(
+            f"[{i + 1}, Speaker {u.speaker if u.speaker is not None else '?'}] {u.text}"
+            for i, u in enumerate(norm)
+        )
+    else:
+        listing = "\n".join(f"[{i + 1}] {u.text}" for i, u in enumerate(norm))
     return (
         "Last 30 seconds of transcript (numbered utterances, oldest first):\n\n"
         f"{listing}\n\n"

@@ -16,6 +16,7 @@ from app.prompts.follow_up_classification import (
 )
 from app.prompts.question_detection import (
     QUESTION_DETECTION_SYSTEM_PROMPT,
+    Utterance,
     question_detection_user_prompt,
 )
 from app.redis_client import recent_transcript_entries
@@ -171,8 +172,16 @@ class QuestionDetector:
             )
             return
 
+        # Build typed Utterance entries so the prompt builder can emit
+        # `[N, Speaker M]` prefixes when diarization is available. Falls
+        # back to None when the Redis row pre-dates the speaker field.
+        wire: list[Utterance] = []
+        for u in utterances:
+            sp_raw = u.get("speaker")
+            speaker = sp_raw if isinstance(sp_raw, int) else None
+            wire.append(Utterance(text=str(u.get("text") or ""), speaker=speaker))
         try:
-            result = await self._call_gemini([str(u["text"]) for u in utterances])
+            result = await self._call_gemini(wire)
         except Exception as exc:  # noqa: BLE001
             log.error("question_detection.error", error=str(exc))
             return
@@ -255,7 +264,7 @@ class QuestionDetector:
         )
         return is_follow_up and confidence >= FOLLOW_UP_MIN_CONFIDENCE
 
-    async def _call_gemini(self, utterances: list[str]) -> dict[str, Any]:
+    async def _call_gemini(self, utterances: list[Utterance]) -> dict[str, Any]:
         assert self._client is not None
         user_prompt = question_detection_user_prompt(utterances)
         response = await self._client.aio.models.generate_content(
