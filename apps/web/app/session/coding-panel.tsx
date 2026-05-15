@@ -1,12 +1,31 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import type { AnswerProvider, CodingLanguage, ExtractedProblem } from '@friday/shared-types';
+import type {
+  AnswerProvider,
+  CodingLanguage,
+  CodingMode,
+  ExtractedProblem,
+} from '@friday/shared-types';
 
-import { Check, Clock, Code2, Copy, Eye, Target } from 'lucide-react';
+import {
+  Bug,
+  Check,
+  Clock,
+  Code2,
+  Copy,
+  Eye,
+  FileText,
+  Play,
+  Sparkles,
+  Square,
+  Target,
+  TestTube2,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
 import { friendlyError } from '@/lib/error-messages';
 import { Markdown, useHighlightedCode } from '@/lib/markdown';
 import { ALL_CODING_LANGUAGES } from '@/lib/session-context';
@@ -24,6 +43,24 @@ export interface CodingProblemTab {
   savedId: number | null;
 }
 
+/** Scratch buffer for non-solve modes (explain / debug / tests). Lives on
+ *  session-client so the coding WS message handler can route streamed
+ *  tokens here when mode !== 'solve'. */
+export interface CodingScratchState {
+  /** The mode the scratch was last run with — used to render the right
+   *  output structure header. */
+  mode: CodingMode;
+  /** Inputs the user typed. `code` is required for explain + debug;
+   *  `error` for debug only; `hint` is optional context. */
+  code: string;
+  error: string;
+  hint: string;
+  /** Streamed output (Markdown). */
+  output: string;
+  status: CodingSolutionStatus;
+  errorMessage: string | null;
+}
+
 export interface CodingPanelProps {
   active: boolean;
   onToggle: () => void;
@@ -39,9 +76,21 @@ export interface CodingPanelProps {
   onRegenerate: () => void;
   onReExtract: () => void;
   onCancel: () => void;
+  /** Re-runs solve mode with the current solution as `prior_solution` and
+   *  the user's note as `feedback`. Used when LeetCode-style test cases
+   *  fail against the streamed answer. */
+  onRefine: (feedback: string) => void;
   frameInfo: { changed_bits: number; interval_ms: number } | null;
   error: string | null;
   privacyMode: boolean;
+  /** Active mode tab. solve = problem→solution (existing behavior).
+   *  explain / debug / tests = scratch panel with user-typed inputs. */
+  mode: CodingMode;
+  onModeChange: (mode: CodingMode) => void;
+  scratch: CodingScratchState;
+  onScratchChange: (patch: Partial<CodingScratchState>) => void;
+  onRunScratch: () => void;
+  onCancelScratch: () => void;
 }
 
 export function CodingPanel({
@@ -59,11 +108,20 @@ export function CodingPanel({
   onRegenerate,
   onReExtract,
   onCancel,
+  onRefine,
   frameInfo,
   error,
   privacyMode,
+  mode,
+  onModeChange,
+  scratch,
+  onScratchChange,
+  onRunScratch,
+  onCancelScratch,
 }: CodingPanelProps) {
   const activeTab = tabs.find((t) => t.fingerprint === activeFingerprint) ?? null;
+
+  const isSolveMode = mode === 'solve';
 
   return (
     // No outer card chrome — the surrounding popover already provides the
@@ -96,12 +154,37 @@ export function CodingPanel({
             </option>
           ))}
         </Select>
-        <Button type="button" size="sm" variant={active ? 'outline' : 'default'} onClick={onToggle}>
-          {active ? 'Stop' : 'Start'}
-        </Button>
+        {/* Start/Stop is the screen-watcher toggle — only meaningful in
+            solve mode where vision extraction feeds tabs. Hidden in scratch
+            modes so the user doesn't think it gates Run. */}
+        {isSolveMode ? (
+          <Button
+            type="button"
+            size="sm"
+            variant={active ? 'outline' : 'default'}
+            onClick={onToggle}
+          >
+            {active ? 'Stop' : 'Start'}
+          </Button>
+        ) : null}
       </div>
 
-      {active && !activeTab ? (
+      <ModeStrip mode={mode} onModeChange={onModeChange} />
+
+      {!isSolveMode ? (
+        <ScratchView
+          mode={mode}
+          scratch={scratch}
+          activeTab={activeTab}
+          language={language}
+          onChange={onScratchChange}
+          onRun={onRunScratch}
+          onCancel={onCancelScratch}
+          privacyMode={privacyMode}
+        />
+      ) : null}
+
+      {!isSolveMode ? null : active && !activeTab ? (
         <div className="flex items-center gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/40 px-3 py-2 text-xs text-sky-700 dark:border-sky-500/30 dark:bg-sky-950/20 dark:text-sky-300">
           <Eye className="h-3.5 w-3.5 shrink-0" aria-hidden />
           <span>Watching for coding problems on-screen…</span>
@@ -113,7 +196,7 @@ export function CodingPanel({
         </div>
       ) : null}
 
-      {!active && tabs.length === 0 ? (
+      {!isSolveMode ? null : !active && tabs.length === 0 ? (
         <div className="flex flex-col items-start gap-2 rounded-lg border border-dashed border-neutral-300 bg-neutral-50/60 px-4 py-5 dark:border-neutral-700 dark:bg-neutral-950/40">
           <Code2 className="h-5 w-5 text-neutral-400 dark:text-neutral-500" aria-hidden />
           <p className="text-sm font-medium text-neutral-800 dark:text-neutral-200">
@@ -132,7 +215,7 @@ export function CodingPanel({
         </div>
       ) : null}
 
-      {tabs.length > 0 ? (
+      {isSolveMode && tabs.length > 0 ? (
         <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-200 dark:border-neutral-800">
           {tabs.map((tab) => {
             const isActive = tab.fingerprint === activeFingerprint;
@@ -195,15 +278,184 @@ export function CodingPanel({
           })()
         : null}
 
-      {activeTab ? (
+      {isSolveMode && activeTab ? (
         <ActiveProblemView
           tab={activeTab}
           provider={provider}
           onRegenerate={onRegenerate}
           onReExtract={onReExtract}
           onCancel={onCancel}
+          onRefine={onRefine}
           privacyMode={privacyMode}
         />
+      ) : null}
+    </div>
+  );
+}
+
+// ─── Mode strip ──────────────────────────────────────────────────────────────
+
+const MODE_DEFS: Array<{
+  mode: CodingMode;
+  label: string;
+  icon: typeof Code2;
+  hint: string;
+}> = [
+  { mode: 'solve', label: 'Solve', icon: Sparkles, hint: 'Auto-detected problem → solution' },
+  { mode: 'explain', label: 'Explain', icon: FileText, hint: 'Walk through a code snippet' },
+  { mode: 'debug', label: 'Debug', icon: Bug, hint: 'Diagnose an error and show the fix' },
+  { mode: 'tests', label: 'Tests', icon: TestTube2, hint: 'Generate edge-case test inputs' },
+];
+
+function ModeStrip({
+  mode,
+  onModeChange,
+}: {
+  mode: CodingMode;
+  onModeChange: (mode: CodingMode) => void;
+}) {
+  return (
+    <div
+      className="flex items-center gap-1 rounded-lg border border-neutral-200 bg-neutral-50/60 p-1 dark:border-neutral-800 dark:bg-neutral-900/40"
+      role="tablist"
+    >
+      {MODE_DEFS.map(({ mode: m, label, icon: Icon, hint }) => {
+        const isActive = m === mode;
+        return (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={isActive}
+            onClick={() => onModeChange(m)}
+            title={hint}
+            className={cn(
+              'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors',
+              isActive
+                ? 'bg-white text-sky-700 shadow-sm dark:bg-neutral-800 dark:text-sky-300'
+                : 'text-neutral-500 hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800/50 dark:hover:text-neutral-200',
+            )}
+          >
+            <Icon className="h-3.5 w-3.5" aria-hidden />
+            <span>{label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Scratch view (explain / debug / tests) ──────────────────────────────────
+
+function ScratchView({
+  mode,
+  scratch,
+  activeTab,
+  language,
+  onChange,
+  onRun,
+  onCancel,
+  privacyMode,
+}: {
+  mode: CodingMode;
+  scratch: CodingScratchState;
+  /** Solve-mode active tab. Used by tests-mode to pull the problem from
+   *  the most recent detection rather than asking the user to retype it. */
+  activeTab: CodingProblemTab | null;
+  language: CodingLanguage;
+  onChange: (patch: Partial<CodingScratchState>) => void;
+  onRun: () => void;
+  onCancel: () => void;
+  privacyMode: boolean;
+}) {
+  const isStreaming = scratch.status === 'streaming' && scratch.mode === mode;
+  // For tests mode we don't ask for code/error — we use the most recent
+  // active solve tab as the implicit problem source. If there isn't one,
+  // explain why.
+  const testsNeedProblem = mode === 'tests' && !activeTab;
+  const canRun =
+    !isStreaming &&
+    ((mode === 'explain' && scratch.code.trim().length > 0) ||
+      (mode === 'debug' && scratch.code.trim().length > 0 && scratch.error.trim().length > 0) ||
+      (mode === 'tests' && !testsNeedProblem));
+
+  return (
+    <div className="flex flex-col gap-3">
+      {mode === 'tests' ? (
+        testsNeedProblem ? (
+          <p className="rounded-md border border-dashed border-amber-300 bg-amber-50/60 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-950/30 dark:text-amber-200">
+            Tests mode uses the currently-open problem tab. Switch to Solve mode and let Friday
+            detect a problem first, or open one from history.
+          </p>
+        ) : (
+          <p className="rounded-md border border-sky-200 bg-sky-50/60 px-3 py-2 text-xs text-sky-700 dark:border-sky-500/30 dark:bg-sky-950/30 dark:text-sky-300">
+            Will generate edge-case inputs for:{' '}
+            <span className="font-medium">{activeTab?.problem.title ?? 'the active problem'}</span>
+          </p>
+        )
+      ) : (
+        <Textarea
+          value={scratch.code}
+          onChange={(e) => onChange({ code: e.target.value })}
+          placeholder={
+            mode === 'explain'
+              ? `Paste ${language} code to explain…`
+              : `Paste the ${language} code that's misbehaving…`
+          }
+          rows={8}
+          className="font-mono text-[12px]"
+          disabled={isStreaming}
+        />
+      )}
+
+      {mode === 'debug' ? (
+        <Textarea
+          value={scratch.error}
+          onChange={(e) => onChange({ error: e.target.value })}
+          placeholder="Paste the error message or stack trace…"
+          rows={4}
+          className="font-mono text-[12px]"
+          disabled={isStreaming}
+        />
+      ) : null}
+
+      <div className="flex items-center gap-2">
+        {isStreaming ? (
+          <Button type="button" variant="outline" size="sm" onClick={onCancel}>
+            <Square className="mr-1 h-3.5 w-3.5" aria-hidden />
+            Cancel
+          </Button>
+        ) : (
+          <Button type="button" size="sm" onClick={onRun} disabled={!canRun}>
+            <Play className="mr-1 h-3.5 w-3.5" aria-hidden />
+            Run
+          </Button>
+        )}
+        <span className="text-[11px] text-neutral-500">
+          {mode === 'explain' && 'Walkthrough · complexity · gotchas'}
+          {mode === 'debug' && 'Diagnosis · fix · why · verify'}
+          {mode === 'tests' && '5–8 edge cases targeting different failure modes'}
+        </span>
+      </div>
+
+      {scratch.errorMessage ? (
+        <div className="rounded-md border border-red-400/50 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300">
+          {scratch.errorMessage}
+        </div>
+      ) : null}
+
+      {scratch.output || isStreaming ? (
+        <div
+          className={cn(
+            // Match SolutionView's outer chrome so the modes feel like
+            // siblings of Solve. Fully opaque card so the always-visible
+            // copy buttons on code blocks have a clean backdrop.
+            'rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950',
+            privacyMode && 'select-none blur-sm',
+          )}
+        >
+          <Markdown text={scratch.output + (isStreaming ? ' ▍' : '')} />
+        </div>
       ) : null}
     </div>
   );
@@ -251,6 +503,7 @@ function ActiveProblemView({
   onRegenerate,
   onReExtract,
   onCancel,
+  onRefine,
   privacyMode,
 }: {
   tab: CodingProblemTab;
@@ -258,12 +511,23 @@ function ActiveProblemView({
   onRegenerate: () => void;
   onReExtract: () => void;
   onCancel: () => void;
+  onRefine: (feedback: string) => void;
   privacyMode: boolean;
 }) {
   const { problem, solution, status, error } = tab;
   const [copied, setCopied] = useState(false);
   const [problemOpen, setProblemOpen] = useState(true);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedback, setFeedback] = useState('');
   const isStreaming = status === 'streaming';
+
+  const submitFeedback = () => {
+    const trimmed = feedback.trim();
+    if (!trimmed) return;
+    onRefine(trimmed);
+    setFeedback('');
+    setFeedbackOpen(false);
+  };
 
   const copyCode = async () => {
     const match = solution.match(/```[a-zA-Z+#]*\n([\s\S]*?)```/);
@@ -277,8 +541,31 @@ function ActiveProblemView({
     }
   };
 
+  // Heuristic for "the screenshot only got the top of a scrollable problem":
+  // a real LeetCode-class problem always has examples + constraints, and
+  // usually a function signature from the right-side editor. If none of
+  // those came through but the extractor was still confident enough to
+  // emit, the page probably extended below the viewport. Surface a hint
+  // pointing at Re-extract so the user knows the recovery path.
+  const looksTruncated =
+    !problem.examples?.length && !problem.constraints?.length && !problem.function_signature;
+
   return (
     <div className="flex flex-col gap-4">
+      {looksTruncated ? (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-[12px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/30 dark:text-amber-100">
+          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-amber-200/80 font-semibold dark:bg-amber-500/20">
+            !
+          </span>
+          <div className="flex flex-col gap-1">
+            <span className="font-medium">Looks like the problem was partially captured.</span>
+            <span className="text-amber-900/80 dark:text-amber-100/80">
+              Screen capture only sees the visible viewport — scroll the LeetCode page so the
+              examples / constraints / editor are on screen, then click <b>Re-extract</b>.
+            </span>
+          </div>
+        </div>
+      ) : null}
       <div>
         <button
           type="button"
@@ -353,6 +640,20 @@ function ActiveProblemView({
         <Button type="button" size="sm" variant="outline" onClick={onReExtract}>
           Re-extract
         </Button>
+        {/* Refine-with-feedback — only useful once we've actually produced a
+            solution to refine. Hidden while streaming for the same reason
+            Regenerate is disabled (the prior solution is still mutating). */}
+        {solution && !isStreaming ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => setFeedbackOpen((v) => !v)}
+            title="Tell Friday why the current solution didn't pass — it'll re-run with that context"
+          >
+            {feedbackOpen ? 'Cancel feedback' : "Didn't pass?"}
+          </Button>
+        ) : null}
         {isStreaming ? (
           <Button type="button" size="sm" variant="outline" onClick={onCancel}>
             Cancel
@@ -375,6 +676,30 @@ function ActiveProblemView({
           </span>
         </div>
       </div>
+
+      {feedbackOpen ? (
+        <div className="flex flex-col gap-2 rounded-lg border border-amber-300/70 bg-amber-50/60 p-3 dark:border-amber-500/30 dark:bg-amber-950/30">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-800 dark:text-amber-200">
+            What went wrong?
+          </p>
+          <Textarea
+            value={feedback}
+            onChange={(e) => setFeedback(e.target.value)}
+            placeholder={`e.g. "Case 2 failed — expected 94, got 64" or "TypeError on line 7"`}
+            rows={3}
+            className="text-[12px]"
+            autoFocus
+          />
+          <div className="flex items-center gap-2">
+            <Button type="button" size="sm" onClick={submitFeedback} disabled={!feedback.trim()}>
+              Refine with feedback
+            </Button>
+            <span className="text-[11px] text-amber-800/80 dark:text-amber-200/80">
+              Friday will re-run with the current solution + your note.
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       <div className={cn(privacyMode && 'select-none blur-sm')}>
         {status === 'error' ? (
@@ -612,7 +937,7 @@ function CodeSection({ raw, isStreaming }: { raw: string; isStreaming: boolean }
             disabled={!code}
             aria-label={copied ? 'Copied' : 'Copy code'}
             title={copied ? 'Copied' : 'Copy code'}
-            className="inline-flex h-6 items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 text-[10px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-200 dark:hover:bg-neutral-800"
+            className="inline-flex h-6 items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 text-[10px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-200 dark:hover:bg-neutral-800"
           >
             {copied ? (
               <Check className="h-3 w-3 text-emerald-500" aria-hidden />

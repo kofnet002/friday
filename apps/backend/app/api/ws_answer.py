@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.db import append_qa, get_session
 from app.logging import log
-from app.prompts.answer_generation import AnswerContext
+from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import recent_transcript_text
 from app.services.answer import Provider, stream_answer
 from app.services.limits import check_token_budget
+from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
 
 router = APIRouter()
@@ -20,6 +21,29 @@ router = APIRouter()
 # client doesn't pass one explicitly. Roomier than question-detection's 30s so
 # the answer can ground in surrounding context.
 ANSWER_TRANSCRIPT_WINDOW_S = 60.0
+
+
+_Role = Literal["user", "assistant"]
+
+
+def _extract_role_content(msg: Any) -> tuple[_Role | None, str | None]:
+    if not isinstance(msg, dict):
+        return None, None
+    role = msg.get("role")
+    content = msg.get("content")
+    if role != "user" and role != "assistant":
+        return None, None
+    if not isinstance(content, str):
+        return None, None
+    return role, content
+
+
+def _last_user_index(messages: list[Any]) -> int | None:
+    for i in range(len(messages) - 1, -1, -1):
+        role, _ = _extract_role_content(messages[i])
+        if role == "user":
+            return i
+    return None
 
 
 @router.websocket("/ws/answer")
@@ -39,7 +63,32 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
 
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
-        question = str(request.get("question") or "").strip()
+        thread_id = request.get("thread_id") or None
+
+        # Accept either the new threaded payload (messages: [...]) or the
+        # legacy one-shot {question: "..."} shape. New shape wins when both
+        # are present.
+        raw_messages = request.get("messages")
+        if isinstance(raw_messages, list) and raw_messages:
+            # Split the thread into prior turns + current question. The
+            # current question is the last user turn; everything before it
+            # is history. Trailing assistant turns (in-flight from a prior
+            # cancel) are dropped — we only want completed turns as context.
+            tail_idx = _last_user_index(raw_messages)
+            if tail_idx is None:
+                await send_json({"type": "error", "message": "no user turn in thread"})
+                return
+            question = str(raw_messages[tail_idx].get("content") or "").strip()
+            prior_turns = tuple(
+                PriorTurn(role=role, content=content)
+                for msg in raw_messages[:tail_idx]
+                for role, content in [_extract_role_content(msg)]
+                if role and content
+            )
+        else:
+            question = str(request.get("question") or "").strip()
+            prior_turns = ()
+
         if not question:
             await send_json({"type": "error", "message": "empty question"})
             return
@@ -81,6 +130,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             company=override.get("company") or persisted.get("company"),
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
+            prior_turns=prior_turns,
         )
 
         auto_detected = bool(request.get("auto_detected", False))
@@ -91,10 +141,44 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         else:
             model = settings.openai_model
 
-        await send_json({"type": "started", "question": question, "provider": provider})
+        await send_json(
+            {
+                "type": "started",
+                "question": question,
+                "provider": provider,
+                "thread_id": thread_id,
+            }
+        )
+        # Track the effective provider — we report cost / usage against
+        # whichever one actually produced tokens, not the user's original
+        # selection. Mutated by the on_fallback hook below.
+        effective_provider: Provider = provider
+        effective_model = model
+
+        async def _on_fallback(prev: Provider, nxt: Provider, reason: str) -> None:
+            nonlocal effective_provider, effective_model
+            effective_provider = nxt
+            if nxt == "gemini":
+                effective_model = settings.gemini_model
+            elif nxt == "deepseek":
+                effective_model = settings.deepseek_model
+            else:
+                effective_model = settings.openai_model
+            await send_json(
+                {
+                    "type": "provider_changed",
+                    "from": prev,
+                    "to": nxt,
+                    "reason": reason,
+                }
+            )
+            log.info("answer.fallback", session_id=session_id, prev=prev, next=nxt)
+
         collected: list[str] = []
         try:
-            async for token in stream_answer(provider, question, context):
+            async for token in stream_answer(
+                provider, question, context, on_fallback=_on_fallback
+            ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})
             await send_json({"type": "done"})
@@ -113,13 +197,36 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                     session_id=session_id,
                     question=question,
                     answer=answer_text,
-                    provider=provider,
-                    model=model,
+                    provider=effective_provider,
+                    model=effective_model,
                     auto_detected=auto_detected,
+                    thread_id=thread_id,
                 )
-                await send_json({"type": "saved", "id": row_id})
+                await send_json({"type": "saved", "id": row_id, "thread_id": thread_id})
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws_answer.save_failed", error=str(exc))
+
+            # Record answer-stream usage so the cost pill reflects copilot
+            # spend (previously uncounted entirely). Token counts are a
+            # rough char/4 proxy: input = system-prompt overhead + question
+            # + recent transcript + prior thread turns; output = answer.
+            try:
+                prior_chars = sum(len(t.content) for t in prior_turns)
+                transcript_chars = len(context.recent_transcript or "")
+                input_tokens = (
+                    ANSWER_PROMPT_OVERHEAD_TOKENS
+                    + (len(question) + transcript_chars + prior_chars) // 4
+                )
+                output_tokens = max(1, len(answer_text) // 4)
+                await record_answer_call(
+                    session_id=session_id,
+                    provider=effective_provider,
+                    model=effective_model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     try:
         while True:

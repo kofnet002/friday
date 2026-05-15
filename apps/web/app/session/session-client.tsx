@@ -26,9 +26,11 @@ import {
   Square,
 } from 'lucide-react';
 import type {
+  AnswerMessage,
   AnswerProvider,
   AnswerServerMessage,
   CodingLanguage,
+  CodingMode,
   CodingSolutionServerMessage,
   ExtractedProblem,
   QAHistoryRow,
@@ -57,7 +59,7 @@ import { cn } from '@/lib/utils';
 
 import { SetupForm } from '../setup/setup-form';
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
-import { CodingPanel, type CodingProblemTab } from './coding-panel';
+import { CodingPanel, type CodingProblemTab, type CodingScratchState } from './coding-panel';
 import { FeatureBar, SECONDARY_FEATURES, getFeatureWidth, type FeatureKey } from './feature-bar';
 import {
   ConnectionPill,
@@ -73,7 +75,20 @@ type Status = 'idle' | 'starting' | 'recording' | 'paused' | 'error';
 
 interface AnswerEntry {
   id: string;
+  /** Multi-turn thread — first message is always a user turn (the original
+   *  question), and the conversation alternates from there. `question` and
+   *  `answer` are derived caches over this array; everything that needs the
+   *  full thread (follow-ups, persistence) reads `messages` directly. */
+  messages: AnswerMessage[];
+  /** Stable identifier shared by every turn in this thread. Sent on each WS
+   *  payload so the backend can persist follow-ups against the same row
+   *  group in qa_history (idx_qa_thread). */
+  threadId: string;
+  /** First user message, cached for the panel header and history list. */
   question: string;
+  /** Most recent assistant content. Tokens stream into this as they arrive
+   *  AND into messages[messages.length-1].content so the two stay in sync.
+   *  Cached separately so panel re-renders are cheap. */
   answer: string;
   status: AnswerStatus;
   error: string | null;
@@ -82,6 +97,11 @@ interface AnswerEntry {
 }
 
 const AUTOSCROLL_THRESHOLD_PX = 48;
+
+// The three non-solve coding modes. Carved out as a type alias because
+// codingScratchByMode keys against this set — solve uses tabs, not the
+// scratch buffer, so it's excluded.
+type ScratchMode = Exclude<CodingMode, 'solve'>;
 // Force-ask (⌘⇧Space) sends the last N finalized transcript chunks to the
 // copilot. The interviewer's question often isn't the *last* thing said —
 // they ask, then keep narrating. Keep this window wide enough that the
@@ -93,6 +113,18 @@ export function SessionClient() {
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  // Per-provider latency for the answer stream. answerLatencyByProvider
+  // holds the most-recent elapsed_ms keyed by the EFFECTIVE provider
+  // (post-fallback). answerLatencyMs + answerLatencyProvider hold the
+  // single most-recent value for the bar badge; the full map is shown
+  // on hover.
+  const [answerLatencyMs, setAnswerLatencyMs] = useState<number | null>(null);
+  const [answerLatencyProvider, setAnswerLatencyProvider] = useState<AnswerProvider | null>(null);
+  const [answerLatencyByProvider, setAnswerLatencyByProvider] = useState<
+    Partial<Record<AnswerProvider, number>>
+  >({});
+  const answerStartedAtRef = useRef<number | null>(null);
+  const answerEffectiveProviderRef = useRef<AnswerProvider | null>(null);
   const [finals, setFinals] = useState<string[]>([]);
   const [interim, setInterim] = useState<string>('');
 
@@ -119,6 +151,31 @@ export function SessionClient() {
   } | null>(null);
   const [codingError, setCodingError] = useState<string | null>(null);
   const [codingConnected, setCodingConnected] = useState(false);
+  // Coding panel mode (solve / explain / debug / tests). Each non-solve
+  // mode keeps its OWN scratch buffer — switching from Explain to Debug
+  // (or back) preserves both inputs AND output for the mode you left.
+  // Solve mode uses the tab list, not this buffer.
+  const [codingMode, setCodingMode] = useState<CodingMode>('solve');
+  const blankScratch = (m: ScratchMode): CodingScratchState => ({
+    mode: m,
+    code: '',
+    error: '',
+    hint: '',
+    output: '',
+    status: 'idle',
+    errorMessage: null,
+  });
+  const [codingScratchByMode, setCodingScratchByMode] = useState<
+    Record<ScratchMode, CodingScratchState>
+  >({
+    explain: blankScratch('explain'),
+    debug: blankScratch('debug'),
+    tests: blankScratch('tests'),
+  });
+  // Which mode (if any) is currently streaming. The WS handler reads this
+  // ref to route incoming tokens to the right scratch slice. null = no
+  // scratch stream in flight (tokens go to the solve-mode active tab).
+  const codingScratchStreamingModeRef = useRef<ScratchMode | null>(null);
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
@@ -327,30 +384,88 @@ export function SessionClient() {
       const id = streamingIdRef.current;
       if (!id) return;
       if (msg.type === 'started') {
-        updateEntry(id, { answer: '', error: null, marked: false, status: 'streaming' });
+        // Reset the pending assistant turn — askAnswer/followUp already
+        // appended an empty {role:'assistant', content:''} placeholder to
+        // messages, so we just clear it here. error/marked reset belongs on
+        // the entry (thread-level) not the turn.
+        answerStartedAtRef.current = performance.now();
+        answerEffectiveProviderRef.current = msg.provider;
+        updateEntry(id, (e) => ({
+          answer: '',
+          error: null,
+          marked: false,
+          status: 'streaming',
+          messages: e.messages.map((m, i) =>
+            i === e.messages.length - 1 && m.role === 'assistant' ? { ...m, content: '' } : m,
+          ),
+        }));
         return;
       }
       if (msg.type === 'token') {
-        updateEntry(id, (e) => ({ answer: e.answer + msg.text }));
+        updateEntry(id, (e) => {
+          const last = e.messages[e.messages.length - 1];
+          const updated =
+            last && last.role === 'assistant'
+              ? e.messages.map((m, i) =>
+                  i === e.messages.length - 1 ? { ...m, content: m.content + msg.text } : m,
+                )
+              : [...e.messages, { role: 'assistant' as const, content: msg.text }];
+          return { answer: e.answer + msg.text, messages: updated };
+        });
         return;
       }
       if (msg.type === 'done') {
+        // Record per-provider answer latency. Only fires on a real stream
+        // completion so cancellations / errors don't pollute the map.
+        const startedAt = answerStartedAtRef.current;
+        const provider = answerEffectiveProviderRef.current;
+        if (startedAt !== null && provider) {
+          const elapsed = Math.max(0, performance.now() - startedAt);
+          setAnswerLatencyMs(elapsed);
+          setAnswerLatencyProvider(provider);
+          setAnswerLatencyByProvider((prev) => ({ ...prev, [provider]: elapsed }));
+        }
+        answerStartedAtRef.current = null;
         updateEntry(id, { status: 'done' });
         streamingIdRef.current = null;
         return;
       }
       if (msg.type === 'cancelled') {
+        answerStartedAtRef.current = null;
         updateEntry(id, { status: 'cancelled' });
         streamingIdRef.current = null;
         return;
       }
       if (msg.type === 'error') {
+        answerStartedAtRef.current = null;
         updateEntry(id, { status: 'error', error: msg.message });
         streamingIdRef.current = null;
+      }
+      if (msg.type === 'provider_changed') {
+        // Backend auto-fell-back to a different provider mid-call (primary
+        // returned 503 or similar). Show a small ephemeral toast so the
+        // user understands why the cost pill / badge shifted. The provider
+        // selector in the panel does NOT change — the next call still
+        // tries the user's choice first. We also re-anchor the latency
+        // start time so the answerLatencyMs we record on `done` reflects
+        // the time the EFFECTIVE provider took, not the failed primary +
+        // the new one (which would punish the fallback unfairly).
+        answerEffectiveProviderRef.current = msg.to;
+        answerStartedAtRef.current = performance.now();
+        showFallbackToast(`${msg.from} → ${msg.to} · fallback`);
       }
     },
     [updateEntry],
   );
+
+  const showFallbackToast = (message: string) => {
+    setDesktopToast(message);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setDesktopToast(null);
+      toastTimerRef.current = null;
+    }, 2400);
+  };
 
   // ─── transcribe WS message handling ────────────────────────────────────────
   const onTranscribeMessage = useCallback((msg: WsServerMessage) => {
@@ -371,12 +486,23 @@ export function SessionClient() {
       // The backend detector can fire multiple times for the same
       // question while the speaker keeps talking — the recent transcript
       // window still contains the question, the model still sees it as
-      // a question. Skip if it matches the latest entry's question (a
-      // shallow normalized compare) so we don't create stuck duplicates.
+      // a question. Skip if it matches the latest entry's most recent
+      // user turn (a shallow normalized compare) so we don't create
+      // stuck duplicates.
       const norm = msg.question.trim().toLowerCase();
       const last = entriesRef.current[entriesRef.current.length - 1];
-      if (last && last.question.trim().toLowerCase() === norm) return;
-      askAnswer(msg.question);
+      if (last) {
+        const recentUser = [...last.messages].reverse().find((m) => m.role === 'user')?.content;
+        if (recentUser && recentUser.trim().toLowerCase() === norm) return;
+      }
+      // Backend classifier already decided whether this is a follow-up of
+      // the prior thread; route accordingly. Falling back to askAnswer
+      // when the flag is missing keeps legacy events working.
+      if (msg.is_follow_up && entriesRef.current.length > 0) {
+        followUp(msg.question);
+      } else {
+        askAnswer(msg.question, { autoDetected: true });
+      }
       setActiveFeature('listen');
     }
   }, []);
@@ -394,10 +520,61 @@ export function SessionClient() {
       onCodingProblemDetected(msg.problem, msg.fingerprint);
       return;
     }
+    // `saved` only fires for solve mode (other modes are ephemeral on the
+    // backend). Route to tabs.
     if (msg.type === 'saved') {
       updateTab(msg.fingerprint, (t) => ({ ...t, savedId: msg.id }));
       return;
     }
+    if (msg.type === 'provider_changed') {
+      // Mirror of the answer-side toast — surfaces a coding-WS fallback
+      // (e.g. Gemini overloaded, switched to OpenAI mid-solve).
+      showFallbackToast(`${msg.from} → ${msg.to} · fallback`);
+      return;
+    }
+
+    // Stream routing: when a non-solve mode is in flight, the entire stream
+    // belongs to that mode's scratch slice until done/cancelled/error.
+    // Solve mode continues to route by active fingerprint.
+    const streamingMode = codingScratchStreamingModeRef.current;
+    if (streamingMode) {
+      const patchScratch = (patch: Partial<CodingScratchState>) =>
+        setCodingScratchByMode((prev) => ({
+          ...prev,
+          [streamingMode]: { ...prev[streamingMode], ...patch },
+        }));
+      if (msg.type === 'started') {
+        patchScratch({ output: '', status: 'streaming', errorMessage: null });
+        return;
+      }
+      if (msg.type === 'token') {
+        setCodingScratchByMode((prev) => ({
+          ...prev,
+          [streamingMode]: {
+            ...prev[streamingMode],
+            output: prev[streamingMode].output + msg.text,
+          },
+        }));
+        return;
+      }
+      if (msg.type === 'done') {
+        patchScratch({ status: 'done' });
+        codingScratchStreamingModeRef.current = null;
+        return;
+      }
+      if (msg.type === 'cancelled') {
+        patchScratch({ status: 'cancelled' });
+        codingScratchStreamingModeRef.current = null;
+        return;
+      }
+      if (msg.type === 'error') {
+        patchScratch({ status: 'error', errorMessage: msg.message });
+        codingScratchStreamingModeRef.current = null;
+        return;
+      }
+      return;
+    }
+
     const fp = activeFingerprintRef.current;
     if (!fp) return;
     if (msg.type === 'started') {
@@ -427,7 +604,12 @@ export function SessionClient() {
     }
   }, []);
 
-  const requestSolve = (fingerprint: string, problem: ExtractedProblem, lang: CodingLanguage) => {
+  const requestSolve = (
+    fingerprint: string,
+    problem: ExtractedProblem,
+    lang: CodingLanguage,
+    opts: { feedback?: string; priorSolution?: string } = {},
+  ) => {
     const ws = codingWsRef.current;
     if (!ws || !ws.isOpen()) {
       setCodingError('coding WS not connected');
@@ -438,6 +620,12 @@ export function SessionClient() {
       problem,
       language: lang,
       provider: providerRef.current,
+      // When the user fires "Refine with feedback" we forward the prior
+      // attempt + their note so the backend flips into refine framing.
+      // Empty strings are normalized to undefined so they don't trigger
+      // the refine path on a stray click.
+      feedback: opts.feedback?.trim() || undefined,
+      prior_solution: opts.priorSolution?.trim() || undefined,
     });
     updateTab(fingerprint, (t) => ({
       ...t,
@@ -446,6 +634,22 @@ export function SessionClient() {
       status: 'streaming',
       error: null,
     }));
+  };
+
+  const onCodingRefine = (feedback: string) => {
+    const fp = activeFingerprintRef.current;
+    if (!fp) return;
+    const tab = codingTabsRef.current.find((t) => t.fingerprint === fp);
+    if (!tab) return;
+    requestSolve(fp, tab.problem, codingLanguageRef.current, {
+      feedback,
+      // Send ONLY the code block, not the full Markdown response. With the
+      // full response the model treats `**Previous attempt:**` as "extend
+      // this finished answer" and cosmetically refines instead of
+      // diagnosing. Code-only framing makes "this is the buggy code you
+      // need to fix" unambiguous.
+      priorSolution: extractFirstCodeBlock(tab.solution),
+    });
   };
 
   const onCodingProblemDetected = (problem: ExtractedProblem, fingerprint: string) => {
@@ -489,29 +693,40 @@ export function SessionClient() {
     }
   };
 
-  const askAnswer = (q: string) => {
+  const cancelInFlight = () => {
+    const ws = answerRef.current;
+    if (!streamingIdRef.current || !ws) return;
+    const oldId = streamingIdRef.current;
+    ws.cancel?.();
+    updateEntry(oldId, { status: 'cancelled' });
+    streamingIdRef.current = null;
+  };
+
+  const newId = () =>
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const askAnswer = (q: string, opts: { autoDetected?: boolean } = {}) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
       return;
     }
-    // If there's already a stream in flight, cancel it before starting a
-    // new one. Otherwise tokens for the new question land on the new
-    // entry but the old entry is stuck at status='streaming' forever
-    // because the WS only routes via streamingIdRef.current (single
-    // pointer). Mark it cancelled so the chevron'd older view is honest.
-    if (streamingIdRef.current) {
-      const oldId = streamingIdRef.current;
-      ws.cancel?.();
-      updateEntry(oldId, { status: 'cancelled' });
-      streamingIdRef.current = null;
-    }
-    const id =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    // Cancel any in-flight stream before starting a new thread — tokens
+    // route by streamingIdRef so otherwise the old entry would hang in
+    // status='streaming' forever.
+    cancelInFlight();
+    const id = newId();
+    const threadId = newId();
+    const messages: AnswerMessage[] = [
+      { role: 'user', content: q },
+      { role: 'assistant', content: '' },
+    ];
     const entry: AnswerEntry = {
       id,
+      messages,
+      threadId,
       question: q,
       answer: '',
       status: 'streaming',
@@ -528,7 +743,59 @@ export function SessionClient() {
       return next;
     });
     streamingIdRef.current = id;
-    ws.send({ type: 'question', question: q, provider: providerRef.current });
+    ws.send({
+      type: 'question',
+      messages: [{ role: 'user', content: q }],
+      thread_id: threadId,
+      provider: providerRef.current,
+      auto_detected: opts.autoDetected,
+    });
+  };
+
+  const followUp = (q: string) => {
+    const ws = answerRef.current;
+    if (!ws || !ws.isOpen()) {
+      setPanelError('copilot WS not connected');
+      return;
+    }
+    const current = entriesRef.current[entryIndex];
+    if (!current) {
+      // No active thread — treat as a fresh ask. Matches what a user
+      // probably means when they hit "More detail" on an empty panel.
+      askAnswer(q);
+      return;
+    }
+    // Stream might still be in flight for THIS entry; cancel it so the
+    // new follow-up replaces the trailing assistant turn cleanly.
+    cancelInFlight();
+    const prior = current.messages.filter(
+      (m, i) =>
+        // Drop the trailing placeholder/in-progress assistant turn if it's
+        // empty (i.e. user fired a follow-up before the previous answer
+        // settled). The completed assistant turns are kept.
+        !(i === current.messages.length - 1 && m.role === 'assistant' && m.content === ''),
+    );
+    const nextMessages: AnswerMessage[] = [
+      ...prior,
+      { role: 'user', content: q },
+      { role: 'assistant', content: '' },
+    ];
+    setPanelError(null);
+    updateEntry(current.id, {
+      messages: nextMessages,
+      answer: '',
+      status: 'streaming',
+      error: null,
+    });
+    streamingIdRef.current = current.id;
+    ws.send({
+      type: 'question',
+      // Send the full thread minus the trailing empty assistant placeholder
+      // so the backend sees user/assistant/user… with the new turn last.
+      messages: nextMessages.slice(0, -1),
+      thread_id: current.threadId,
+      provider: providerRef.current,
+    });
   };
 
   // ─── transcribe lifecycle ──────────────────────────────────────────────────
@@ -676,7 +943,7 @@ export function SessionClient() {
 
   const submitCustom = (q: string) => askAnswer(q);
 
-  // ─── hotkeys: ⌘⇧␣ (force-ask) and ⌘⇧C (toggle coding mode) ────────────────
+  // ─── hotkeys: ⌘⇧␣ (force-ask), ⌘⇧C (coding), ⌘⇧. (panic blur) ─────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.metaKey || !e.shiftKey) return;
@@ -694,6 +961,19 @@ export function SessionClient() {
       if (e.code === 'KeyC' || e.key?.toLowerCase() === 'c') {
         e.preventDefault();
         toggleCodingMode();
+        return;
+      }
+      // Panic blur — when someone walks behind the screen, hit ⌘⇧. to
+      // (a) flip privacyMode on so all rendered text + answers blur, and
+      // (b) close whatever feature popover is open so the bar collapses
+      // to a small floating pill. Press again to release.
+      if (e.code === 'Period' || e.key === '.') {
+        e.preventDefault();
+        setPrivacyMode((v) => {
+          const next = !v;
+          if (next) setActiveFeature(null);
+          return next;
+        });
         return;
       }
     };
@@ -777,6 +1057,76 @@ export function SessionClient() {
 
   const onCodingCancel = () => {
     codingWsRef.current?.cancel();
+  };
+
+  // Non-solve mode runner. Sends a {type:'solve', mode:'explain' | 'debug' |
+  // 'tests', …} payload over the coding WS; the backend dispatches to the
+  // correct prompt. Sets codingScratchStreamingModeRef so the WS handler
+  // routes tokens to the scratch slice belonging to THIS mode (not the
+  // active tab, not whichever mode is currently visible if the user has
+  // already switched away).
+  const runCodingScratch = () => {
+    if (codingMode === 'solve') return;
+    const scratchMode = codingMode satisfies ScratchMode;
+    const patchSlice = (patch: Partial<CodingScratchState>) =>
+      setCodingScratchByMode((prev) => ({
+        ...prev,
+        [scratchMode]: { ...prev[scratchMode], ...patch },
+      }));
+    const ws = codingWsRef.current;
+    if (!ws || !ws.isOpen()) {
+      patchSlice({ status: 'error', errorMessage: 'coding WS not connected' });
+      return;
+    }
+    // For tests mode the problem comes from the currently-active solve tab.
+    const activeTab = codingTabsRef.current.find(
+      (t) => t.fingerprint === activeFingerprintRef.current,
+    );
+    if (scratchMode === 'tests' && !activeTab) {
+      patchSlice({
+        status: 'error',
+        errorMessage: 'tests mode needs a detected problem — switch to Solve first.',
+      });
+      return;
+    }
+    const slice = codingScratchByMode[scratchMode];
+    patchSlice({ output: '', status: 'streaming', errorMessage: null });
+    codingScratchStreamingModeRef.current = scratchMode;
+    ws.send({
+      type: 'solve',
+      mode: scratchMode,
+      problem: scratchMode === 'tests' && activeTab ? activeTab.problem : undefined,
+      code: scratchMode === 'explain' || scratchMode === 'debug' ? slice.code : undefined,
+      error: scratchMode === 'debug' ? slice.error : undefined,
+      hint: slice.hint || undefined,
+      language: codingLanguageRef.current,
+      provider: providerRef.current,
+    });
+  };
+
+  const cancelCodingScratch = () => {
+    codingWsRef.current?.cancel();
+  };
+
+  const updateCodingScratch = (patch: Partial<CodingScratchState>) => {
+    if (codingMode === 'solve') return;
+    const m = codingMode satisfies ScratchMode;
+    setCodingScratchByMode((prev) => ({
+      ...prev,
+      [m]: { ...prev[m], ...patch },
+    }));
+  };
+
+  const onCodingModeChange = (next: CodingMode) => {
+    // Switching modes only cancels the in-flight stream — it does NOT
+    // clear the other modes' scratch state. That's the whole point: the
+    // user can flip Explain → Debug → Explain and find their prior output
+    // intact on each side.
+    if (codingScratchStreamingModeRef.current) {
+      codingWsRef.current?.cancel();
+      codingScratchStreamingModeRef.current = null;
+    }
+    setCodingMode(next);
   };
 
   const refreshHistory = useCallback(async () => {
@@ -951,6 +1301,7 @@ export function SessionClient() {
             onProviderChange={onProviderChange}
             question={currentEntry?.question ?? null}
             answer={currentEntry?.answer ?? ''}
+            messages={currentEntry?.messages ?? []}
             status={currentEntry?.status ?? 'idle'}
             error={currentEntry?.error ?? panelError}
             marked={Boolean(currentEntry?.marked)}
@@ -963,6 +1314,7 @@ export function SessionClient() {
             onPrev={goPrev}
             onNext={goNext}
             onSubmitCustom={submitCustom}
+            onFollowUp={followUp}
             connected={answerConnected}
             privacyMode={privacyMode}
             transcriptSlot={
@@ -996,9 +1348,21 @@ export function SessionClient() {
             onRegenerate={onCodingRegenerate}
             onReExtract={onCodingReExtract}
             onCancel={onCodingCancel}
+            onRefine={onCodingRefine}
             frameInfo={codingFrame}
             error={codingError}
             privacyMode={privacyMode}
+            mode={codingMode}
+            onModeChange={onCodingModeChange}
+            scratch={
+              // Solve mode has no scratch view (tabs handle output) — pass
+              // an empty slice so the prop stays typed; CodingPanel
+              // ignores it when isSolveMode is true.
+              codingMode === 'solve' ? blankScratch('explain') : codingScratchByMode[codingMode]
+            }
+            onScratchChange={updateCodingScratch}
+            onRunScratch={runCodingScratch}
+            onCancelScratch={cancelCodingScratch}
           />
         </PanelErrorBoundary>
       );
@@ -1132,6 +1496,9 @@ export function SessionClient() {
               answerConnected={answerConnected}
               codingConnected={codingConnected}
               latencyMs={latencyMs}
+              answerLatencyMs={answerLatencyMs}
+              answerLatencyProvider={answerLatencyProvider}
+              answerLatencyByProvider={answerLatencyByProvider}
               usage={usage}
               sessionId={sessionId}
               activeSecondaryFeature={
@@ -1165,7 +1532,7 @@ export function SessionClient() {
               role="presentation"
               aria-label="Drag to move"
               title="Drag to move"
-              className="flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 active:cursor-grabbing dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
             >
               <Move className="h-3.5 w-3.5" aria-hidden />
             </span>
@@ -1404,6 +1771,14 @@ function CaptureCluster({
   );
 }
 
+// Pull the first fenced code block (```lang … ```) from a Markdown
+// response. Falls back to the full string if no fence is found — better
+// to send something than nothing.
+function extractFirstCodeBlock(markdown: string): string {
+  const fence = markdown.match(/```[a-zA-Z+#]*\n([\s\S]*?)```/);
+  return (fence?.[1] ?? markdown).trim();
+}
+
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -1611,6 +1986,50 @@ function LatencyBadge({ ms }: { ms: number | null }) {
   );
 }
 
+// Answer-stream latency, tagged with the effective provider (which can
+// differ from the user's selection after auto-fallback). Hovering shows
+// the per-provider history so you can compare Gemini vs OpenAI etc.
+// Thresholds intentionally higher than transcribe latency — answer
+// generation is bound by model latency (1–10s typical), not network.
+function AnswerLatencyBadge({
+  ms,
+  provider,
+  byProvider,
+}: {
+  ms: number;
+  provider: AnswerProvider;
+  byProvider: Partial<Record<AnswerProvider, number>>;
+}) {
+  const tone =
+    ms < 1500
+      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+      : ms < 4000
+        ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+        : 'bg-red-500/15 text-red-700 dark:text-red-400';
+  const dot = ms < 1500 ? 'bg-emerald-500' : ms < 4000 ? 'bg-amber-500' : 'bg-red-500';
+  const shortName: Record<AnswerProvider, string> = {
+    gemini: 'gem',
+    openai: 'gpt',
+    deepseek: 'ds',
+  };
+  // Tooltip: list every provider we've seen with their most recent
+  // elapsed_ms. Useful when comparing providers or debugging slow runs.
+  const tooltip = (Object.keys(byProvider) as AnswerProvider[])
+    .map((p) => `${p}: ${Math.round(byProvider[p] ?? 0)} ms`)
+    .join('\n');
+  return (
+    <div
+      className={cn('flex items-center gap-1.5 rounded-full px-2 py-1', tone)}
+      title={tooltip || undefined}
+    >
+      <span className={cn('h-1.5 w-1.5 rounded-full', dot)} />
+      <span className="font-mono">
+        {shortName[provider]} · {Math.round(ms)} ms
+      </span>
+    </div>
+  );
+}
+
 // Overflow menu — Parakeet's ⋮ trigger. Holds the secondary chrome that
 // used to live on the second utility row: stealth status, connection pills,
 // latency, cost, session id, the non-hero features (Setup, History,
@@ -1632,6 +2051,9 @@ function OverflowMenu({
   answerConnected,
   codingConnected,
   latencyMs,
+  answerLatencyMs,
+  answerLatencyProvider,
+  answerLatencyByProvider,
   usage,
   sessionId,
   activeSecondaryFeature,
@@ -1650,6 +2072,9 @@ function OverflowMenu({
   answerConnected: boolean;
   codingConnected: boolean;
   latencyMs: number | null;
+  answerLatencyMs: number | null;
+  answerLatencyProvider: AnswerProvider | null;
+  answerLatencyByProvider: Partial<Record<AnswerProvider, number>>;
   usage: SessionUsageSummary | null;
   sessionId: string;
   activeSecondaryFeature: FeatureKey | null;
@@ -1727,8 +2152,18 @@ function OverflowMenu({
             </div>
             {latencyMs !== null ? (
               <div className="flex items-center justify-between gap-2">
-                <span className="text-neutral-600 dark:text-neutral-400">Latency</span>
+                <span className="text-neutral-600 dark:text-neutral-400">Transcribe</span>
                 <LatencyBadge ms={latencyMs} />
+              </div>
+            ) : null}
+            {answerLatencyMs !== null && answerLatencyProvider ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-neutral-600 dark:text-neutral-400">Answer</span>
+                <AnswerLatencyBadge
+                  ms={answerLatencyMs}
+                  provider={answerLatencyProvider}
+                  byProvider={answerLatencyByProvider}
+                />
               </div>
             ) : null}
             <div className="flex items-center justify-between gap-2">

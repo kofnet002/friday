@@ -39,6 +39,8 @@ const args = [
   'AppKit',
   '-framework',
   'Foundation',
+  '-framework',
+  'CoreGraphics',
   '-dynamiclib',
   '-undefined',
   'dynamic_lookup',

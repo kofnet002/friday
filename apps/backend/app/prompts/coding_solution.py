@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-CODING_SOLUTION_VERSION = "1.1.0"
+CODING_SOLUTION_VERSION = "1.2.0"
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,69 @@ If the user prompt contains a `**Starter code:**` block, it is the function sign
 - NEVER rename, drop, or add parameters. NEVER restructure into a different API.
 This is critical — the candidate will paste your body into the editor's existing signature; mismatches mean the answer is graded wrong.
 
+PLATFORM-SPECIFIC BOILERPLATE (use when **Starter code:** is missing)
+
+Vision sometimes captures only the left-hand problem statement and misses
+the editor pane on the right, so `**Starter code:**` can be empty even when
+the platform clearly expects a specific wrapper. When you see a
+`**Platform:**` line in the user prompt:
+
+- `leetcode`: MANDATORY. Wrap your solution in `class Solution:` and use
+  `self` as the first parameter of the method. The method name comes from
+  the problem statement (e.g. "implement maximumScore" → `def maximumScore`).
+  Type hints are required and should match the parameter names shown in
+  the problem. Never emit a bare module-level function for LeetCode.
+- `hackerrank`: typically a module-level function — do NOT wrap in a class
+  unless the problem text explicitly shows one.
+- `coderpad` / `turing` / `other` / null: follow whatever the problem
+  statement implies; default to a bare function with the language's
+  idiomatic style.
+
+If the user prompt provides BOTH `**Starter code:**` AND `**Platform:**`,
+the starter code wins — it's the literal text on the candidate's screen.
+
+REFINING A PRIOR SOLUTION (MANDATORY when **Previous attempt:** is present)
+
+If the user prompt contains a `**Previous attempt:**` block followed by a
+`**What went wrong:**` note, you are REFINING — not solving from scratch.
+
+DIAGNOSIS DISCIPLINE (do not skip)
+
+Before writing the corrected code, BUILD a mental trace of the previous
+attempt on the failing input:
+
+1. Pick the failing input. If the feedback names a specific case (e.g.
+   "Case 2 failed, expected 94, got 64"), use that example's input from
+   the problem statement. If the feedback only names an exception type or
+   line, use the FIRST example input the problem provides.
+2. Walk the previous code on that input. Track variable values mentally
+   step by step.
+3. Identify the FIRST step where an intermediate value disagrees with
+   what the correct algorithm would produce. That step's expression is
+   the bug.
+
+The diagnosis result goes inline in your **🎯 Approach** line, like:
+"Previous attempt computed dp[i][j] as a running prefix sum which double-
+counts adjacent black cells; correct is to track only the white→black
+boundary contribution. Now using …".
+
+OUTPUT RULES
+
+- Reuse the same function / method name and signature unless the failure
+  shows that's literally what's broken. NEVER change the wrapper class
+  (`class Solution:` on LeetCode stays).
+- Keep the output structure the same (Approach · Complexity · Code · Key
+  insight · Edge cases). Add a final 1-line bullet to **⚡ Edge cases**:
+  `Fix: <what changed vs the prior attempt>`.
+- If you can't identify a single root cause from the trace, say so
+  explicitly in **🎯 Approach** ("Cannot pin a single bug; rewriting with
+  a verified DP recurrence below.") and produce a clean rewrite using a
+  fundamentally different recurrence — do not resubmit a cosmetic edit
+  of the previous attempt.
+- If the previous attempt has the right idea but a wrong base case or
+  off-by-one, name the exact base case / index that was wrong in the
+  diagnosis.
+
 RULES
 
 - Prefer the OPTIMAL known solution.
@@ -65,11 +128,21 @@ RULES
 LENGTH TARGET: 250-500 words total including code.{extra}"""
 
 
-def coding_solution_user_prompt(problem: dict[str, Any]) -> str:
+def coding_solution_user_prompt(
+    problem: dict[str, Any],
+    *,
+    prior_solution: str | None = None,
+    feedback: str | None = None,
+) -> str:
     parts: list[str] = []
     title = problem.get("title")
     if title:
         parts.append(f"**{title}**\n")
+    # Surface platform so the system prompt's platform-conditional rule
+    # has a hook. Vision sets this to "leetcode" / "hackerrank" / etc.
+    platform = problem.get("platform")
+    if platform:
+        parts.append(f"**Platform:** {platform}\n")
     statement = problem.get("problem_statement") or ""
     parts.append(statement)
     examples = problem.get("examples") or []
@@ -91,6 +164,12 @@ def coding_solution_user_prompt(problem: dict[str, Any]) -> str:
     signature = problem.get("function_signature")
     if signature:
         parts.append(f"\n**Starter code:**\n```\n{signature}\n```")
+    # Refine mode: previous attempt + failure note attach at the end so
+    # the model sees the problem first, then the artifact-to-improve.
+    if prior_solution:
+        parts.append(f"\n**Previous attempt:**\n```\n{prior_solution.strip()}\n```")
+    if feedback:
+        parts.append(f"\n**What went wrong:**\n{feedback.strip()}")
     return "\n".join(parts)
 
 
@@ -99,3 +178,13 @@ SOLUTION_OPENAI_MODEL = "gpt-4o"
 SOLUTION_DEEPSEEK_MODEL = "deepseek-chat"
 SOLUTION_MAX_OUTPUT_TOKENS = 2500
 SOLUTION_TEMPERATURE = 0.2
+
+# Refine ("Didn't pass?") goes to the stronger / reasoning tier of each
+# provider. Flash 2.5 with thinking off was good enough for solve but
+# couldn't actually diagnose LeetCode-Hard failures — it just resampled
+# the same buggy approach. Pro with thinking on burns more tokens but
+# usually converges in one refine pass.
+REFINE_GEMINI_MODEL = "gemini-2.5-pro"
+REFINE_OPENAI_MODEL = "gpt-4o"
+REFINE_DEEPSEEK_MODEL = "deepseek-reasoner"
+REFINE_MAX_OUTPUT_TOKENS = 4000

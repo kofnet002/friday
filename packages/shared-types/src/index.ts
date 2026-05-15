@@ -34,12 +34,21 @@ export interface TranscriptEvent {
   confidence: number;
   /** Seconds since epoch when the backend received/forwarded the transcript. */
   timestamp: number;
+  /** Dominant speaker id for this segment, when Deepgram diarization is on.
+   *  null when only one speaker has been heard so far or diarization was
+   *  unavailable for the segment. */
+  speaker?: number | null;
 }
 
 export interface QuestionDetectedEvent {
   type: 'question_detected';
   question: string;
   confidence: number;
+  /** True when the detector + follow-up classifier think this question
+   *  extends the prior thread rather than starting a new one. Frontend
+   *  routes follow-ups through followUp() (append) instead of askAnswer()
+   *  (new thread). Absent on legacy events. */
+  is_follow_up?: boolean;
 }
 
 // ─── /ws/answer ──────────────────────────────────────────────────────────────
@@ -55,24 +64,67 @@ export interface AnswerSessionContext {
   recent_transcript?: string;
 }
 
-/** Client → server. */
+/** A single turn in an Answer thread. The tail of `messages` is always the
+ *  current user turn the backend should respond to; everything before it is
+ *  rendered as prior conversation in the prompt. */
+export type AnswerRole = 'user' | 'assistant';
+export interface AnswerMessage {
+  role: AnswerRole;
+  content: string;
+}
+
+/** Client → server. The legacy `{type:'question', question}` shape is still
+ *  accepted by the backend (treated as a one-turn thread) so old clients
+ *  keep working during a deploy. New clients should use `messages`. */
 export type AnswerClientMessage =
   | {
       type: 'question';
-      question: string;
+      /** Full thread including the new user turn at the end. */
+      messages?: AnswerMessage[];
+      /** Legacy single-question payload. Used when `messages` is absent. */
+      question?: string;
+      /** Identifier shared across every turn in the same thread. Persisted
+       *  on each qa_history row so the server-side history view can group
+       *  follow-ups back into the conversation that produced them. */
+      thread_id?: string;
       provider: AnswerProvider;
       session_context?: AnswerSessionContext;
+      auto_detected?: boolean;
     }
   | { type: 'cancel' }
   | { type: 'ping' };
 
-/** Server → client. */
+/** Server → client. `started.question` is the latest user turn (for legacy
+ *  rendering); `started.thread_id` echoes the client's thread_id when one is
+ *  provided so the client can correlate `saved` rows. */
 export type AnswerServerMessage =
-  | { type: 'started'; question: string; provider: AnswerProvider }
+  | {
+      type: 'started';
+      question: string;
+      provider: AnswerProvider;
+      thread_id?: string;
+    }
   | { type: 'token'; text: string }
   | { type: 'done' }
   | { type: 'cancelled' }
   | { type: 'pong' }
+  | { type: 'saved'; id: number; thread_id?: string }
+  | {
+      type: 'limit_exceeded';
+      kind: 'tokens' | 'audio';
+      message: string;
+      used: number;
+      limit: number;
+    }
+  /** Auto-fallback fired before any tokens streamed. The client should
+   *  update its provider badge / cost attribution to `to`. `reason` is the
+   *  trimmed error string from the failing upstream call. */
+  | {
+      type: 'provider_changed';
+      from: AnswerProvider;
+      to: AnswerProvider;
+      reason: string;
+    }
   | { type: 'error'; message: string };
 
 // ─── /setup / context API ────────────────────────────────────────────────────
@@ -156,11 +208,35 @@ export interface CodingProblemDetectedEvent {
   fingerprint: string;
 }
 
-// /ws/coding-solution protocol
+/** Operating modes for /ws/coding-solution. `solve` is the existing
+ *  problem→solution path. `explain` walks through a code snippet, `debug`
+ *  diagnoses + fixes a snippet given an error message, `tests` generates
+ *  edge-case test inputs for a problem. */
+export type CodingMode = 'solve' | 'explain' | 'debug' | 'tests';
+
+// /ws/coding-solution protocol. The legacy {type:'solve'} payload still
+// works; new modes route via {type:'solve' with mode:'…'} so the WS
+// frame type stays a single 'solve' string the server already handles.
 export type CodingSolutionClientMessage =
   | {
       type: 'solve';
-      problem: ExtractedProblem;
+      /** Defaults to 'solve' when absent — keeps legacy clients working. */
+      mode?: CodingMode;
+      /** Required for solve and tests modes. */
+      problem?: ExtractedProblem;
+      /** Required for explain and debug modes. */
+      code?: string;
+      /** Required for debug mode (the error message / stack trace). */
+      error?: string;
+      /** Optional free-text context for any mode (e.g. file name, function
+       *  the user has selected, what they were trying to do). */
+      hint?: string;
+      /** Refine inputs for solve mode — the previous solution that failed
+       *  and the user's note about what went wrong (e.g. "Case 2 failed,
+       *  expected 94 got 64"). When either is set the solve prompt flips
+       *  into refine framing. */
+      prior_solution?: string;
+      feedback?: string;
       language: CodingLanguage;
       provider: AnswerProvider;
       extra_instructions?: string;
@@ -169,11 +245,18 @@ export type CodingSolutionClientMessage =
   | { type: 'ping' };
 
 export type CodingSolutionServerMessage =
-  | { type: 'started'; provider: AnswerProvider; language: CodingLanguage; model: string }
+  | {
+      type: 'started';
+      provider: AnswerProvider;
+      language: CodingLanguage;
+      model: string;
+      mode?: CodingMode;
+    }
   | { type: 'token'; text: string }
   | { type: 'done' }
   | { type: 'cancelled' }
   | { type: 'pong' }
   | { type: 'error'; message: string }
   | { type: 'saved'; id: number; fingerprint: string }
+  | { type: 'provider_changed'; from: AnswerProvider; to: AnswerProvider; reason: string }
   | CodingProblemDetectedEvent;

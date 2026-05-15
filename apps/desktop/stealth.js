@@ -71,8 +71,25 @@ function applyToWindow(win, enabled) {
   }
 }
 
+/** Snap the OS cursor to a screen-coordinate point. Used on stealth
+ *  enable (when the user has opted in) to push the cursor off the
+ *  Friday overlay so its position doesn't leak the window during a
+ *  screen-share. Silent no-op on non-macOS or when the native binding
+ *  isn't available — calling this when stealth-enable is the wrong
+ *  branch shouldn't crash the app. */
+function moveCursor(x, y) {
+  if (process.platform !== 'darwin') return false;
+  if (!nativeAddon?.moveCursor) return false;
+  try {
+    return Boolean(nativeAddon.moveCursor(Number(x), Number(y)));
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   applyToWindow,
   isAvailable,
+  moveCursor,
   statusShape,
 };

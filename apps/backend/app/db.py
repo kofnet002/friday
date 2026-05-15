@@ -29,10 +29,18 @@ CREATE TABLE IF NOT EXISTS qa_history (
     provider TEXT NOT NULL,
     model TEXT,
     auto_detected INTEGER DEFAULT 0,
+    -- Groups follow-up turns back into the conversation that produced
+    -- them. NULL on legacy rows / one-shot questions. Set client-side
+    -- (UUID) so the server doesn't need to mint one mid-stream.
+    thread_id TEXT,
     created_at REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_qa_session ON qa_history(session_id, created_at DESC);
+-- idx_qa_thread is created in init_db() AFTER _ensure_columns migrates
+-- existing databases — putting it here breaks startup on any DB that
+-- pre-dates the thread_id column because executescript() runs before
+-- the migration and SQLite rejects an index on a missing column.
 
 CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,6 +98,16 @@ async def init_db() -> None:
             db,
             "sessions",
             {"interview_type": "TEXT", "default_provider": "TEXT"},
+        )
+        await _ensure_columns(db, "qa_history", {"thread_id": "TEXT"})
+        # Indexes that depend on migrated columns must run AFTER the
+        # _ensure_columns step — see the comment in SCHEMA next to the
+        # idx_qa_thread placeholder. CREATE INDEX IF NOT EXISTS is a
+        # no-op once the index already exists, so this is safe on
+        # repeat startups.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_qa_thread "
+            "ON qa_history(thread_id, created_at)"
         )
         await db.commit()
 
@@ -176,13 +194,15 @@ async def append_qa(
     provider: str,
     model: str | None = None,
     auto_detected: bool = False,
+    thread_id: str | None = None,
 ) -> int:
     async with aiosqlite.connect(_db_path()) as db:
         cursor = await db.execute(
             """
             INSERT INTO qa_history (session_id, question, answer, provider,
-                                    model, auto_detected, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    model, auto_detected, thread_id,
+                                    created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -191,6 +211,7 @@ async def append_qa(
                 provider,
                 model,
                 1 if auto_detected else 0,
+                thread_id,
                 time.time(),
             ),
         )
@@ -203,7 +224,8 @@ async def list_qa(session_id: str, limit: int = 50) -> list[dict[str, Any]]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """
-            SELECT id, question, answer, provider, model, auto_detected, created_at
+            SELECT id, question, answer, provider, model, auto_detected,
+                   thread_id, created_at
             FROM qa_history
             WHERE session_id = ?
             ORDER BY created_at DESC

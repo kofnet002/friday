@@ -42,9 +42,14 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws.send_failed", session_id=effective_session_id, error=str(exc))
 
-    async def on_question(question: str, confidence: float) -> None:
+    async def on_question(question: str, confidence: float, is_follow_up: bool) -> None:
         await send_json_safe(
-            {"type": "question_detected", "question": question, "confidence": confidence}
+            {
+                "type": "question_detected",
+                "question": question,
+                "confidence": confidence,
+                "is_follow_up": is_follow_up,
+            }
         )
 
     detector = QuestionDetector(effective_session_id, on_question)

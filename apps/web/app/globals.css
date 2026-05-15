@@ -31,6 +31,16 @@ body {
     sans-serif;
 }
 
+/* Tailwind v3's preflight forces `cursor: pointer` on every <button> and
+   [role="button"]. We don't want the cursor to change on hover anywhere —
+   hover state is communicated purely by background color. Reset it back to
+   the default arrow. (Disabled-state cursor utilities are also dropped at
+   the class level; no cursor-* utilities remain in components.) */
+button,
+[role='button'] {
+  cursor: default;
+}
+
 /* Make the floating bar itself the window's drag handle. Empty bar pixels
    move the window; interactive children (buttons, links, popover triggers)
    opt out so clicks still register. Ignored by normal browsers. */

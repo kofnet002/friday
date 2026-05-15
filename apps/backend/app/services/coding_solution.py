@@ -1,14 +1,28 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
 
 from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
+from app.prompts.coding_modes import (
+    CodingMode,
+    CodingModeContext,
+    debug_system_prompt,
+    debug_user_prompt,
+    explain_system_prompt,
+    explain_user_prompt,
+    tests_system_prompt,
+    tests_user_prompt,
+)
 from app.prompts.coding_solution import (
     CodingSolutionContext,
+    REFINE_DEEPSEEK_MODEL,
+    REFINE_GEMINI_MODEL,
+    REFINE_MAX_OUTPUT_TOKENS,
+    REFINE_OPENAI_MODEL,
     SOLUTION_DEEPSEEK_MODEL,
     SOLUTION_GEMINI_MODEL,
     SOLUTION_MAX_OUTPUT_TOKENS,
@@ -17,18 +31,132 @@ from app.prompts.coding_solution import (
     coding_solution_system_prompt,
     coding_solution_user_prompt,
 )
+from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek"]
 
+# Coding shares the same fallback ordering as answer (primary → other two).
+_CODING_FALLBACK_ORDER: dict[Provider, list[Provider]] = {
+    "gemini": ["gemini", "openai", "deepseek"],
+    "openai": ["openai", "gemini", "deepseek"],
+    "deepseek": ["deepseek", "gemini", "openai"],
+}
 
-def resolved_model(provider: Provider) -> str:
+
+def _coding_provider_chain(primary: Provider) -> list[Provider]:
+    available: set[str] = set()
+    if settings.gemini_api_key:
+        available.add("gemini")
+    if settings.openai_api_key:
+        available.add("openai")
+    if settings.deepseek_api_key:
+        available.add("deepseek")
+    chain = [p for p in _CODING_FALLBACK_ORDER[primary] if p in available]
+    return chain or [primary]
+
+
+def _build_prompts_for_mode(
+    mode: CodingMode,
+    *,
+    problem: dict[str, Any] | None,
+    code: str | None,
+    error: str | None,
+    hint: str | None,
+    language: str,
+    extra_instructions: str | None,
+    prior_solution: str | None = None,
+    feedback: str | None = None,
+) -> tuple[str, str]:
+    """Pick the system + user prompt pair for a coding mode. Raises on
+    missing required inputs so the caller surfaces a clean error to the
+    client rather than the model hallucinating from empty fields.
+
+    `prior_solution` + `feedback` are only used by solve mode — they flip
+    the prompt into refine framing (the system prompt's "REFINING A PRIOR
+    SOLUTION" section). The other modes ignore them."""
+    if mode == "solve":
+        if not problem or not problem.get("problem_statement"):
+            raise ValueError("solve mode requires problem.problem_statement")
+        ctx = CodingSolutionContext(language=language, extra_instructions=extra_instructions)
+        return (
+            coding_solution_system_prompt(ctx),
+            coding_solution_user_prompt(
+                problem,
+                prior_solution=prior_solution,
+                feedback=feedback,
+            ),
+        )
+
+    mode_ctx = CodingModeContext(language=language, extra_instructions=extra_instructions)
+    if mode == "explain":
+        if not (code and code.strip()):
+            raise ValueError("explain mode requires code")
+        return explain_system_prompt(mode_ctx), explain_user_prompt(code, hint)
+    if mode == "debug":
+        if not (code and code.strip()):
+            raise ValueError("debug mode requires code")
+        if not (error and error.strip()):
+            raise ValueError("debug mode requires error")
+        return debug_system_prompt(mode_ctx), debug_user_prompt(code, error, hint)
+    if mode == "tests":
+        if not problem or not problem.get("problem_statement"):
+            raise ValueError("tests mode requires problem.problem_statement")
+        return tests_system_prompt(mode_ctx), tests_user_prompt(problem)
+    raise ValueError(f"unknown coding mode: {mode!r}")
+
+
+def resolved_model(provider: Provider, *, deep: bool = False) -> str:
+    """Return the model name the streamers will actually call. `deep=True`
+    selects the reasoning / Pro tier per provider — used for refine calls
+    where the failure signals we need more capability than the default
+    Flash / 4o / chat tier. OpenAI deep is currently the same gpt-4o
+    (reasoning models require paid-tier access we don't assume); see
+    _stream_openai for the rationale."""
     if provider == "gemini":
-        return SOLUTION_GEMINI_MODEL
+        return REFINE_GEMINI_MODEL if deep else SOLUTION_GEMINI_MODEL
     if provider == "deepseek":
-        return SOLUTION_DEEPSEEK_MODEL
+        return REFINE_DEEPSEEK_MODEL if deep else SOLUTION_DEEPSEEK_MODEL
     return SOLUTION_OPENAI_MODEL
+
+
+def _is_refine(prior_solution: str | None, feedback: str | None) -> bool:
+    """A coding call is a refine when EITHER input is non-empty. Both
+    arrive together in practice — UI sends prior_solution alongside
+    feedback — but the WS handler only sets them for solve mode so it's
+    safe to treat the union as the trigger."""
+    return bool((prior_solution and prior_solution.strip()) or (feedback and feedback.strip()))
+
+
+def should_use_deep(
+    mode: CodingMode,
+    problem: dict[str, Any] | None,
+    prior_solution: str | None,
+    feedback: str | None,
+) -> bool:
+    """Decide whether a coding call should use the reasoning tier (Gemini
+    Pro + thinking, deepseek-reasoner).
+
+    True when, for a solve-mode call:
+      - it's a refine (prior_solution / feedback present), OR
+      - the vision extractor tagged the problem `difficulty: "hard"`.
+
+    The difficulty field was already extracted but unused for routing —
+    a hard problem silently went to the cheap Flash tier and tended to
+    fail. Routing hard solves straight to the reasoning tier removes the
+    need for the user to manually switch providers. Non-solve modes
+    (explain / debug / tests) never auto-deep — they're lighter and carry
+    no difficulty signal."""
+    if mode != "solve":
+        return False
+    if _is_refine(prior_solution, feedback):
+        return True
+    if isinstance(problem, dict):
+        difficulty = str(problem.get("difficulty") or "").strip().lower()
+        if difficulty == "hard":
+            return True
+    return False
 
 
 async def stream_solution(
@@ -37,33 +165,107 @@ async def stream_solution(
     language: str,
     extra_instructions: str | None = None,
 ) -> AsyncIterator[str]:
-    ctx = CodingSolutionContext(language=language, extra_instructions=extra_instructions)
-    system = coding_solution_system_prompt(ctx)
-    user = coding_solution_user_prompt(problem)
-    if provider == "gemini":
-        factory = lambda: _stream_gemini(system, user)  # noqa: E731
-    elif provider == "deepseek":
-        factory = lambda: _stream_deepseek(system, user)  # noqa: E731
-    else:
-        factory = lambda: _stream_openai(system, user)  # noqa: E731
-    async for tok in retry_stream(factory, label=f"coding.{provider}"):
+    # Backwards-compat thin wrapper around stream_coding. Existing callers
+    # that only do problem→solution don't need to know about modes.
+    async for tok in stream_coding(
+        provider=provider,
+        mode="solve",
+        problem=problem,
+        language=language,
+        extra_instructions=extra_instructions,
+    ):
         yield tok
 
 
-async def _stream_gemini(system: str, user: str) -> AsyncIterator[str]:
+async def stream_coding(
+    *,
+    provider: Provider,
+    mode: CodingMode,
+    language: str,
+    problem: dict[str, Any] | None = None,
+    code: str | None = None,
+    error: str | None = None,
+    hint: str | None = None,
+    extra_instructions: str | None = None,
+    prior_solution: str | None = None,
+    feedback: str | None = None,
+    on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
+) -> AsyncIterator[str]:
+    """Unified streamer for all four coding panel modes (solve/explain/
+    debug/tests). The system+user prompts come from _build_prompts_for_mode;
+    the provider dispatch and retry logic are shared.
+
+    Falls back to the next provider in the chain when the primary fails
+    before emitting any tokens; on_fallback fires per switch so the WS can
+    notify the client.
+
+    `prior_solution` + `feedback` flip solve mode into refine framing — the
+    user reports a failing test or compilation error and we regenerate with
+    that context so the candidate doesn't have to retype the problem.
+    """
+    system, user = _build_prompts_for_mode(
+        mode,
+        problem=problem,
+        code=code,
+        error=error,
+        hint=hint,
+        language=language,
+        extra_instructions=extra_instructions,
+        prior_solution=prior_solution,
+        feedback=feedback,
+    )
+    # Reasoning tier kicks in for refines AND for fresh solves of problems
+    # the extractor tagged "hard" — see should_use_deep. Without this, a
+    # hard problem's first solve goes to cheap Flash and tends to fail.
+    deep = should_use_deep(mode, problem, prior_solution, feedback)
+
+    def make_factory(p: Provider) -> AsyncIterator[str]:
+        if p == "gemini":
+            base = lambda: _stream_gemini(system, user, deep=deep)  # noqa: E731
+        elif p == "deepseek":
+            base = lambda: _stream_deepseek(system, user, deep=deep)  # noqa: E731
+        else:
+            base = lambda: _stream_openai(system, user, deep=deep)  # noqa: E731
+        return retry_stream(base, label=f"coding.{mode}.{p}{'.deep' if deep else ''}")
+
+    chain = _coding_provider_chain(provider)
+    async for tok in stream_with_fallback(
+        providers=chain,
+        factory=make_factory,
+        on_fallback=on_fallback,
+        label=f"coding.{mode}",
+    ):
+        yield tok
+
+
+async def _stream_gemini(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     client = genai.Client(api_key=settings.gemini_api_key)
+    # Deep refine: switch to Pro and let thinking run (-1 = auto budget).
+    # Pro's reasoning is what actually unlocks LeetCode-Hard diagnoses;
+    # without it we just resample Flash's original bug.
+    if deep:
+        model = REFINE_GEMINI_MODEL
+        max_tokens = REFINE_MAX_OUTPUT_TOKENS
+        thinking = genai_types.ThinkingConfig(thinking_budget=-1)
+    else:
+        model = SOLUTION_GEMINI_MODEL
+        max_tokens = SOLUTION_MAX_OUTPUT_TOKENS
+        # Disable Gemini 2.5 thinking on the default solve path — its
+        # thinking tokens consume the output budget and were truncating
+        # the visible code mid-function. We pay for thinking only when
+        # refining, where the budget bump (REFINE_MAX_OUTPUT_TOKENS)
+        # accommodates both reasoning + code.
+        thinking = genai_types.ThinkingConfig(thinking_budget=0)
     stream = await client.aio.models.generate_content_stream(
-        model=SOLUTION_GEMINI_MODEL,
+        model=model,
         contents=user,
         config=genai_types.GenerateContentConfig(
             system_instruction=system,
             temperature=SOLUTION_TEMPERATURE,
-            max_output_tokens=SOLUTION_MAX_OUTPUT_TOKENS,
-            # Disable Gemini 2.5 thinking — its thinking tokens consume the
-            # output budget and were truncating the visible code mid-function.
-            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            max_output_tokens=max_tokens,
+            thinking_config=thinking,
         ),
     )
     async for chunk in stream:
@@ -72,10 +274,17 @@ async def _stream_gemini(system: str, user: str) -> AsyncIterator[str]:
             yield text
 
 
-async def _stream_openai(system: str, user: str) -> AsyncIterator[str]:
+async def _stream_openai(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
+    # OpenAI deep refine used to switch to o1-mini / o3-mini for actual
+    # reasoning. Reverted because reasoning models require a paid-tier
+    # OpenAI account and the user didn't have balance. Deep on OpenAI is
+    # now just gpt-4o with a bumped token budget — same model as solve.
+    # This is a real ceiling for OpenAI users on LeetCode Hard; switch to
+    # the Gemini provider (Pro + thinking) when refining hard problems.
+    max_tokens = REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS
     stream = await client.chat.completions.create(
         model=SOLUTION_OPENAI_MODEL,
         messages=[
@@ -84,7 +293,7 @@ async def _stream_openai(system: str, user: str) -> AsyncIterator[str]:
         ],
         stream=True,
         temperature=SOLUTION_TEMPERATURE,
-        max_tokens=SOLUTION_MAX_OUTPUT_TOKENS,
+        max_tokens=max_tokens,
     )
     async for chunk in stream:
         if not chunk.choices:
@@ -94,22 +303,29 @@ async def _stream_openai(system: str, user: str) -> AsyncIterator[str]:
             yield delta.content
 
 
-async def _stream_deepseek(system: str, user: str) -> AsyncIterator[str]:
+async def _stream_deepseek(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
     if not settings.deepseek_api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
     client = AsyncOpenAI(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
     )
+    # deepseek-reasoner returns reasoning tokens in `delta.reasoning_content`
+    # (separate from `delta.content`). We don't surface them — the model's
+    # final answer is in `.content` which is what the prompt's output
+    # structure rules apply to. Just bumping the model + max_tokens is
+    # enough to get the reasoning benefit on refine.
+    model = REFINE_DEEPSEEK_MODEL if deep else SOLUTION_DEEPSEEK_MODEL
+    max_tokens = REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS
     stream = await client.chat.completions.create(
-        model=SOLUTION_DEEPSEEK_MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         stream=True,
         temperature=SOLUTION_TEMPERATURE,
-        max_tokens=SOLUTION_MAX_OUTPUT_TOKENS,
+        max_tokens=max_tokens,
     )
     async for chunk in stream:
         if not chunk.choices:

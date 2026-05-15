@@ -9,6 +9,7 @@ import {
   Keyboard,
   MessageSquareText,
   MonitorUp,
+  MousePointer2,
   Shield,
   ShieldAlert,
   VenetianMask,
@@ -22,6 +23,7 @@ import { cn } from '@/lib/utils';
 export const SESSION_SHORTCUTS = [
   { keys: '⌘ ⇧ Space', label: 'Force-ask copilot using last 2 transcript finals' },
   { keys: '⌘ ⇧ C', label: 'Toggle coding mode' },
+  { keys: '⌘ ⇧ .', label: 'Panic blur — mask all panels, close active popover' },
   { keys: '⌘ /', label: 'Show this shortcuts cheat-sheet' },
 ];
 
@@ -197,6 +199,28 @@ export function SettingsBody({
             </Button>
           </div>
         </div>
+        {/* macOS exposes a system-level recording indicator (the orange dot
+            in the menu bar) whenever ScreenCaptureKit is capturing audio.
+            That dot is system-managed — no app can hide it. Surfacing this
+            here so users understand the limit of stealth mode. */}
+        <div className="rounded-xl border border-orange-300 bg-orange-50/70 p-4 dark:border-orange-900/70 dark:bg-orange-950/20">
+          <h4 className="flex items-center gap-2 font-semibold text-orange-900 dark:text-orange-200">
+            <span
+              aria-hidden
+              className="h-2.5 w-2.5 rounded-full bg-orange-500 ring-2 ring-orange-300/40"
+            />
+            macOS recording indicator
+          </h4>
+          <p className="mt-1 text-xs text-orange-900/80 dark:text-orange-200/80">
+            macOS shows an orange dot in the menu bar whenever audio is being captured (by Friday or
+            anyone else). It is system-managed — Stealth mode can&apos;t hide it. If an interviewer
+            can see your menu bar in a screen share, they will see the dot while a session is live.
+          </p>
+          <p className="mt-1 text-xs text-orange-900/80 dark:text-orange-200/80">
+            Mitigation: hide the menu bar (System Settings → Control Center → Menu Bar Only) or
+            share only a specific window rather than your whole screen.
+          </p>
+        </div>
         <ToggleRow
           icon={<Shield className="h-4 w-4" />}
           title="Accessory app"
@@ -245,6 +269,14 @@ export function SettingsBody({
           description="Blur transcript, answers, and coding output inside the visible window."
           checked={privacyMode}
           onChange={onPrivacyModeChange}
+        />
+        <ToggleRow
+          icon={<MousePointer2 className="h-4 w-4" />}
+          title="Move cursor on stealth"
+          description="When stealth turns on, snap the OS cursor to the bottom-right corner so its position doesn't reveal the Friday overlay during a screen-share. Off by default — it's disorienting until you expect it."
+          checked={Boolean(prefs?.moveCursorOnStealth)}
+          disabled={!desktopStatus}
+          onChange={(checked) => onPreferenceChange({ moveCursorOnStealth: checked })}
         />
         <div className="flex items-center justify-between rounded-lg border border-neutral-200 px-3 py-2 dark:border-neutral-800">
           <div>
