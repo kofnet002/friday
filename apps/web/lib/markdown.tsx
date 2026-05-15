@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { BundledLanguage, Highlighter } from 'shiki';
-import { Check, Copy } from 'lucide-react';
+import { Check, Code2, Copy } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
@@ -87,58 +87,15 @@ export function useHighlightedCode(code: string, lang: string | undefined): stri
   return html;
 }
 
-function CopyButton({ getText }: { getText: () => string }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-    },
-    [],
-  );
-  const onClick = async () => {
-    const text = getText();
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand('copy');
-      } catch {
-        /* swallow */
-      }
-      document.body.removeChild(ta);
-    }
-    setCopied(true);
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => setCopied(false), 1400);
-  };
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={copied ? 'Copied' : 'Copy code'}
-      title={copied ? 'Copied' : 'Copy code'}
-      className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-md border border-neutral-300/60 bg-white/80 text-neutral-600 opacity-80 shadow-sm backdrop-blur transition-opacity hover:opacity-100 hover:text-neutral-900 focus-visible:opacity-100 dark:border-neutral-700/60 dark:bg-neutral-900/80 dark:text-neutral-300 dark:hover:text-neutral-50"
-    >
-      {copied ? (
-        <Check className="h-3 w-3" aria-hidden />
-      ) : (
-        <Copy className="h-3 w-3" aria-hidden />
-      )}
-    </button>
-  );
-}
-
+// IDE-style code card for fenced Markdown code blocks. Mirrors the
+// CodeSection card used by Solve mode (traffic lights · language label ·
+// always-visible Copy button · shiki body) so code reads the same way in
+// Debug / Explain / Tests output and in copilot answers.
 function CodeBlock({ children, className }: { children: string; className?: string }) {
   const lang = normalizeLang(className);
   const [html, setHtml] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
   const source = children.replace(/\n$/, '');
 
   useEffect(() => {
@@ -166,24 +123,75 @@ function CodeBlock({ children, className }: { children: string; className?: stri
     };
   }, [source, lang]);
 
-  if (html) {
-    return (
-      <div className="group relative">
-        <div
-          className="friday-code overflow-x-auto rounded-md border border-neutral-200 text-sm dark:border-neutral-800"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
-        <CopyButton getText={() => source} />
-      </div>
-    );
-  }
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+    },
+    [],
+  );
+
+  const onCopy = async () => {
+    if (!source) return;
+    try {
+      await navigator.clipboard.writeText(source);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = source;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } catch {
+        /* swallow */
+      }
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1400);
+  };
+
   return (
-    <div className="group relative">
-      <pre className="overflow-x-auto rounded-md border border-neutral-200 bg-neutral-50 p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900">
-        <code>{source}</code>
-      </pre>
-      <CopyButton getText={() => source} />
-    </div>
+    <section className="friday-code-card my-3 overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm ring-1 ring-black/5 dark:border-neutral-800 dark:bg-[#0d1117] dark:ring-white/5">
+      <header className="flex items-center justify-between gap-2 border-b border-neutral-200 px-3.5 py-2 dark:border-neutral-800/80">
+        <div className="flex items-center gap-2">
+          <span className="flex items-center gap-1" aria-hidden>
+            <span className="h-2.5 w-2.5 rounded-full bg-red-400/90" />
+            <span className="h-2.5 w-2.5 rounded-full bg-amber-400/90" />
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/90" />
+          </span>
+          <span className="ml-1 inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.14em] text-neutral-500 dark:text-neutral-400">
+            <Code2 className="h-3 w-3" aria-hidden />
+            {lang === 'text' ? 'code' : lang}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={onCopy}
+          aria-label={copied ? 'Copied' : 'Copy code'}
+          title={copied ? 'Copied' : 'Copy code'}
+          className="inline-flex h-6 items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 text-[10px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-200 dark:hover:bg-neutral-800"
+        >
+          {copied ? (
+            <Check className="h-3 w-3 text-emerald-500" aria-hidden />
+          ) : (
+            <Copy className="h-3 w-3" aria-hidden />
+          )}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </header>
+      <div className="friday-code-body relative overflow-x-auto text-[12px] leading-relaxed">
+        {html ? (
+          <div dangerouslySetInnerHTML={{ __html: html }} />
+        ) : (
+          <pre className="px-3 py-2 font-mono text-neutral-800 dark:text-neutral-100">
+            <code>{source || ' '}</code>
+          </pre>
+        )}
+      </div>
+    </section>
   );
 }
 
