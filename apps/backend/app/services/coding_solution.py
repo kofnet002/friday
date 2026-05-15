@@ -129,6 +129,36 @@ def _is_refine(prior_solution: str | None, feedback: str | None) -> bool:
     return bool((prior_solution and prior_solution.strip()) or (feedback and feedback.strip()))
 
 
+def should_use_deep(
+    mode: CodingMode,
+    problem: dict[str, Any] | None,
+    prior_solution: str | None,
+    feedback: str | None,
+) -> bool:
+    """Decide whether a coding call should use the reasoning tier (Gemini
+    Pro + thinking, deepseek-reasoner).
+
+    True when, for a solve-mode call:
+      - it's a refine (prior_solution / feedback present), OR
+      - the vision extractor tagged the problem `difficulty: "hard"`.
+
+    The difficulty field was already extracted but unused for routing —
+    a hard problem silently went to the cheap Flash tier and tended to
+    fail. Routing hard solves straight to the reasoning tier removes the
+    need for the user to manually switch providers. Non-solve modes
+    (explain / debug / tests) never auto-deep — they're lighter and carry
+    no difficulty signal."""
+    if mode != "solve":
+        return False
+    if _is_refine(prior_solution, feedback):
+        return True
+    if isinstance(problem, dict):
+        difficulty = str(problem.get("difficulty") or "").strip().lower()
+        if difficulty == "hard":
+            return True
+    return False
+
+
 async def stream_solution(
     provider: Provider,
     problem: dict[str, Any],
@@ -184,10 +214,10 @@ async def stream_coding(
         prior_solution=prior_solution,
         feedback=feedback,
     )
-    # Refine calls go to the reasoning tier of each provider. Without this
-    # the streamer just resamples the same Flash output and the failure
-    # repeats — see the LeetCode-3225 case that motivated this branch.
-    deep = mode == "solve" and _is_refine(prior_solution, feedback)
+    # Reasoning tier kicks in for refines AND for fresh solves of problems
+    # the extractor tagged "hard" — see should_use_deep. Without this, a
+    # hard problem's first solve goes to cheap Flash and tends to fail.
+    deep = should_use_deep(mode, problem, prior_solution, feedback)
 
     def make_factory(p: Provider) -> AsyncIterator[str]:
         if p == "gemini":

@@ -12,7 +12,12 @@ from app.logging import log
 from app.prompts.coding_modes import CodingMode
 from app.redis_client import store_solution
 from app.services.coding_extraction import problem_fingerprint
-from app.services.coding_solution import Provider, resolved_model, stream_coding
+from app.services.coding_solution import (
+    Provider,
+    resolved_model,
+    should_use_deep,
+    stream_coding,
+)
 from app.services.limits import check_token_budget
 from app.services.usage import record_solution_call
 
@@ -84,7 +89,12 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
             )
             return
 
-        model = resolved_model(provider)
+        # Reasoning-tier routing: refines AND hard-difficulty solves use the
+        # deep model. Compute it here too so the `started` event + usage
+        # logging report the model that will actually run, not the default
+        # Flash tier.
+        deep = should_use_deep(mode, problem, prior_solution, feedback)
+        model = resolved_model(provider, deep=deep)
         await send_json(
             {
                 "type": "started",
@@ -102,7 +112,9 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         async def _on_fallback(prev: Provider, nxt: Provider, reason: str) -> None:
             nonlocal effective_provider, effective_model
             effective_provider = nxt
-            effective_model = resolved_model(nxt)
+            # Preserve the deep flag across the fallback so the credited
+            # model matches the tier the new provider actually used.
+            effective_model = resolved_model(nxt, deep=deep)
             await send_json(
                 {
                     "type": "provider_changed",
