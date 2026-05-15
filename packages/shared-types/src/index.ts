@@ -244,6 +244,17 @@ export type CodingSolutionClientMessage =
   | { type: 'cancel' }
   | { type: 'ping' };
 
+/** Result of running a generated solution against one extracted example.
+ *  `actual` is the repr() of what the solution returned; `error` is set
+ *  instead when the call raised. Exactly one of actual/error is present. */
+export interface CodingTestCaseResult {
+  ok: boolean;
+  input: string;
+  expected: string;
+  actual?: string | null;
+  error?: string | null;
+}
+
 export type CodingSolutionServerMessage =
   | {
       type: 'started';
@@ -259,4 +270,14 @@ export type CodingSolutionServerMessage =
   | { type: 'error'; message: string }
   | { type: 'saved'; id: number; fingerprint: string }
   | { type: 'provider_changed'; from: AnswerProvider; to: AnswerProvider; reason: string }
+  /** Self-verification outcome for a just-streamed solve solution. `ran`
+   *  is false when verification was skipped (non-Python, no examples,
+   *  blocked code) — `skip_reason` says why and `cases` is empty. */
+  | {
+      type: 'test_results';
+      fingerprint: string;
+      ran: boolean;
+      cases: CodingTestCaseResult[];
+      skip_reason?: string | null;
+    }
   | CodingProblemDetectedEvent;

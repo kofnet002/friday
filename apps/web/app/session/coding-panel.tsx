@@ -5,12 +5,15 @@ import type {
   AnswerProvider,
   CodingLanguage,
   CodingMode,
+  CodingTestCaseResult,
   ExtractedProblem,
 } from '@friday/shared-types';
 
 import {
   Bug,
   Check,
+  CircleCheck,
+  CircleX,
   Clock,
   Code2,
   Copy,
@@ -33,6 +36,14 @@ import { cn } from '@/lib/utils';
 
 export type CodingSolutionStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error';
 
+/** Self-verification state for a solve tab. null until the backend has
+ *  run the streamed solution against the problem's examples. */
+export interface CodingTestState {
+  ran: boolean;
+  cases: CodingTestCaseResult[];
+  skipReason: string | null;
+}
+
 export interface CodingProblemTab {
   fingerprint: string;
   problem: ExtractedProblem;
@@ -41,6 +52,9 @@ export interface CodingProblemTab {
   status: CodingSolutionStatus;
   error: string | null;
   savedId: number | null;
+  /** Result of running the streamed solution against the examples.
+   *  null while the solution is still streaming or before verification. */
+  tests: CodingTestState | null;
 }
 
 /** Scratch buffer for non-solve modes (explain / debug / tests). Lives on
@@ -701,6 +715,13 @@ function ActiveProblemView({
         </div>
       ) : null}
 
+      {/* Self-verification verdict — appears once the backend has run the
+          streamed solution against the problem's examples. Hidden while
+          the solution is still streaming. */}
+      {!isStreaming && solution && tab.tests ? (
+        <TestResultsPanel tests={tab.tests} onRefine={onRefine} />
+      ) : null}
+
       <div className={cn(privacyMode && 'select-none blur-sm')}>
         {status === 'error' ? (
           <div className="flex items-center justify-between gap-2 rounded-lg border border-red-400/50 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300">
@@ -722,6 +743,109 @@ function ActiveProblemView({
           Stealth mode is on. Coding content is masked in this window.
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// ─── Self-verification panel ───────────────────────────────────────────────
+
+// Compose a precise, machine-checked refine prompt from the first failing
+// example. The judge ran the solution locally, so this feedback is exact
+// (not the user's hand-typed guess) — exactly what the refine prompt's
+// "trace the failing input" rule wants.
+function buildFailureFeedback(cases: CodingTestCaseResult[]): string {
+  const failing = cases.map((c, i) => ({ c, i })).filter(({ c }) => !c.ok);
+  if (failing.length === 0) return '';
+  const lines = [
+    `Self-verification failed ${failing.length} of ${cases.length} example(s). ` +
+      `Fix the solution so every example passes.`,
+    '',
+  ];
+  for (const { c, i } of failing) {
+    lines.push(`Example ${i + 1}:`);
+    lines.push(`  input:    ${c.input}`);
+    lines.push(`  expected: ${c.expected}`);
+    if (c.error) {
+      lines.push(`  raised:   ${c.error}`);
+    } else {
+      lines.push(`  got:      ${c.actual ?? '(no output)'}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function TestResultsPanel({
+  tests,
+  onRefine,
+}: {
+  tests: CodingTestState;
+  onRefine: (feedback: string) => void;
+}) {
+  // Verification was skipped (non-Python, no examples, blocked code) — a
+  // quiet neutral note so the user knows why there's no ✓/✗, not an alarm.
+  if (!tests.ran) {
+    return (
+      <div className="rounded-lg border border-neutral-200 bg-neutral-50/60 px-3 py-2 text-[11px] text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-400">
+        Not verified — {tests.skipReason ?? 'verification skipped'}.
+      </div>
+    );
+  }
+
+  const passed = tests.cases.filter((c) => c.ok).length;
+  const total = tests.cases.length;
+  const allPassed = total > 0 && passed === total;
+
+  if (allPassed) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50/70 px-3 py-2 text-xs font-medium text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-950/30 dark:text-emerald-200">
+        <CircleCheck className="h-4 w-4 shrink-0" aria-hidden />
+        Verified — passed all {total} example{total === 1 ? '' : 's'}.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-red-300 bg-red-50/70 p-3 dark:border-red-500/30 dark:bg-red-950/30">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2 text-xs font-semibold text-red-800 dark:text-red-200">
+          <CircleX className="h-4 w-4 shrink-0" aria-hidden />
+          Failed {total - passed} of {total} example{total === 1 ? '' : 's'}
+        </span>
+        <Button type="button" size="sm" onClick={() => onRefine(buildFailureFeedback(tests.cases))}>
+          Refine with this failure
+        </Button>
+      </div>
+      <ul className="flex flex-col gap-1.5">
+        {tests.cases.map((c, i) => (
+          <li
+            key={i}
+            className="flex items-start gap-2 font-mono text-[11px] text-red-900/90 dark:text-red-100/85"
+          >
+            {c.ok ? (
+              <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" aria-hidden />
+            ) : (
+              <CircleX className="mt-0.5 h-3 w-3 shrink-0 text-red-500" aria-hidden />
+            )}
+            <span className="min-w-0 break-words">
+              <span className="font-sans font-medium">Example {i + 1}</span> · {c.input}
+              {c.ok ? null : (
+                <>
+                  {' → '}
+                  {c.error ? (
+                    <span className="text-red-700 dark:text-red-300">raised {c.error}</span>
+                  ) : (
+                    <>
+                      got <span className="text-red-700 dark:text-red-300">{c.actual}</span>,
+                      expected{' '}
+                      <span className="text-emerald-700 dark:text-emerald-300">{c.expected}</span>
+                    </>
+                  )}
+                </>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
