@@ -11,6 +11,7 @@ from app.db import record_coding_solution
 from app.logging import log
 from app.prompts.coding_modes import CodingMode
 from app.redis_client import store_solution
+from app.services.code_runner import run_solution_tests
 from app.services.coding_extraction import problem_fingerprint
 from app.services.coding_solution import (
     Provider,
@@ -203,6 +204,48 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+        # Self-verification — only for solve mode (explain/debug/tests have
+        # no problem examples to check against). Runs the streamed solution
+        # against the extracted examples in a sandboxed subprocess and emits
+        # a test_results event so the panel can show ✓/✗ before the user
+        # pastes anything into the real judge. Best-effort: a verification
+        # failure never blocks the solution that already streamed fine.
+        if solution_text and mode == "solve":
+            examples = problem.get("examples") or []
+            try:
+                verdict = await run_solution_tests(
+                    solution_markdown=solution_text,
+                    examples=examples,
+                    language=language,
+                )
+                await send_json(
+                    {
+                        "type": "test_results",
+                        "fingerprint": _fingerprint(problem),
+                        "ran": verdict.ran,
+                        "skip_reason": verdict.skip_reason,
+                        "cases": [
+                            {
+                                "ok": c.ok,
+                                "input": c.input,
+                                "expected": c.expected,
+                                "actual": c.actual,
+                                "error": c.error,
+                            }
+                            for c in verdict.cases
+                        ],
+                    }
+                )
+                log.info(
+                    "ws_coding.verified",
+                    session_id=session_id,
+                    ran=verdict.ran,
+                    passed=verdict.passed,
+                    total=verdict.total,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ws_coding.verify_failed", error=str(exc))
 
     try:
         while True:

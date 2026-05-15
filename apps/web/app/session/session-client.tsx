@@ -526,6 +526,20 @@ export function SessionClient() {
       updateTab(msg.fingerprint, (t) => ({ ...t, savedId: msg.id }));
       return;
     }
+    // Self-verification outcome — carries its own fingerprint so it routes
+    // independent of the active tab (the user may have switched away while
+    // the backend was running the sandbox).
+    if (msg.type === 'test_results') {
+      updateTab(msg.fingerprint, (t) => ({
+        ...t,
+        tests: {
+          ran: msg.ran,
+          cases: msg.cases,
+          skipReason: msg.skip_reason ?? null,
+        },
+      }));
+      return;
+    }
     if (msg.type === 'provider_changed') {
       // Mirror of the answer-side toast — surfaces a coding-WS fallback
       // (e.g. Gemini overloaded, switched to OpenAI mid-solve).
@@ -584,6 +598,8 @@ export function SessionClient() {
         status: 'streaming',
         error: null,
         savedId: null,
+        // A fresh stream invalidates any prior verification result.
+        tests: null,
       }));
       return;
     }
@@ -668,6 +684,7 @@ export function SessionClient() {
         status: 'streaming',
         error: null,
         savedId: null,
+        tests: null,
       };
       const next = [...prev, tab];
       return next.length > MAX_CODING_TABS ? next.slice(-MAX_CODING_TABS) : next;
