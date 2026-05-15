@@ -12,6 +12,7 @@ from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import recent_transcript_text
 from app.services.answer import Provider, stream_answer
 from app.services.limits import check_token_budget
+from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
 
 router = APIRouter()
@@ -204,6 +205,28 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 await send_json({"type": "saved", "id": row_id, "thread_id": thread_id})
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws_answer.save_failed", error=str(exc))
+
+            # Record answer-stream usage so the cost pill reflects copilot
+            # spend (previously uncounted entirely). Token counts are a
+            # rough char/4 proxy: input = system-prompt overhead + question
+            # + recent transcript + prior thread turns; output = answer.
+            try:
+                prior_chars = sum(len(t.content) for t in prior_turns)
+                transcript_chars = len(context.recent_transcript or "")
+                input_tokens = (
+                    ANSWER_PROMPT_OVERHEAD_TOKENS
+                    + (len(question) + transcript_chars + prior_chars) // 4
+                )
+                output_tokens = max(1, len(answer_text) // 4)
+                await record_answer_call(
+                    session_id=session_id,
+                    provider=effective_provider,
+                    model=effective_model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     try:
         while True:
