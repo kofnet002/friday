@@ -223,7 +223,7 @@ export function AnswerPanel({
             disabled={entryCount === 0 || entryIndex <= 1}
             aria-label="Previous answer"
             title="Previous answer"
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
           >
             <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
           </button>
@@ -239,7 +239,7 @@ export function AnswerPanel({
             disabled={entryCount === 0 || entryIndex >= entryCount}
             aria-label="Next answer"
             title="Next answer"
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
           >
             <ChevronRight className="h-3.5 w-3.5" aria-hidden />
           </button>
@@ -323,7 +323,7 @@ export function AnswerPanel({
               className={cn(
                 'inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-white/70 px-2 py-0.5 transition-colors hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700',
                 'dark:border-neutral-800 dark:bg-neutral-900/60 dark:hover:border-sky-500/60 dark:hover:bg-sky-950/40 dark:hover:text-sky-300',
-                'disabled:cursor-not-allowed disabled:opacity-50',
+                'disabled:opacity-50',
               )}
               title={r.prompt}
             >
@@ -568,7 +568,7 @@ function MenuItem({
       disabled={disabled}
       className={cn(
         'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors',
-        'disabled:cursor-not-allowed disabled:opacity-40',
+        'disabled:opacity-40',
         !disabled && !destructive && 'hover:bg-neutral-100 dark:hover:bg-neutral-800',
         !disabled &&
           destructive &&

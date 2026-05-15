@@ -266,7 +266,7 @@ function ResumeUploadField({
   return (
     <label
       className={cn(
-        'group relative flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-7 text-center transition-colors',
+        'group relative flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-7 text-center transition-colors',
         status.kind === 'ok'
           ? 'border-emerald-400/60 bg-emerald-50/40 dark:border-emerald-400/30 dark:bg-emerald-950/20'
           : status.kind === 'err'

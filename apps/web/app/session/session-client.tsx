@@ -1532,7 +1532,7 @@ export function SessionClient() {
               role="presentation"
               aria-label="Drag to move"
               title="Drag to move"
-              className="flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 active:cursor-grabbing dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
             >
               <Move className="h-3.5 w-3.5" aria-hidden />
             </span>

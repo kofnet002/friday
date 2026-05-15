@@ -937,7 +937,7 @@ function CodeSection({ raw, isStreaming }: { raw: string; isStreaming: boolean }
             disabled={!code}
             aria-label={copied ? 'Copied' : 'Copy code'}
             title={copied ? 'Copied' : 'Copy code'}
-            className="inline-flex h-6 items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 text-[10px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-200 dark:hover:bg-neutral-800"
+            className="inline-flex h-6 items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 text-[10px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-800 dark:bg-neutral-900/60 dark:text-neutral-200 dark:hover:bg-neutral-800"
           >
             {copied ? (
               <Check className="h-3 w-3 text-emerald-500" aria-hidden />
