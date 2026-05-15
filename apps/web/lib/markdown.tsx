@@ -215,9 +215,13 @@ export function Markdown({ text, className }: { text: string; className?: string
               {children}
             </p>
           ),
+          // pl-5 (padding) not ml-5 (margin): with list-style-position
+          // outside, the marker renders in the element's own padding box.
+          // Margin would place the bullet in negative space outside the
+          // box — flush against the surrounding card edge.
           ul: ({ children, ...rest }) => (
             <ul
-              className="my-3 ml-5 list-disc space-y-1.5 marker:[color:rgb(var(--md-fg-muted))]"
+              className="my-3 pl-5 list-disc space-y-1.5 marker:[color:rgb(var(--md-fg-muted))]"
               style={{ color: 'rgb(var(--md-fg))' }}
               {...rest}
             >
@@ -226,7 +230,7 @@ export function Markdown({ text, className }: { text: string; className?: string
           ),
           ol: ({ children, ...rest }) => (
             <ol
-              className="my-3 ml-5 list-decimal space-y-1.5 marker:[color:rgb(var(--md-fg-muted))]"
+              className="my-3 pl-5 list-decimal space-y-1.5 marker:[color:rgb(var(--md-fg-muted))]"
               style={{ color: 'rgb(var(--md-fg))' }}
               {...rest}
             >
