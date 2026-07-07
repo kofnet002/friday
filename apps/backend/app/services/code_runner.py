@@ -132,6 +132,19 @@ def _find_entry(code: str) -> tuple[str, bool] | None:
 _HARNESS_TEMPLATE = '''\
 import ast, json, sys
 
+# LeetCode-style prelude: their runtime pre-imports typing names and the
+# common algo modules, and generated solutions rely on that (e.g. a bare
+# `List[int]` annotation). Without this the harness dies with NameError
+# before running a single test.
+from typing import List, Dict, Tuple, Set, Optional, Union, Any, Deque, Iterator
+import collections, math, heapq, bisect, itertools, functools, re, string
+from collections import defaultdict, deque, Counter, OrderedDict
+from functools import lru_cache, cache, reduce
+from heapq import heappush, heappop, heapify
+from bisect import bisect_left, bisect_right, insort
+from itertools import permutations, combinations, product, accumulate
+from math import inf, gcd, sqrt, ceil, floor, comb, factorial, log2
+
 # ─── candidate solution ───────────────────────────────────────────────
 {code}
 # ─── end candidate solution ───────────────────────────────────────────
