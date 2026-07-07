@@ -10,6 +10,7 @@ import type {
 } from '@friday/shared-types';
 
 import {
+  Bot,
   Bug,
   Check,
   CircleCheck,
@@ -22,8 +23,10 @@ import {
   Play,
   Sparkles,
   Square,
+  Terminal,
   Target,
   TestTube2,
+  Wrench,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -44,6 +47,22 @@ export interface CodingTestState {
   skipReason: string | null;
 }
 
+/** One entry in the agent's live trace. `text` is the agent's own reasoning,
+ *  `tool` a tool it invoked (Bash/Write/…), `result` what that tool returned. */
+export type AgentStep =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; tool: string; summary: string }
+  | { kind: 'result'; ok: boolean; summary: string };
+
+/** Agent-mode state for a tab. Set when the user escalates the problem to the
+ *  Claude Code agent; the trace streams into `steps` and the verified answer
+ *  lands in the tab's `solution` like a normal solve. null when the agent
+ *  hasn't been run on this problem. */
+export interface AgentTraceState {
+  status: CodingSolutionStatus;
+  steps: AgentStep[];
+}
+
 export interface CodingProblemTab {
   fingerprint: string;
   problem: ExtractedProblem;
@@ -55,6 +74,9 @@ export interface CodingProblemTab {
   /** Result of running the streamed solution against the examples.
    *  null while the solution is still streaming or before verification. */
   tests: CodingTestState | null;
+  /** Live trace + status when this problem was (or is being) solved by the
+   *  Claude Code agent. null if the agent was never run on this tab. */
+  agent: AgentTraceState | null;
 }
 
 /** Scratch buffer for non-solve modes (explain / debug / tests). Lives on
@@ -94,6 +116,10 @@ export interface CodingPanelProps {
    *  the user's note as `feedback`. Used when LeetCode-style test cases
    *  fail against the streamed answer. */
   onRefine: (feedback: string) => void;
+  /** Escalate the active problem to the Claude Code agent (tool-loop solve).
+   *  Runs on the current tab; the trace + verified answer replace the tab's
+   *  one-shot solution. */
+  onAgentSolve: () => void;
   frameInfo: { changed_bits: number; interval_ms: number } | null;
   error: string | null;
   privacyMode: boolean;
@@ -123,6 +149,7 @@ export function CodingPanel({
   onReExtract,
   onCancel,
   onRefine,
+  onAgentSolve,
   frameInfo,
   error,
   privacyMode,
@@ -141,49 +168,56 @@ export function CodingPanel({
     // No outer card chrome — the surrounding popover already provides the
     // glass frame. Adding another border here just nests containers.
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-3">
-        <span className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">
-          Coding Mode
-        </span>
-        <ActivePill active={active} />
-        <Select
-          value={provider}
-          onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
-          className="ml-auto h-8 text-xs"
-          aria-label="model"
-        >
-          <option value="gemini">Gemini 2.5 Flash</option>
-          <option value="openai">GPT-4o</option>
-          <option value="deepseek">DeepSeek</option>
-        </Select>
-        <Select
-          value={language}
-          onChange={(e) => onLanguageChange(e.target.value as CodingLanguage)}
-          className="h-8 text-xs"
-          aria-label="language"
-        >
-          {ALL_CODING_LANGUAGES.map((lang) => (
-            <option key={lang} value={lang}>
-              {lang}
-            </option>
-          ))}
-        </Select>
-        {/* Start/Stop is the screen-watcher toggle — only meaningful in
-            solve mode where vision extraction feeds tabs. Hidden in scratch
-            modes so the user doesn't think it gates Run. */}
-        {isSolveMode ? (
-          <Button
-            type="button"
-            size="sm"
-            variant={active ? 'outline' : 'default'}
-            onClick={onToggle}
+      {/* Header chrome is suppressed in privacy mode for the same reason
+          AnswerPanel suppresses its header: the "Coding Mode" label,
+          WATCHING/IDLE pill, model/language selectors, and Start/Stop
+          button all visibly reveal that AI assistance is active. */}
+      {!privacyMode ? (
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">
+            Coding Mode
+          </span>
+          <ActivePill active={active} />
+          <Select
+            value={provider}
+            onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+            className="ml-auto h-8 text-xs"
+            aria-label="model"
           >
-            {active ? 'Stop' : 'Start'}
-          </Button>
-        ) : null}
-      </div>
+            <option value="gemini">Gemini 2.5 Flash</option>
+            <option value="openai">GPT-4o</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="claude">Claude Opus 4.8</option>
+          </Select>
+          <Select
+            value={language}
+            onChange={(e) => onLanguageChange(e.target.value as CodingLanguage)}
+            className="h-8 text-xs"
+            aria-label="language"
+          >
+            {ALL_CODING_LANGUAGES.map((lang) => (
+              <option key={lang} value={lang}>
+                {lang}
+              </option>
+            ))}
+          </Select>
+          {/* Start/Stop is the screen-watcher toggle — only meaningful in
+              solve mode where vision extraction feeds tabs. Hidden in scratch
+              modes so the user doesn't think it gates Run. */}
+          {isSolveMode ? (
+            <Button
+              type="button"
+              size="sm"
+              variant={active ? 'outline' : 'default'}
+              onClick={onToggle}
+            >
+              {active ? 'Stop' : 'Start'}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
 
-      <ModeStrip mode={mode} onModeChange={onModeChange} />
+      {!privacyMode ? <ModeStrip mode={mode} onModeChange={onModeChange} /> : null}
 
       {!isSolveMode ? (
         <ScratchView
@@ -198,7 +232,7 @@ export function CodingPanel({
         />
       ) : null}
 
-      {!isSolveMode ? null : active && !activeTab ? (
+      {!isSolveMode ? null : active && !activeTab && !privacyMode ? (
         <div className="flex items-center gap-2 rounded-lg border border-dashed border-sky-300 bg-sky-50/40 px-3 py-2 text-xs text-sky-700 dark:border-sky-500/30 dark:bg-sky-950/20 dark:text-sky-300">
           <Eye className="h-3.5 w-3.5 shrink-0" aria-hidden />
           <span>Watching for coding problems on-screen…</span>
@@ -210,7 +244,7 @@ export function CodingPanel({
         </div>
       ) : null}
 
-      {!isSolveMode ? null : !active && tabs.length === 0 ? (
+      {!isSolveMode ? null : !active && tabs.length === 0 && !privacyMode ? (
         <div className="flex flex-col items-start gap-2 rounded-lg border border-dashed border-neutral-300 bg-neutral-50/60 px-4 py-5 dark:border-neutral-700 dark:bg-neutral-950/40">
           <Code2 className="h-5 w-5 text-neutral-400 dark:text-neutral-500" aria-hidden />
           <p className="text-sm font-medium text-neutral-800 dark:text-neutral-200">
@@ -229,7 +263,10 @@ export function CodingPanel({
         </div>
       ) : null}
 
-      {isSolveMode && tabs.length > 0 ? (
+      {/* Tabs strip leaks the problem titles + difficulty badges — hide
+          the whole strip in privacyMode for stealth parity with the rest
+          of the panel. */}
+      {isSolveMode && tabs.length > 0 && !privacyMode ? (
         <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-200 dark:border-neutral-800">
           {tabs.map((tab) => {
             const isActive = tab.fingerprint === activeFingerprint;
@@ -280,7 +317,7 @@ export function CodingPanel({
         </div>
       ) : null}
 
-      {error
+      {error && !privacyMode
         ? (() => {
             const f = friendlyError(error);
             return (
@@ -300,6 +337,7 @@ export function CodingPanel({
           onReExtract={onReExtract}
           onCancel={onCancel}
           onRefine={onRefine}
+          onAgentSolve={onAgentSolve}
           privacyMode={privacyMode}
         />
       ) : null}
@@ -465,7 +503,7 @@ function ScratchView({
             // siblings of Solve. Fully opaque card so the always-visible
             // copy buttons on code blocks have a clean backdrop.
             'rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950',
-            privacyMode && 'select-none blur-sm',
+            privacyMode && 'select-none blur-md',
           )}
         >
           <Markdown text={scratch.output + (isStreaming ? ' ▍' : '')} />
@@ -518,6 +556,7 @@ function ActiveProblemView({
   onReExtract,
   onCancel,
   onRefine,
+  onAgentSolve,
   privacyMode,
 }: {
   tab: CodingProblemTab;
@@ -526,14 +565,16 @@ function ActiveProblemView({
   onReExtract: () => void;
   onCancel: () => void;
   onRefine: (feedback: string) => void;
+  onAgentSolve: () => void;
   privacyMode: boolean;
 }) {
-  const { problem, solution, status, error } = tab;
+  const { problem, solution, status, error, agent } = tab;
   const [copied, setCopied] = useState(false);
   const [problemOpen, setProblemOpen] = useState(true);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [feedback, setFeedback] = useState('');
   const isStreaming = status === 'streaming';
+  const agentRunning = agent?.status === 'streaming';
 
   const submitFeedback = () => {
     const trimmed = feedback.trim();
@@ -654,6 +695,22 @@ function ActiveProblemView({
         <Button type="button" size="sm" variant="outline" onClick={onReExtract}>
           Re-extract
         </Button>
+        {/* Escalate to the Claude Code agent — it writes code, runs it against
+            the examples, and fixes failures before answering. Slower but
+            solves problems the one-shot providers miss. Disabled while any
+            stream (normal or agent) is in flight for this tab. */}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onAgentSolve}
+          disabled={isStreaming || agentRunning}
+          title="Solve with the Claude Code agent — runs & verifies code before answering (uses your Claude subscription)"
+          className="border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-500/40 dark:text-violet-300 dark:hover:bg-violet-950/30"
+        >
+          <Bot className="mr-1 h-3.5 w-3.5" aria-hidden />
+          {agentRunning ? 'Agent working…' : 'Agent'}
+        </Button>
         {/* Refine-with-feedback — only useful once we've actually produced a
             solution to refine. Hidden while streaming for the same reason
             Regenerate is disabled (the prior solution is still mutating). */}
@@ -715,6 +772,11 @@ function ActiveProblemView({
         </div>
       ) : null}
 
+      {/* Agent trace — the live tool-loop timeline when this problem was
+          escalated to the Claude Code agent. Kept above the solution so the
+          user watches the work, then reads the verified answer below. */}
+      {agent && !privacyMode ? <AgentTraceView agent={agent} /> : null}
+
       {/* Self-verification verdict — appears once the backend has run the
           streamed solution against the problem's examples. Hidden while
           the solution is still streaming. */}
@@ -722,7 +784,7 @@ function ActiveProblemView({
         <TestResultsPanel tests={tab.tests} onRefine={onRefine} />
       ) : null}
 
-      <div className={cn(privacyMode && 'select-none blur-sm')}>
+      <div className={cn(privacyMode && 'select-none blur-md')}>
         {status === 'error' ? (
           <div className="flex items-center justify-between gap-2 rounded-lg border border-red-400/50 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300">
             <span>{error ?? 'solution failed'}</span>
@@ -744,6 +806,93 @@ function ActiveProblemView({
         </div>
       ) : null}
     </div>
+  );
+}
+
+// ─── Agent trace ────────────────────────────────────────────────────────────
+
+function AgentTraceView({ agent }: { agent: AgentTraceState }) {
+  const running = agent.status === 'streaming';
+  return (
+    <div className="rounded-lg border border-violet-200 bg-violet-50/40 dark:border-violet-500/30 dark:bg-violet-950/20">
+      <div className="flex items-center gap-2 border-b border-violet-200/70 px-3 py-1.5 dark:border-violet-500/20">
+        <Bot className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" aria-hidden />
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-violet-700 dark:text-violet-300">
+          Claude Code agent
+        </span>
+        <span className="ml-auto text-[10px] font-medium text-violet-500 dark:text-violet-400/80">
+          {running
+            ? `working · ${agent.steps.length} steps`
+            : agent.status === 'error'
+              ? 'stopped'
+              : agent.status === 'cancelled'
+                ? 'cancelled'
+                : `done · ${agent.steps.length} steps`}
+        </span>
+      </div>
+      <div className="max-h-56 overflow-y-auto px-3 py-2">
+        {agent.steps.length === 0 ? (
+          <p className="py-1 text-[11px] italic text-violet-500 dark:text-violet-400/80">
+            {running ? 'Spinning up the agent…' : 'No trace.'}
+          </p>
+        ) : (
+          <ol className="flex flex-col gap-1.5">
+            {agent.steps.map((step, i) => (
+              <AgentStepRow key={i} step={step} />
+            ))}
+          </ol>
+        )}
+        {running ? (
+          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-violet-500 dark:text-violet-400/80">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500" />
+            thinking…
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function AgentStepRow({ step }: { step: AgentStep }) {
+  if (step.kind === 'text') {
+    return (
+      <li className="flex gap-2 text-[12px] leading-relaxed text-neutral-700 dark:text-neutral-300">
+        <Bot className="mt-0.5 h-3 w-3 shrink-0 text-violet-500" aria-hidden />
+        <span className="whitespace-pre-wrap">{step.text}</span>
+      </li>
+    );
+  }
+  if (step.kind === 'tool') {
+    const Icon = step.tool === 'Bash' ? Terminal : Wrench;
+    return (
+      <li className="flex gap-2 text-[11px] text-neutral-600 dark:text-neutral-400">
+        <Icon className="mt-0.5 h-3 w-3 shrink-0 text-sky-500" aria-hidden />
+        <span className="min-w-0">
+          <span className="font-medium text-neutral-700 dark:text-neutral-300">{step.tool}</span>
+          {step.summary ? (
+            <span className="ml-1.5 break-all font-mono text-neutral-500">{step.summary}</span>
+          ) : null}
+        </span>
+      </li>
+    );
+  }
+  // result
+  return (
+    <li className="flex gap-2 text-[11px]">
+      {step.ok ? (
+        <CircleCheck className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" aria-hidden />
+      ) : (
+        <CircleX className="mt-0.5 h-3 w-3 shrink-0 text-red-500" aria-hidden />
+      )}
+      <span
+        className={cn(
+          'min-w-0 break-all font-mono',
+          step.ok ? 'text-neutral-500' : 'text-red-600 dark:text-red-400',
+        )}
+      >
+        {step.summary || (step.ok ? 'ok' : 'error')}
+      </span>
+    </li>
   );
 }
 

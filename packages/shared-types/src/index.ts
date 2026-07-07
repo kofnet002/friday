@@ -1,4 +1,4 @@
-export type Provider = 'gemini' | 'openai' | 'deepseek';
+export type Provider = 'gemini' | 'openai' | 'deepseek' | 'claude';
 
 /** Mirrors backend `app.api.chat.ChatRequest` (Pydantic v2). */
 export interface ChatRequest {
@@ -17,14 +17,48 @@ export interface ChatErrorEvent {
 
 export type ChatEventName = 'token' | 'done' | 'error';
 
+/** Models the user is allowed to pick for question detection. Mirrors
+ *  `ALLOWED_QD_MODELS` in app.services.question_detection. Both Gemini
+ *  (default) and OpenAI options are allowed so a power user can
+ *  pre-emptively pick gpt-4o-mini when Gemini's quota is exhausted. */
+export type QdModel =
+  | 'gemini-2.5-flash-lite'
+  | 'gemini-2.5-flash'
+  | 'gemini-2.5-pro'
+  | 'gpt-4o-mini'
+  | 'gpt-4o';
+
 /** Control messages sent from client → `/ws/transcribe`. */
-export type WsControlMessage = { type: 'start' } | { type: 'stop' } | { type: 'pause' };
+export type WsControlMessage =
+  | { type: 'start' }
+  | { type: 'stop' }
+  | { type: 'pause' }
+  | { type: 'set_qd_model'; model: QdModel };
+
+/** Lifecycle state of the per-session question detector. Used to show a
+ *  "Listening / Analyzing" indicator in the Listen panel. */
+export type QdState = 'idle' | 'listening' | 'detecting';
 
 /** Server → client message on `/ws/transcribe`. */
 export type WsServerMessage =
   | { type: 'ready'; session_id: string }
   | TranscriptEvent
   | QuestionDetectedEvent
+  | { type: 'qd_state'; state: QdState }
+  /** Fired once when the detector falls back from Gemini to GPT-4o
+   *  (typically due to free-tier quota exhaustion). `model` is the model
+   *  the detector switched to, currently always 'gpt-4o'. The UI uses
+   *  this to show a small badge so the user knows their dropdown pick is
+   *  being overridden until they change it. */
+  | { type: 'qd_fallback'; model: string }
+  /** Fired when both providers are unavailable (Gemini 429 → fallback
+   *  also 429s) — QD has effectively stopped. Lets the UI show a clear
+   *  "detection paused" state. */
+  | { type: 'qd_error'; reason: string }
+  /** Fired when the detector found a question but suppressed it as a
+   *  duplicate of the most recent fire (within the cooldown). Lets the
+   *  UI show a subtle "heard it" pulse without spawning a new entry. */
+  | { type: 'qd_dedup'; question: string }
   | { type: 'error'; message: string };
 
 export interface TranscriptEvent {
@@ -53,7 +87,7 @@ export interface QuestionDetectedEvent {
 
 // ─── /ws/answer ──────────────────────────────────────────────────────────────
 
-export type AnswerProvider = 'gemini' | 'openai' | 'deepseek';
+export type AnswerProvider = 'gemini' | 'openai' | 'deepseek' | 'claude';
 
 export interface AnswerSessionContext {
   resume_text?: string;
@@ -211,8 +245,10 @@ export interface CodingProblemDetectedEvent {
 /** Operating modes for /ws/coding-solution. `solve` is the existing
  *  problem→solution path. `explain` walks through a code snippet, `debug`
  *  diagnoses + fixes a snippet given an error message, `tests` generates
- *  edge-case test inputs for a problem. */
-export type CodingMode = 'solve' | 'explain' | 'debug' | 'tests';
+ *  edge-case test inputs for a problem. `agent` drives the local Claude Code
+ *  CLI's tool loop (write code → run → fix) to verify a solution before
+ *  answering — for hard problems the one-shot providers fail. */
+export type CodingMode = 'solve' | 'explain' | 'debug' | 'tests' | 'agent';
 
 // /ws/coding-solution protocol. The legacy {type:'solve'} payload still
 // works; new modes route via {type:'solve' with mode:'…'} so the WS
@@ -280,4 +316,11 @@ export type CodingSolutionServerMessage =
       cases: CodingTestCaseResult[];
       skip_reason?: string | null;
     }
+  /** Agent-mode trace events (mode: 'agent'). The agent works in a tool loop
+   *  and emits its progress live; the final answer arrives whole in
+   *  `agent_solution` (agent mode streams no `token` events). */
+  | { type: 'agent_step'; text: string }
+  | { type: 'agent_tool'; tool: string; summary: string }
+  | { type: 'agent_tool_result'; ok: boolean; summary: string }
+  | { type: 'agent_solution'; text: string }
   | CodingProblemDetectedEvent;
