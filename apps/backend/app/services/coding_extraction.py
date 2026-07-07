@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.db import get_session
 from app.logging import log
@@ -314,6 +314,30 @@ async def _extract_claude(
     return problem, None, f"claude-code:{model}"
 
 
+# Constraint-free mirror of ExtractedProblem for OpenAI STRICT structured
+# outputs (strict schemas reject numeric minimum/maximum, so `confidence`
+# can't carry its ge/le Field constraints here). Parsed output is re-validated
+# through the real model, which applies the constraints + normalizers.
+class _StrictExample(BaseModel):
+    input: str
+    output: str
+    explanation: str | None
+    unreliable: bool
+
+
+class _StrictExtraction(BaseModel):
+    is_coding_problem: bool
+    platform: str | None
+    title: str | None
+    difficulty: str | None
+    problem_statement: str | None
+    examples: list[_StrictExample] | None
+    constraints: list[str] | None
+    function_signature: str | None
+    language_hint: str | None
+    confidence: float
+
+
 async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
@@ -324,18 +348,48 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
     model = settings.openai_model  # gpt-4o supports vision via chat completions
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     image_url = f"data:image/jpeg;base64,{image_b64}"
+    messages: list[Any] = [
+        {"role": "system", "content": CODING_EXTRACTION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Extract the coding problem from this screenshot"
+                    " as strict JSON matching the schema.",
+                },
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        },
+    ]
+    # STRICT structured outputs: the API guarantees schema-valid JSON, which
+    # eliminates the "Unterminated string" / free-form-JSON parse failures.
+    # Falls back to json_object mode if this model/deployment rejects strict
+    # schemas, so a schema quirk can't take OpenAI vision down entirely.
+    try:
+        parsed_response = await client.beta.chat.completions.parse(
+            model=model,
+            messages=messages,
+            temperature=EXTRACTION_TEMPERATURE,
+            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            response_format=_StrictExtraction,
+        )
+        message = parsed_response.choices[0].message
+        if message.refusal:
+            raise RuntimeError(f"openai vision refusal: {message.refusal[:200]}")
+        if message.parsed is None:
+            raise RuntimeError("openai vision returned no parsed content")
+        problem = ExtractedProblem.model_validate(message.parsed.model_dump())
+        usage = parsed_response.usage
+        return problem, usage.completion_tokens if usage else None, model
+    except (ValidationError, RuntimeError):
+        raise
+    except Exception as exc:  # schema rejected / SDK gap — legacy JSON mode
+        log.warning("extraction.strict_schema_fallback", error=str(exc)[:200])
+
     response = await client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": CODING_EXTRACTION_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Extract the coding problem from this screenshot as strict JSON matching the schema."},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
-            },
-        ],
+        messages=messages,
         temperature=EXTRACTION_TEMPERATURE,
         max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
         response_format={"type": "json_object"},

@@ -149,8 +149,17 @@ def coding_solution_user_prompt(
     if examples:
         parts.append("\n**Examples:**")
         for i, ex in enumerate(examples, 1):
+            # The extractor flags examples it couldn't reconcile with the
+            # statement (screen OCR misread). Tell the solver so it trusts
+            # the statement over the suspect example instead of contorting
+            # the algorithm to fit corrupted numbers.
+            suspect = (
+                " (⚠ possibly misread from screen — trust the statement)"
+                if ex.get("unreliable")
+                else ""
+            )
             block = (
-                f"Example {i}:\n"
+                f"Example {i}:{suspect}\n"
                 f"Input: {ex.get('input', '')}\n"
                 f"Output: {ex.get('output', '')}"
             )

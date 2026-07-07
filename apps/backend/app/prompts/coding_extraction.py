@@ -18,7 +18,8 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
   "title": string | null,
   "difficulty": "easy" | "medium" | "hard" | null,
   "problem_statement": string | null,
-  "examples": [{"input": string, "output": string, "explanation": string | null}] | null,
+  "examples": [{"input": string, "output": string, "explanation": string | null,
+                "unreliable": boolean}] | null,
   "constraints": string[] | null,
   "function_signature": string | null,
   "language_hint": string | null,
@@ -43,6 +44,11 @@ RULES
   - If part of an example is cut off or too blurry to read with certainty,
     OMIT that example entirely rather than guessing — a missing example is
     recoverable, a corrupted one poisons everything downstream.
+  - "unreliable": set true when you transcribed the example but could NOT
+    reconcile it (input inconsistent with its explanation or the statement —
+    e.g. an all-zero grid with a non-zero output). Set false when the example
+    is internally consistent. Unreliable examples are excluded from automated
+    testing, so an honest true here prevents false failures.
 - If constraints are present (e.g., "1 <= n <= 10^5"), extract as individual strings.
 - function_signature: capture the COMPLETE starter shown in the editor pane, including any class wrapper, the full method signature with every parameter name and type annotation, and the empty method body line if present. LeetCode signatures are always inside `class Solution:` with `self` as the first parameter — if the editor pane is visible at all, include the full `class Solution: / def methodName(self, …) -> …:` block. If only the method line is visible without the class wrapper but the platform is leetcode, still emit a `class Solution:` line above it (LeetCode never deviates from that wrapper). Leave null only when the editor pane isn't visible OR you can't read it confidently.
 - language_hint: the language the starter code is in, if visible.
@@ -54,7 +60,9 @@ If the screenshot shows multiple problems or a problem list, set is_coding_probl
 # Mirrors CODING_EXTRACTION_CONFIG from the TS file.
 EXTRACTION_MODEL = "gemini-2.5-flash"
 EXTRACTION_TEMPERATURE = 0.0
-EXTRACTION_MAX_OUTPUT_TOKENS = 2000
+# 3000, not 2000: long problem statements were getting truncated mid-JSON
+# ("Unterminated string" parse failures on real LeetCode pages).
+EXTRACTION_MAX_OUTPUT_TOKENS = 3000
 EXTRACTION_MIN_CONFIDENCE = 0.7
 EXTRACTION_FRAME_CHANGE_THRESHOLD = 0.15
 EXTRACTION_MIN_INTERVAL_MS = 2000
