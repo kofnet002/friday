@@ -26,6 +26,7 @@ import asyncio
 import json
 import re
 import resource
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -209,6 +210,96 @@ def _build_harness(code: str, entry: str, is_method: bool) -> str:
     return _HARNESS_TEMPLATE.format(code=code, entry=entry, is_method=is_method)
 
 
+# ─── JavaScript ──────────────────────────────────────────────────────────────
+# Same contract as the Python harness, run under `node`. TypeScript is NOT
+# executed (needs a transpile step) — it skips with a reason like other
+# unsupported languages.
+
+_JS_BLOCKED_PATTERNS = (
+    "require(",
+    "import ",
+    "process.",
+    "child_process",
+    "fs.",
+    "fetch(",
+    "XMLHttpRequest",
+    "eval(",
+    "Function(",
+)
+
+_FUNC_RE_JS = re.compile(
+    r"^\s*(?:function\s+(\w+)\s*\(|(?:const|let|var)\s+(\w+)\s*=)", re.MULTILINE
+)
+
+
+def _find_entry_js(code: str) -> str | None:
+    m = _FUNC_RE_JS.search(code)
+    if m:
+        return m.group(1) or m.group(2)
+    return None
+
+
+# `__CODE__` / `__ENTRY__` are substituted with .replace (not .format — JS is
+# full of braces). Values are parsed with eval so LeetCode-style literals
+# ([1,2], "abc", true/null) work; the SOLUTION string is denylist-scanned for
+# eval/require/etc. before it's embedded, the harness's own eval is ours.
+_HARNESS_JS = """\
+'use strict';
+// ─── candidate solution ───────────────────────────────────────────────
+__CODE__
+// ─── end candidate solution ───────────────────────────────────────────
+
+function __splitTop(s) {
+  let depth = 0, cur = '';
+  const parts = [];
+  for (const ch of s) {
+    if ('([{'.includes(ch)) depth++;
+    else if (')]}'.includes(ch)) depth--;
+    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  if (cur.trim() !== '') parts.push(cur);
+  return parts;
+}
+function __parseVal(raw) { return eval('(' + raw.trim() + ')'); }
+function __parseInput(s) {
+  const args = [];
+  for (const part of __splitTop(s)) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    args.push(__parseVal(part.slice(i + 1)));
+  }
+  return args;
+}
+
+let __data = '';
+process.stdin.on('data', (c) => { __data += c; });
+process.stdin.on('end', () => {
+  const tests = JSON.parse(__data);
+  const results = [];
+  for (const t of tests) {
+    try {
+      const args = __parseInput(t.input);
+      const expected = __parseVal(t.output);
+      const fn = eval('__ENTRY__');
+      const actual = fn(...args);
+      results.push({ ok: JSON.stringify(actual) === JSON.stringify(expected),
+                     actual: JSON.stringify(actual) });
+    } catch (e) {
+      const name = e && e.constructor ? e.constructor.name : 'Error';
+      const msg = e && e.message ? e.message : String(e);
+      results.push({ ok: false, error: name + ': ' + msg });
+    }
+  }
+  process.stdout.write(JSON.stringify(results));
+});
+"""
+
+
+def _build_harness_js(code: str, entry: str) -> str:
+    return _HARNESS_JS.replace("__CODE__", code).replace("__ENTRY__", entry)
+
+
 def _set_limits() -> None:
     """preexec_fn — applied in the child before exec.
 
@@ -227,16 +318,20 @@ def _set_limits() -> None:
             pass
 
 
-def _run_blocking(harness: str, tests_json: str) -> list[dict[str, Any]]:
+def _run_blocking(
+    harness: str, tests_json: str, *, filename: str = "harness.py", argv0: list[str] | None = None
+) -> list[dict[str, Any]]:
     """Write the harness to a temp file, run it sandboxed, return the parsed
     JSON results. Raises on a harness-level failure (syntax error in the
-    solution, crash before producing JSON)."""
+    solution, crash before producing JSON). `argv0` selects the interpreter
+    (default: isolated Python; JS passes ["node"])."""
+    cmd_prefix = argv0 if argv0 is not None else [sys.executable, "-I"]
     with tempfile.TemporaryDirectory(prefix="friday-verify-") as tmp:
-        harness_path = f"{tmp}/harness.py"
+        harness_path = f"{tmp}/{filename}"
         with open(harness_path, "w", encoding="utf-8") as fh:
             fh.write(harness)
         proc = subprocess.run(
-            [sys.executable, "-I", harness_path],
+            [*cmd_prefix, harness_path],
             input=tests_json,
             capture_output=True,
             text=True,
@@ -267,8 +362,15 @@ async def run_solution_tests(
     Returns ran=False (with a skip_reason) when verification can't or
     shouldn't run; otherwise ran=True with one TestCaseResult per example.
     """
-    if language.strip().lower() not in ("python", "python3", "py"):
-        return TestRunResult(ran=False, skip_reason=f"verification supports Python only ({language})")
+    lang = language.strip().lower()
+    is_python = lang in ("python", "python3", "py")
+    is_js = lang in ("javascript", "js")
+    if not (is_python or is_js):
+        return TestRunResult(
+            ran=False, skip_reason=f"verification supports Python and JavaScript ({language})"
+        )
+    if is_js and shutil.which("node") is None:
+        return TestRunResult(ran=False, skip_reason="node is not installed — JS not verified")
     if not examples:
         return TestRunResult(ran=False, skip_reason="no examples to verify against")
 
@@ -276,24 +378,35 @@ async def run_solution_tests(
     if not code:
         return TestRunResult(ran=False, skip_reason="no code block in the solution")
 
-    blocked = next((p for p in _BLOCKED_PATTERNS if p in code), None)
+    patterns = _BLOCKED_PATTERNS if is_python else _JS_BLOCKED_PATTERNS
+    blocked = next((p for p in patterns if p in code), None)
     if blocked is not None:
         return TestRunResult(
             ran=False,
             skip_reason=f"solution uses a blocked operation ({blocked!r}) — not executed",
         )
 
-    entry = _find_entry(code)
-    if entry is None:
-        return TestRunResult(ran=False, skip_reason="couldn't find a function to call")
+    if is_python:
+        entry = _find_entry(code)
+        if entry is None:
+            return TestRunResult(ran=False, skip_reason="couldn't find a function to call")
+        harness = _build_harness(code, entry[0], entry[1])
+        run_kwargs: dict[str, Any] = {}
+    else:
+        entry_js = _find_entry_js(code)
+        if entry_js is None:
+            return TestRunResult(ran=False, skip_reason="couldn't find a function to call")
+        harness = _build_harness_js(code, entry_js)
+        run_kwargs = {"filename": "harness.js", "argv0": ["node"]}
 
-    harness = _build_harness(code, entry[0], entry[1])
     tests_json = json.dumps(
         [{"input": ex.get("input", ""), "output": ex.get("output", "")} for ex in examples]
     )
 
     try:
-        raw = await asyncio.to_thread(_run_blocking, harness, tests_json)
+        raw = await asyncio.to_thread(
+            lambda: _run_blocking(harness, tests_json, **run_kwargs)
+        )
     except subprocess.TimeoutExpired:
         return TestRunResult(ran=False, skip_reason="solution timed out during verification")
     except Exception as exc:  # noqa: BLE001
