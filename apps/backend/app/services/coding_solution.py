@@ -34,6 +34,7 @@ from app.prompts.coding_solution import (
     coding_solution_system_prompt,
     coding_solution_user_prompt,
 )
+from app.services import _breaker
 from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
@@ -66,6 +67,9 @@ def _coding_provider_chain(primary: Provider) -> list[Provider]:
     if settings.anthropic_api_key:
         available.add("claude")
     chain = [p for p in _CODING_FALLBACK_ORDER[primary] if p in available]
+    # Skip providers whose quota breaker is open (e.g. Gemini free tier
+    # exhausted) — otherwise every solve pays a guaranteed-429 round trip.
+    chain = _breaker.filter_chain(chain)
     return chain or [primary]
 
 

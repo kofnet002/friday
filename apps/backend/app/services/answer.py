@@ -16,6 +16,7 @@ from app.prompts.answer_generation import (
     answer_system_prompt,
     answer_user_prompt,
 )
+from app.services import _breaker
 from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
@@ -47,6 +48,9 @@ def _provider_chain(primary: Provider) -> list[Provider]:
     if settings.anthropic_api_key:
         available.add("claude")
     chain = [p for p in _FALLBACK_ORDER[primary] if p in available]
+    # Skip providers whose quota breaker is open (e.g. Gemini free tier
+    # exhausted) — no point paying the guaranteed-429 tax on every call.
+    chain = _breaker.filter_chain(chain)
     # If only the primary is available, the chain has one entry — no
     # fallback. If even the primary is missing, return [primary] so the
     # caller hits the existing "API_KEY not set" RuntimeError cleanly.
