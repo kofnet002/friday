@@ -26,6 +26,11 @@ PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o-mini": (0.15, 0.60),
     "deepseek-chat": (0.14, 0.28),
     "deepseek-reasoner": (0.55, 2.19),
+    # Claude (Anthropic). Opus 4.8 list price; add sonnet/haiku rows here if
+    # you point ANTHROPIC_MODEL at a cheaper tier.
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
 }
 
 # Rough fixed overhead (tokens) for the answer system prompt + session
@@ -104,6 +109,44 @@ async def record_solution_call(
         session_id=session_id,
         provider=provider,
         model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost,
+    )
+
+
+async def record_qd_call(
+    *,
+    session_id: str,
+    provider: str,
+    model: str,
+    kind: str,
+    input_tokens: int,
+    output_tokens: int | None = None,
+) -> None:
+    """Log a question-detection or follow-up classifier call.
+
+    `kind` is "question_detection" or "follow_up" — distinct so usage
+    summaries can break them apart. Both are typically tiny (few hundred
+    tokens) but the detector now fires more often than the answer stream,
+    so unrecorded they'd silently grow into a real cost wedge.
+    """
+    cost = _cost(model, input_tokens, output_tokens)
+    await log_usage(
+        session_id=session_id,
+        kind=kind,
+        provider=provider,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost,
+    )
+    log.info(
+        "usage.qd",
+        session_id=session_id,
+        provider=provider,
+        model=model,
+        kind=kind,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost,
