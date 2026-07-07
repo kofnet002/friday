@@ -11,12 +11,15 @@ from app.logging import log
 from app.prompts.coding_extraction import EXTRACTION_MIN_CONFIDENCE
 from app.redis_client import add_seen_problem_fingerprint, set_current_problem
 from app.services.coding_extraction import (
+    arm_cooldown,
     cached_result,
+    cooldown_problem,
     extract_problem,
     image_content_hash,
     problem_fingerprint,
     store_result,
 )
+from app.settings import settings
 
 router = APIRouter(prefix="/api/vision")
 
@@ -46,6 +49,16 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
     if not image_bytes:
         raise HTTPException(status_code=400, detail="empty image")
 
+    # No panel listening → a detection would just be dropped (emitted=False),
+    # so don't pay for the vision model. This is the common "app was left open
+    # overnight / the /session socket dropped" case: the desktop keeps POSTing
+    # frames, but there's nowhere to deliver a result. `force` (Re-extract)
+    # always comes from an open panel, so it bypasses this.
+    if request.session_id and not request.force and not session_bus.has_subscriber(
+        request.session_id
+    ):
+        return {"problem": None, "emitted": False, "skipped": "no_listener"}
+
     image_hash = image_content_hash(image_bytes)
 
     # Server-side dedup: if we've processed this exact image in the last 60s
@@ -60,6 +73,21 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
                 "cached": True,
                 "image_hash": image_hash,
             }
+        # Post-detection cooldown: once we've locked onto a coding problem,
+        # skip re-running the (expensive) vision model on every subsequent
+        # frame while it stays on screen — serve the detected problem instead.
+        # Armed only after a confident detection (see below), so a problem
+        # appearing on a previously-idle screen is still caught immediately.
+        if settings.vision_cooldown_s > 0:
+            locked = await cooldown_problem(request.session_id)
+            if locked is not None:
+                log.info("vision.cooldown_hit", session_id=request.session_id)
+                return {
+                    "problem": locked.model_dump(),
+                    "emitted": False,
+                    "cached": True,
+                    "image_hash": image_hash,
+                }
 
     try:
         problem = await extract_problem(
@@ -79,6 +107,10 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         and problem.confidence >= EXTRACTION_MIN_CONFIDENCE
         and problem.problem_statement
     ):
+        # Arm the re-scan cooldown: we've locked onto a problem, so stop
+        # re-OCR-ing it every frame until the cooldown lapses.
+        if settings.vision_cooldown_s > 0:
+            await arm_cooldown(request.session_id, problem)
         fingerprint = problem_fingerprint(problem)
         # The seen-set is informational now (used for usage analytics) —
         # NOT a publish gate. The frontend's onCodingProblemDetected

@@ -23,13 +23,70 @@ from app.redis_client import get_redis
 from app.services.usage import record_vision_call
 from app.settings import settings
 
-Provider = Literal["gemini", "openai", "deepseek"]
+Provider = Literal["gemini", "openai", "deepseek", "claude"]
 
 VISION_DEDUP_TTL_S = 60
 
 
+def _claude_vision_available() -> bool:
+    """Claude vision runs through the subscription CLI (or the API key if one
+    is set). Only route to it when a credential exists — otherwise a 'claude'
+    selection should fall back to gemini rather than hard-fail."""
+    return bool(settings.claude_code_oauth_token or settings.anthropic_api_key)
+
+
 def image_content_hash(image_bytes: bytes) -> str:
     return hashlib.sha256(image_bytes).hexdigest()
+
+
+# ─── Post-detection cooldown ─────────────────────────────────────────────────
+# Once we've LOCKED ONTO a coding problem, vision keeps re-running on every
+# frame while that problem sits on screen (a cursor blink / caret move / typing
+# busts the exact-hash cache), re-OCR-ing the same problem every few seconds —
+# expensive, especially on the Claude subscription. So after a confident
+# detection we arm a short per-session cooldown: subsequent (non-force) frames
+# return the already-detected problem WITHOUT calling the model until it
+# expires. Deliberately armed ONLY on a successful coding-problem detection, so
+# a problem APPEARING on a previously-idle screen is still caught on the first
+# frame (idle frames never arm the cooldown). Perceptual image hashing was
+# tried first but coding screenshots are ~90% whitespace — different problems
+# hash near-identically, risking a new problem being silently deduped away.
+
+
+def _cooldown_key(session_id: str) -> str:
+    return f"session:{session_id}:vision_cooldown"
+
+
+async def cooldown_problem(session_id: str) -> ExtractedProblem | None:
+    """The problem we most recently locked onto, if its cooldown is still
+    active. While present, the caller serves it instead of re-running the
+    model. None once the TTL lapses (then the next frame re-extracts)."""
+    client = await get_redis()
+    if client is None:
+        return None
+    raw: str | None = await client.get(_cooldown_key(session_id))
+    if not raw:
+        return None
+    try:
+        return ExtractedProblem.model_validate(json.loads(raw))
+    except (json.JSONDecodeError, ValidationError):
+        return None
+
+
+async def arm_cooldown(session_id: str, problem: ExtractedProblem) -> None:
+    """Start the re-scan cooldown after a confident detection. TTL =
+    settings.vision_cooldown_s."""
+    client = await get_redis()
+    if client is None:
+        return
+    await cast(
+        Any,
+        client.set(
+            _cooldown_key(session_id),
+            problem.model_dump_json(),
+            ex=settings.vision_cooldown_s,
+        ),
+    )
 
 
 def _cache_key(session_id: str, image_hash: str) -> str:
@@ -76,11 +133,17 @@ def problem_fingerprint(problem: ExtractedProblem) -> str:
 async def _resolve_provider(session_id: str, override: str | None) -> Provider:
     """Honor an explicit override; otherwise fall back to the session's
     saved default_provider; otherwise gemini."""
-    if override in ("gemini", "openai", "deepseek"):
+    valid = ("gemini", "openai", "deepseek", "claude")
+    # A configured VISION_PROVIDER pins the OCR step regardless of the coding
+    # panel's selection — run vision on a fast/reliable model (e.g. gpt-4o)
+    # while solves use the selected provider (e.g. the Claude subscription).
+    if settings.vision_provider in valid:
+        return cast(Provider, settings.vision_provider)
+    if override in valid:
         return cast(Provider, override)
     sess = await get_session(session_id) or {}
     candidate = sess.get("default_provider")
-    if candidate in ("gemini", "openai", "deepseek"):
+    if candidate in valid:
         return cast(Provider, candidate)
     return "gemini"
 
@@ -100,12 +163,58 @@ async def extract_problem(
     if chosen == "deepseek":
         log.info("extraction.fallback", reason="deepseek_no_vision", session_id=session_id)
         chosen = "gemini"
+    if chosen == "claude" and not _claude_vision_available():
+        log.info("extraction.fallback", reason="claude_no_credential", session_id=session_id)
+        chosen = "gemini"
+
+    # Fallback chain — same idea as the solve path's stream_with_fallback. A
+    # transient provider failure (timeout, 429, 503) shouldn't lose the
+    # detection: fall through to the other vision-capable providers instead of
+    # 502-ing the frame. Claude (subscription CLI) is last — slowest, but a
+    # working OCR beats none when the API providers are down.
+    chain: list[Provider] = [chosen]
+    if settings.openai_api_key and "openai" not in chain:
+        chain.append("openai")
+    if settings.gemini_api_key and "gemini" not in chain:
+        chain.append("gemini")
+    if _claude_vision_available() and "claude" not in chain:
+        chain.append("claude")
 
     t0 = time.time()
-    if chosen == "openai":
-        problem, output_tokens, model_used = await _extract_openai(image_bytes)
-    else:
-        problem, output_tokens, model_used = await _extract_gemini(image_bytes)
+    problem = None
+    output_tokens: int | None = None
+    model_used = ""
+    last_exc: Exception | None = None
+    for attempt, prov in enumerate(chain):
+        if attempt:
+            log.info(
+                "extraction.fallback",
+                reason="provider_failed",
+                prev=chain[attempt - 1],
+                next=prov,
+                session_id=session_id,
+            )
+        try:
+            if prov == "claude":
+                problem, output_tokens, model_used = await _extract_claude(
+                    image_bytes, session_id
+                )
+            elif prov == "openai":
+                problem, output_tokens, model_used = await _extract_openai(image_bytes)
+            else:
+                problem, output_tokens, model_used = await _extract_gemini(image_bytes)
+            chosen = prov
+            break
+        except Exception as exc:  # try the next provider
+            last_exc = exc
+            log.warning(
+                "extraction.provider_failed",
+                provider=prov,
+                error=str(exc)[:200],
+                session_id=session_id,
+            )
+    if problem is None:
+        raise last_exc if last_exc is not None else RuntimeError("no vision provider available")
     elapsed_ms = int((time.time() - t0) * 1000)
 
     await record_vision_call(
@@ -166,10 +275,52 @@ async def _extract_gemini(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
     return problem, output_tokens, model
 
 
+def _strip_json_fence(text: str) -> str:
+    """Claude Code sometimes wraps JSON in a ```json fence or adds a stray
+    sentence. Pull out the JSON object so _parse_extraction_json sees clean
+    input. Falls back to the original text when no braces are found."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        # Drop the opening fence line (```/```json) and any closing fence.
+        body = text.split("\n", 1)[1] if "\n" in text else ""
+        text = body.rsplit("```", 1)[0].strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
+async def _extract_claude(
+    image_bytes: bytes, session_id: str
+) -> tuple[ExtractedProblem, int | None, str]:
+    """Vision extraction via the Claude subscription CLI (no API key needed).
+    Claude Code reads the screenshot and returns the extraction JSON."""
+    from app.services.claude_cli import run_claude_cli_vision
+
+    model = settings.claude_vision_model
+    raw = await run_claude_cli_vision(
+        image_bytes=image_bytes,
+        system=CODING_EXTRACTION_SYSTEM_PROMPT,
+        prompt=(
+            "Extract the coding problem shown in the screenshot. Reply with ONLY"
+            " a single JSON object matching the schema — no markdown fences, no"
+            " commentary."
+        ),
+        model=model,
+        session_id=session_id,
+    )
+    problem = _parse_extraction_json(_strip_json_fence(raw))
+    # Token usage isn't reported by the CLI path (subscription, not metered).
+    return problem, None, f"claude-code:{model}"
+
+
 async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    # Fail fast: default SDK timeout is 10min with retries — a network blip
+    # would stall the frame for ages. 20s + 1 retry, then the fallback chain
+    # takes over.
+    client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=20.0, max_retries=1)
     model = settings.openai_model  # gpt-4o supports vision via chat completions
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     image_url = f"data:image/jpeg;base64,{image_b64}"
