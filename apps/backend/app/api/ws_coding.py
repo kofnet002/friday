@@ -12,6 +12,7 @@ from app.logging import log
 from app.prompts.coding_modes import CodingMode
 from app.redis_client import store_solution
 from app.services.code_runner import run_solution_tests
+from app.services.coding_agent import AgentUnavailableError, stream_coding_agent
 from app.services.coding_extraction import problem_fingerprint
 from app.services.coding_solution import (
     Provider,
@@ -47,6 +48,123 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
     if session_id:
         session_bus.register(session_id, send_json)
 
+    async def _run_agent_stream(
+        problem: dict[str, Any],
+        language: str,
+        extra: str | None,
+        send_json: Any,
+        prior_solution: str | None = None,
+        feedback: str | None = None,
+    ) -> None:
+        """Drive the Claude Code CLI agent for one problem.
+
+        Emits agent_step / agent_tool / agent_tool_result trace events as the
+        agent works, an agent_solution with the final formatted answer, then
+        persists + self-verifies it exactly like a solve so the panel shows
+        ✓/✗ against the examples. Streams no `token` events — the solution
+        arrives whole in agent_solution once the loop finishes."""
+        fp = _fingerprint(problem)
+        await send_json(
+            {
+                "type": "started",
+                "provider": "claude",
+                "language": language,
+                "model": "claude-code",
+                "mode": "agent",
+            }
+        )
+
+        solution_text = ""
+        try:
+            async for event in stream_coding_agent(
+                problem=problem,
+                language=language,
+                session_id=session_id,
+                extra_instructions=extra,
+                prior_solution=prior_solution,
+                feedback=feedback,
+            ):
+                if event.type == "step":
+                    await send_json({"type": "agent_step", "text": event.text})
+                elif event.type == "tool":
+                    await send_json(
+                        {"type": "agent_tool", "tool": event.tool, "summary": event.summary}
+                    )
+                elif event.type == "tool_result":
+                    await send_json(
+                        {"type": "agent_tool_result", "ok": event.ok, "summary": event.summary}
+                    )
+                elif event.type == "solution":
+                    solution_text = event.text
+                    await send_json({"type": "agent_solution", "text": event.text})
+            await send_json({"type": "done"})
+        except AgentUnavailableError as exc:
+            await send_json({"type": "error", "message": f"agent unavailable — {exc}"})
+            return
+        except asyncio.CancelledError:
+            await send_json({"type": "cancelled"})
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.error("ws_coding.agent_error", error=str(exc))
+            await send_json({"type": "error", "message": str(exc)})
+            return
+
+        solution_text = solution_text.strip()
+        if not solution_text:
+            return
+
+        # Persist + record usage against Claude, mirroring the solve path so
+        # agent answers show up in history like any other solution.
+        if session_id:
+            try:
+                await store_solution(session_id, fp, solution_text)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ws_coding.store_solution_failed", error=str(exc))
+            try:
+                row_id = await record_coding_solution(
+                    session_id=session_id,
+                    fingerprint=fp,
+                    problem=problem,
+                    language=language,
+                    provider="claude",
+                    model="claude-code",
+                    solution_text=solution_text,
+                )
+                await send_json({"type": "saved", "id": row_id, "fingerprint": fp})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("coding_solutions.save_failed", error=str(exc))
+
+        # Independent self-verify of the agent's final answer (the agent
+        # verifies internally, but we re-run through the same sandbox as solve
+        # so the panel's ✓/✗ is apples-to-apples).
+        examples = problem.get("examples") or []
+        try:
+            verdict = await run_solution_tests(
+                solution_markdown=solution_text,
+                examples=examples,
+                language=language,
+            )
+            await send_json(
+                {
+                    "type": "test_results",
+                    "fingerprint": fp,
+                    "ran": verdict.ran,
+                    "skip_reason": verdict.skip_reason,
+                    "cases": [
+                        {
+                            "ok": c.ok,
+                            "input": c.input,
+                            "expected": c.expected,
+                            "actual": c.actual,
+                            "error": c.error,
+                        }
+                        for c in verdict.cases
+                    ],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ws_coding.verify_failed", error=str(exc))
+
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
         language = str(request.get("language") or "Python")
@@ -67,7 +185,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         # missing fields too but we want a clean per-mode error before any
         # tokens fly. Solve and tests need a problem statement; explain and
         # debug need a code snippet (and debug additionally needs an error).
-        if mode in ("solve", "tests") and not problem.get("problem_statement"):
+        if mode in ("solve", "tests", "agent") and not problem.get("problem_statement"):
             await send_json({"type": "error", "message": "problem.problem_statement required"})
             return
         if mode in ("explain", "debug") and not (code and code.strip()):
@@ -87,6 +205,21 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                     "used": budget.used,
                     "limit": budget.limit,
                 }
+            )
+            return
+
+        # Agent mode is a different animal from the four provider-backed modes:
+        # it drives the local `claude` CLI's tool loop instead of a single
+        # streamed completion (no provider fallback, no token accounting — it
+        # bills against the Claude subscription). Handled in its own path.
+        if mode == "agent":
+            await _run_agent_stream(
+                problem,
+                language,
+                extra,
+                send_json,
+                prior_solution=prior_solution,
+                feedback=feedback,
             )
             return
 

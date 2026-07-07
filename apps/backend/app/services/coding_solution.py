@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
 
+from anthropic import AsyncAnthropic
 from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
@@ -19,10 +20,12 @@ from app.prompts.coding_modes import (
 )
 from app.prompts.coding_solution import (
     CodingSolutionContext,
+    REFINE_ANTHROPIC_MODEL,
     REFINE_DEEPSEEK_MODEL,
     REFINE_GEMINI_MODEL,
     REFINE_MAX_OUTPUT_TOKENS,
     REFINE_OPENAI_MODEL,
+    SOLUTION_ANTHROPIC_MODEL,
     SOLUTION_DEEPSEEK_MODEL,
     SOLUTION_GEMINI_MODEL,
     SOLUTION_MAX_OUTPUT_TOKENS,
@@ -35,13 +38,14 @@ from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
 
-Provider = Literal["gemini", "openai", "deepseek"]
+Provider = Literal["gemini", "openai", "deepseek", "claude"]
 
-# Coding shares the same fallback ordering as answer (primary → other two).
+# Coding shares the same fallback ordering as answer (primary → the rest).
 _CODING_FALLBACK_ORDER: dict[Provider, list[Provider]] = {
-    "gemini": ["gemini", "openai", "deepseek"],
-    "openai": ["openai", "gemini", "deepseek"],
-    "deepseek": ["deepseek", "gemini", "openai"],
+    "gemini": ["gemini", "openai", "deepseek", "claude"],
+    "openai": ["openai", "gemini", "deepseek", "claude"],
+    "deepseek": ["deepseek", "gemini", "openai", "claude"],
+    "claude": ["claude", "gemini", "openai", "deepseek"],
 }
 
 
@@ -53,6 +57,14 @@ def _coding_provider_chain(primary: Provider) -> list[Provider]:
         available.add("openai")
     if settings.deepseek_api_key:
         available.add("deepseek")
+    # Claude is in the INSTANT-solve chain only with an API key (fast SDK
+    # path). The subscription CLI is NOT — it does extended reasoning that
+    # takes minutes on hard problems, unusable for a live auto-solve (it would
+    # just burn the timeout then fall back). Subscription Claude is reached via
+    # the Agent instead (manual button, or auto-escalation when a fast solve
+    # fails self-verify). See docs/agentic-coding.md.
+    if settings.anthropic_api_key:
+        available.add("claude")
     chain = [p for p in _CODING_FALLBACK_ORDER[primary] if p in available]
     return chain or [primary]
 
@@ -118,6 +130,8 @@ def resolved_model(provider: Provider, *, deep: bool = False) -> str:
         return REFINE_GEMINI_MODEL if deep else SOLUTION_GEMINI_MODEL
     if provider == "deepseek":
         return REFINE_DEEPSEEK_MODEL if deep else SOLUTION_DEEPSEEK_MODEL
+    if provider == "claude":
+        return REFINE_ANTHROPIC_MODEL if deep else SOLUTION_ANTHROPIC_MODEL
     return SOLUTION_OPENAI_MODEL
 
 
@@ -224,6 +238,8 @@ async def stream_coding(
             base = lambda: _stream_gemini(system, user, deep=deep)  # noqa: E731
         elif p == "deepseek":
             base = lambda: _stream_deepseek(system, user, deep=deep)  # noqa: E731
+        elif p == "claude":
+            base = lambda: _stream_anthropic(system, user, deep=deep)  # noqa: E731
         else:
             base = lambda: _stream_openai(system, user, deep=deep)  # noqa: E731
         return retry_stream(base, label=f"coding.{mode}.{p}{'.deep' if deep else ''}")
@@ -333,3 +349,38 @@ async def _stream_deepseek(system: str, user: str, *, deep: bool = False) -> Asy
         delta = chunk.choices[0].delta
         if delta and delta.content:
             yield delta.content
+
+
+async def _stream_anthropic(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
+    model = REFINE_ANTHROPIC_MODEL if deep else SOLUTION_ANTHROPIC_MODEL
+    # Subscription path: no API key but a Claude Code OAuth token is set. Drive
+    # the local `claude` CLI (single-shot, no tools) so the user's Claude
+    # selection runs on their subscription instead of silently falling back to
+    # gemini/openai. See services/claude_cli.py.
+    if not settings.anthropic_api_key and settings.claude_code_oauth_token:
+        from app.services.claude_cli import stream_claude_cli_text
+
+        async for text in stream_claude_cli_text(prompt=user, system=system, model=model):
+            if text:
+                yield text
+        return
+
+    if not settings.anthropic_api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    # Opus 4.8 is used for both solve and refine — the deep flag only bumps
+    # the output budget so a refine has room for the diagnosis + rewritten
+    # code. No temperature/top_p (the Opus 4.x family rejects them) and no
+    # explicit thinking config: omitting `thinking` keeps first-token latency
+    # low while still getting Opus-tier code quality. `stream.text_stream`
+    # yields only the response text, never internal reasoning.
+    max_tokens = REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS
+    async with client.messages.stream(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    ) as stream:
+        async for text in stream.text_stream:
+            if text:
+                yield text

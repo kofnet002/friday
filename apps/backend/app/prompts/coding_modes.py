@@ -19,7 +19,12 @@ from typing import Any, Literal
 
 CODING_MODES_VERSION = "1.0.0"
 
-CodingMode = Literal["solve", "explain", "debug", "tests"]
+# "agent" runs the tool-loop agent (Claude Code CLI) instead of a one-shot
+# provider call. Like solve it takes a problem and returns a solution in the
+# same 5-section format, so it shares solve's inputs/validation/output shape —
+# it has no prompt here (see app.prompts.coding_agent) and is dispatched
+# separately in ws_coding rather than through stream_coding.
+CodingMode = Literal["solve", "explain", "debug", "tests", "agent"]
 
 
 @dataclass(frozen=True)
