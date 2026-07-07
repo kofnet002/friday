@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: typecheck (turbo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version comes from packageManager in package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Runs typecheck across all workspaces (web, shared-types, prompts, ui;
+      # backend's turbo typecheck target shells out to mypy via uv, so give
+      # it a python toolchain too).
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --directory apps/backend
+      - run: pnpm turbo run typecheck
+
+  backend:
+    name: backend lint + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ruff check app tests
+        # Pre-existing lint debt is tracked separately; don't fail the build
+        # on it yet. New code should keep this green.
+        continue-on-error: true
+      - run: uv run mypy app
+      - run: uv run pytest -q
