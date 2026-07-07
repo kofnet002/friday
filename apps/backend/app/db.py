@@ -79,6 +79,21 @@ CREATE INDEX IF NOT EXISTS idx_coding_solutions_session
     ON coding_solutions(session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_coding_solutions_fingerprint
     ON coding_solutions(fingerprint);
+
+-- Full step-by-step traces of Claude agent runs (tool calls, results,
+-- reasoning) so a run can be reviewed after the panel state is gone.
+CREATE TABLE IF NOT EXISTS coding_agent_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_s REAL,
+    trace_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_traces_session
+    ON coding_agent_traces(session_id, created_at DESC);
 """
 
 
@@ -320,6 +335,40 @@ async def record_coding_solution(
                 model,
                 solution_text,
                 problem.get("confidence"),
+                time.time(),
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid or 0)
+
+
+async def record_agent_trace(
+    *,
+    session_id: str,
+    fingerprint: str,
+    status: str,
+    duration_s: float,
+    trace: list[dict[str, Any]],
+) -> int:
+    """Persist an agent run's full step trace for post-hoc review — the panel
+    state is ephemeral, and 'what did the agent actually do?' matters when a
+    run misbehaves or a solution needs auditing."""
+    import json
+
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO coding_agent_traces (
+                session_id, fingerprint, status, duration_s, trace_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                fingerprint,
+                status,
+                duration_s,
+                json.dumps(trace, ensure_ascii=False),
                 time.time(),
             ),
         )

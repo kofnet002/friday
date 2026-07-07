@@ -40,6 +40,7 @@ def build_agent_prompt(
     extra_instructions: str | None = None,
     prior_solution: str | None = None,
     feedback: str | None = None,
+    starter_file: str | None = None,
 ) -> str:
     """Assemble the single headless prompt fed to `claude -p`.
 
@@ -56,6 +57,13 @@ def build_agent_prompt(
     extra = (
         f"\n\nADDITIONAL INSTRUCTIONS:\n{extra_instructions}"
         if extra_instructions
+        else ""
+    )
+    starter_note = (
+        f"\n   A file `{starter_file}` in the working directory contains the exact"
+        " starter signature from the candidate's editor — copy it as your"
+        " starting point and keep the signature verbatim."
+        if starter_file
         else ""
     )
     refine = ""
@@ -101,14 +109,19 @@ output), do NOT stall or research it — note it in one line, rely on the \
 STATEMENT, and still deliver a correct, runnable solution to the stated problem.
 
 PROCESS
-1. Write your solution to a file (e.g. solution.py).
+1. Write your solution to a file (e.g. solution.py).{starter_note}
 2. Write a small driver script that runs your solution against the provided \
 examples and prints PASS/FAIL with expected vs actual for each.
 3. Run it with Bash. If an example fails, decide whether YOUR code is wrong or \
 the EXAMPLE is corrupt: fix the code if it's a real bug; if the example is \
 clearly inconsistent with the statement, disregard that one example and move \
 on. Do not loop forever chasing a bad example.
-4. PERFORMANCE GATE (mandatory — correct-but-slow means Time Limit Exceeded \
+4. EARLY ANSWER (do this the moment ALL examples pass, BEFORE hardening): \
+emit the complete solution in the exact FINAL ANSWER format below as a \
+regular message right away — the user sees it immediately while you keep \
+working. Then continue with the performance gate and edge cases; your final \
+message delivers the (possibly improved) final version in the same format.
+5. PERFORMANCE GATE (mandatory — correct-but-slow means Time Limit Exceeded \
 on the real judge, which is a FAILURE): read the constraints, generate a \
 random WORST-CASE input at the maximum stated size (e.g. n = 1000 → a full \
 1000-size input), and TIME your solution on it with Bash. It must finish in \
@@ -117,10 +130,10 @@ required complexity from the constraints (n ≤ 100 → O(n^3) usually fine; \
 n ≤ 1000 → at most ~O(n^2 log n); n ≤ 10^5 → O(n log n)) and optimize (better \
 state space, prefix/suffix precomputation, monotonic structures) until the \
 worst-case timing passes. Re-run the examples after optimizing.
-5. Then reason about edge cases beyond the examples (empty input, max \
+6. Then reason about edge cases beyond the examples (empty input, max \
 constraints, duplicates, overflow, etc.) and harden the code. Re-run to \
 confirm nothing regressed.
-6. If you genuinely cannot get all examples passing, still deliver your best \
+7. If you genuinely cannot get all examples passing, still deliver your best \
 verified-as-far-as-possible attempt and note the remaining gap in the Approach \
 line — do not loop forever.
 

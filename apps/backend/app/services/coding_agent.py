@@ -13,6 +13,7 @@ metered API). See docs/agentic-coding.md.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import shutil
@@ -20,6 +21,7 @@ import signal
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.logging import log
@@ -33,6 +35,22 @@ from app.settings import settings
 # How much of a tool input / result to surface in the trace. The panel shows a
 # glanceable step list, not full logs — keep events small.
 _SUMMARY_MAX = 500
+
+# Extension for the starter-code file written into the agent workspace.
+_LANG_EXTS = {
+    "python": "py",
+    "python3": "py",
+    "javascript": "js",
+    "typescript": "ts",
+    "java": "java",
+    "c++": "cpp",
+    "cpp": "cpp",
+    "go": "go",
+}
+
+
+def _lang_ext(language: str) -> str:
+    return _LANG_EXTS.get(language.strip().lower(), "txt")
 
 # StreamReader line-buffer cap for the CLI's stdout. asyncio defaults to 64KB,
 # but a single stream-json line can be far bigger — the `system` init blob, or
@@ -192,6 +210,94 @@ def _build_command() -> list[str]:
     return cmd
 
 
+# ─── Warm start ──────────────────────────────────────────────────────────────
+# The CLI pays a boot cost (node startup, config load, auth handshake) on
+# every spawn. A single pre-spawned process sits blocked on stdin — fully
+# booted — so the next agent run skips that cost. The slot refills in the
+# background after each take. Best-effort: any mismatch or dead process falls
+# back to a cold spawn.
+
+_warm_lock = asyncio.Lock()
+_warm_proc: asyncio.subprocess.Process | None = None
+_warm_workspace: str | None = None
+_warm_key: str | None = None
+
+
+def _spawn_fingerprint(cmd: list[str], env: dict[str, str]) -> str:
+    """A warm process is only reusable if it was spawned with the same command
+    and credentials as the incoming request."""
+    return json.dumps(
+        [cmd, env.get("CLAUDE_CODE_OAUTH_TOKEN", "")[-8:], env.get("CLAUDE_CONFIG_DIR", "")]
+    )
+
+
+async def _spawn_cli(
+    cmd: list[str], env: dict[str, str]
+) -> tuple[asyncio.subprocess.Process, str]:
+    workspace = tempfile.mkdtemp(prefix="friday-agent-")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=workspace,
+        env=env,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=_STREAM_READ_LIMIT,
+        # New session/process group so we can kill the whole tree (the CLI
+        # spawns child processes for Bash) on cancel or timeout.
+        start_new_session=True,
+    )
+    return proc, workspace
+
+
+async def prewarm_agent() -> None:
+    """Pre-spawn one CLI process so the next agent run skips boot latency.
+    No-op when the agent is disabled/unconfigured or a warm slot exists."""
+    global _warm_proc, _warm_workspace, _warm_key
+    if agent_unavailable_reason(None) is not None:
+        return
+    async with _warm_lock:
+        if _warm_proc is not None and _warm_proc.returncode is None:
+            return
+        cmd = _build_command()
+        env = resolve_agent_env(None)
+        try:
+            _warm_proc, _warm_workspace = await _spawn_cli(cmd, env)
+            _warm_key = _spawn_fingerprint(cmd, env)
+            log.info("coding_agent.prewarmed", workspace=_warm_workspace)
+        except Exception as exc:  # noqa: BLE001 - warm start is best-effort
+            _warm_proc = _warm_workspace = _warm_key = None
+            log.warning("coding_agent.prewarm_failed", error=str(exc)[:200])
+
+
+async def _take_warm(
+    cmd: list[str], env: dict[str, str]
+) -> tuple[asyncio.subprocess.Process, str] | None:
+    """Claim the warm slot if it matches this request; None → cold spawn."""
+    global _warm_proc, _warm_workspace, _warm_key
+    async with _warm_lock:
+        proc, workspace, key = _warm_proc, _warm_workspace, _warm_key
+        _warm_proc = _warm_workspace = _warm_key = None
+    if proc is None or workspace is None:
+        return None
+    if proc.returncode is not None or key != _spawn_fingerprint(cmd, env):
+        _kill(proc)
+        shutil.rmtree(workspace, ignore_errors=True)
+        return None
+    return proc, workspace
+
+
+def _cleanup_warm() -> None:
+    """atexit: don't orphan the idle warm process on backend shutdown/reload."""
+    if _warm_proc is not None:
+        _kill(_warm_proc)
+    if _warm_workspace is not None:
+        shutil.rmtree(_warm_workspace, ignore_errors=True)
+
+
+atexit.register(_cleanup_warm)
+
+
 async def stream_coding_agent(
     *,
     problem: dict[str, Any],
@@ -211,37 +317,47 @@ async def stream_coding_agent(
     if reason:
         raise AgentUnavailableError(reason)
 
+    env = resolve_agent_env(session_id)
+    cmd = _build_command()
+
+    # Starter code as a real file: the agent handles files more reliably than
+    # inline snippets, and the exact signature matters (mismatch = graded
+    # wrong). Written into the workspace below; the prompt references it.
+    starter = (problem.get("function_signature") or "").strip()
+    starter_file = f"starter.{_lang_ext(language)}" if starter else None
+
     prompt = build_agent_prompt(
         problem,
         language=language,
         extra_instructions=extra_instructions,
         prior_solution=prior_solution,
         feedback=feedback,
+        starter_file=starter_file,
     )
-    env = resolve_agent_env(session_id)
-    cmd = _build_command()
 
-    workspace = tempfile.mkdtemp(prefix="friday-agent-")
-    proc: asyncio.subprocess.Process | None = None
+    # Prefer the pre-warmed process (already booted, blocked on stdin);
+    # cold-spawn when the slot is empty or doesn't match this request.
+    warm = await _take_warm(cmd, env)
+    if warm is not None:
+        proc, workspace = warm
+    else:
+        proc, workspace = await _spawn_cli(cmd, env)
+    # Refill the slot in the background for the NEXT run.
+    refill = asyncio.get_running_loop().create_task(prewarm_agent())
+    refill.add_done_callback(lambda t: t.exception())  # never unobserved
+
     log.info(
         "coding_agent.start",
         session_id=session_id,
         workspace=workspace,
+        warm=warm is not None,
         timeout_s=settings.agent_timeout_s,
     )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=workspace,
-            env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=_STREAM_READ_LIMIT,
-            # New session/process group so we can kill the whole tree (the CLI
-            # spawns child processes for Bash) on cancel or timeout.
-            start_new_session=True,
-        )
+        if starter and starter_file:
+            await asyncio.to_thread(
+                Path(workspace, starter_file).write_text, starter + "\n", "utf-8"
+            )
         # Feed the prompt via stdin — avoids argv length limits on big problems.
         assert proc.stdin is not None
         proc.stdin.write(prompt.encode("utf-8"))
