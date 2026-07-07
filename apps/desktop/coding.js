@@ -95,7 +95,12 @@ class CodingCapture extends EventEmitter {
   }
 
   setProvider(provider) {
-    if (provider === 'gemini' || provider === 'openai' || provider === 'deepseek') {
+    if (
+      provider === 'gemini' ||
+      provider === 'openai' ||
+      provider === 'deepseek' ||
+      provider === 'claude'
+    ) {
       this.provider = provider;
     } else {
       this.provider = null;

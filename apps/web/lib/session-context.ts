@@ -3,6 +3,7 @@ import type {
   CodingLanguage,
   InterviewType,
   QAHistoryRow,
+  QdModel,
   SessionContextResponse,
   SessionRow,
 } from '@friday/shared-types';
@@ -10,6 +11,14 @@ import type {
 const SESSION_ID_KEY = 'friday.session.id';
 const PROVIDER_KEY = 'friday.session.provider';
 const CODING_LANGUAGE_KEY = 'friday.session.coding_language';
+const QD_MODEL_KEY = 'friday.session.qd_model';
+const QD_MODELS: readonly QdModel[] = [
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gpt-4o-mini',
+  'gpt-4o',
+];
 const CODING_LANGUAGES: readonly CodingLanguage[] = [
   'Python',
   'JavaScript',
@@ -43,6 +52,7 @@ export function getProviderPreference(): AnswerProvider {
   const raw = window.localStorage.getItem(PROVIDER_KEY);
   if (raw === 'openai') return 'openai';
   if (raw === 'deepseek') return 'deepseek';
+  if (raw === 'claude') return 'claude';
   return 'gemini';
 }
 
@@ -66,6 +76,22 @@ export function setCodingLanguagePreference(lang: CodingLanguage): void {
 }
 
 export const ALL_CODING_LANGUAGES = CODING_LANGUAGES;
+
+export function getQdModelPreference(): QdModel {
+  if (typeof window === 'undefined') return 'gemini-2.5-flash-lite';
+  const raw = window.localStorage.getItem(QD_MODEL_KEY);
+  if (raw && (QD_MODELS as readonly string[]).includes(raw)) {
+    return raw as QdModel;
+  }
+  return 'gemini-2.5-flash-lite';
+}
+
+export function setQdModelPreference(model: QdModel): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(QD_MODEL_KEY, model);
+}
+
+export const ALL_QD_MODELS = QD_MODELS;
 
 const BACKEND_HTTP_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://127.0.0.1:8000';
 
@@ -150,7 +176,7 @@ export interface SessionUsageSummary {
  */
 export async function patchSessionProvider(
   sessionId: string,
-  provider: 'gemini' | 'openai' | 'deepseek',
+  provider: AnswerProvider,
 ): Promise<boolean> {
   if (!sessionId) return false;
   try {

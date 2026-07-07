@@ -176,6 +176,11 @@ def coding_solution_user_prompt(
 SOLUTION_GEMINI_MODEL = "gemini-2.5-flash"
 SOLUTION_OPENAI_MODEL = "gpt-4o"
 SOLUTION_DEEPSEEK_MODEL = "deepseek-chat"
+# Claude has a single capable tier for coding — Opus 4.8 is used for both the
+# default solve and the deep refine (it already outclasses the Flash/4o solve
+# tier, so there's no cheaper "solve" variant to drop to). Override the model
+# string via ANTHROPIC_MODEL in settings if you want Sonnet/Haiku instead.
+SOLUTION_ANTHROPIC_MODEL = "claude-opus-4-8"
 SOLUTION_MAX_OUTPUT_TOKENS = 2500
 SOLUTION_TEMPERATURE = 0.2
 
@@ -187,4 +192,5 @@ SOLUTION_TEMPERATURE = 0.2
 REFINE_GEMINI_MODEL = "gemini-2.5-pro"
 REFINE_OPENAI_MODEL = "gpt-4o"
 REFINE_DEEPSEEK_MODEL = "deepseek-reasoner"
+REFINE_ANTHROPIC_MODEL = SOLUTION_ANTHROPIC_MODEL
 REFINE_MAX_OUTPUT_TOKENS = 4000

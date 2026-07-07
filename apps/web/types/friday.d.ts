@@ -1,4 +1,4 @@
-import type { ExtractedProblem } from '@friday/shared-types';
+import type { AnswerProvider, ExtractedProblem } from '@friday/shared-types';
 
 export {};
 
@@ -33,9 +33,7 @@ declare global {
     stop: () => Promise<{ ok: boolean }>;
     forceExtract: () => Promise<{ ok: boolean; error?: string }>;
     isActive: () => Promise<boolean>;
-    setProvider: (
-      provider: 'gemini' | 'openai' | 'deepseek',
-    ) => Promise<{ ok: boolean; provider: string | null }>;
+    setProvider: (provider: AnswerProvider) => Promise<{ ok: boolean; provider: string | null }>;
     onFrameProcessed: (cb: (info: FridayCodingFrameInfo) => void) => () => void;
     onExtractionResult: (cb: (payload: FridayCodingExtractionResult) => void) => () => void;
     onError: (cb: (msg: string) => void) => () => void;
