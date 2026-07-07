@@ -65,6 +65,7 @@ import { SetupForm } from '../setup/setup-form';
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
 import {
   CodingPanel,
+  type AgentSessionStats,
   type AgentStep,
   type CodingProblemTab,
   type CodingScratchState,
@@ -212,6 +213,10 @@ export function SessionClient() {
   // from re-launching the agent forever (esp. when an OCR-corrupted example
   // can never pass). Manual Agent-button runs are not gated by this.
   const autoEscalatedRef = useRef<Set<string>>(new Set());
+  // Session-cumulative agent usage — surfaced as a pill so subscription
+  // spend is visible the way the cost pill shows API spend.
+  const [agentStats, setAgentStats] = useState<AgentSessionStats>({ runs: 0, totalMs: 0 });
+  const agentRunStartRef = useRef<number>(0);
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
@@ -653,6 +658,7 @@ export function SessionClient() {
     // cancelled / error close out the trace AND the tab status.
     if (msg.type === 'started' && msg.mode === 'agent') {
       codingAgentStreamingRef.current = true;
+      agentRunStartRef.current = Date.now();
       const fp = activeFingerprintRef.current;
       if (fp) {
         updateTab(fp, (t) => ({
@@ -662,7 +668,7 @@ export function SessionClient() {
           // Keep the fast solution + its ✗ verdict visible while the agent
           // works below — the agent's verified answer replaces `solution`
           // when it finishes (agent_solution). Don't blank the panel.
-          agent: { status: 'streaming', steps: [] },
+          agent: { status: 'streaming', steps: [], startedAt: Date.now() },
         }));
       }
       return;
@@ -690,6 +696,7 @@ export function SessionClient() {
         agent: {
           status: t.agent?.status ?? 'streaming',
           steps: [...(t.agent?.steps ?? []), step],
+          startedAt: t.agent?.startedAt ?? Date.now(),
         },
       }));
       return;
@@ -698,6 +705,13 @@ export function SessionClient() {
       const fp = activeFingerprintRef.current;
       const finalize = (status: CodingProblemTab['status']) => {
         codingAgentStreamingRef.current = false;
+        // Every termination consumed subscription time — count it.
+        const startedAt = agentRunStartRef.current;
+        if (startedAt > 0) {
+          const elapsed = Date.now() - startedAt;
+          setAgentStats((prev) => ({ runs: prev.runs + 1, totalMs: prev.totalMs + elapsed }));
+          agentRunStartRef.current = 0;
+        }
         if (!fp) return;
         updateTab(fp, (t) => ({
           ...t,
@@ -877,7 +891,7 @@ export function SessionClient() {
       error: null,
       // Keep any existing fast solution + verdict on screen while the agent
       // runs; it's replaced only when the agent returns its verified answer.
-      agent: { status: 'streaming', steps: [] },
+      agent: { status: 'streaming', steps: [], startedAt: Date.now() },
     }));
   };
 
@@ -1699,6 +1713,7 @@ export function SessionClient() {
             onCancel={onCodingCancel}
             onRefine={onCodingRefine}
             onAgentSolve={() => requestAgentSolve()}
+            agentStats={agentStats}
             frameInfo={codingFrame}
             error={codingError}
             privacyMode={privacyMode}

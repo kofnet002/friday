@@ -219,6 +219,9 @@ export interface CodingExample {
   input: string;
   output: string;
   explanation?: string | null;
+  /** Extractor couldn't reconcile this example with the statement (OCR
+   *  misread). Excluded from self-verification to avoid false failures. */
+  unreliable?: boolean;
 }
 
 /** Mirrors backend app.models.coding.ExtractedProblem. */
@@ -322,5 +325,7 @@ export type CodingSolutionServerMessage =
   | { type: 'agent_step'; text: string }
   | { type: 'agent_tool'; tool: string; summary: string }
   | { type: 'agent_tool_result'; ok: boolean; summary: string }
-  | { type: 'agent_solution'; text: string }
+  /** `provisional: true` = the agent's examples pass but it's still hardening
+   *  (perf gate / edge cases); the final message replaces it if improved. */
+  | { type: 'agent_solution'; text: string; provisional?: boolean }
   | CodingProblemDetectedEvent;

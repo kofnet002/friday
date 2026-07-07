@@ -12,10 +12,21 @@ export interface CodingWsHandlers {
 
 const BACKEND_WS_URL = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? 'ws://127.0.0.1:8000';
 
+// Reconnect backoff: 1s → 2s → 4s … capped. The coding socket is the delivery
+// channel for vision detections (session_bus) — if it silently dies, every
+// extraction is dropped on the floor (emitted=False) while the desktop keeps
+// paying for vision calls. Reconnecting is what makes an overnight blip
+// self-heal instead of bricking the panel until a manual reload.
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
+
 export class CodingWs {
   private ws: WebSocket | null = null;
   private handlers: CodingWsHandlers;
   private sessionId: string;
+  private closedByUser = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer: number | null = null;
 
   constructor(sessionId: string, handlers: CodingWsHandlers) {
     this.sessionId = sessionId;
@@ -24,10 +35,18 @@ export class CodingWs {
 
   connect(): void {
     if (this.ws) return;
+    this.closedByUser = false;
+    this.open();
+  }
+
+  private open(): void {
     const ws = new WebSocket(
       `${BACKEND_WS_URL}/ws/coding-solution?session_id=${encodeURIComponent(this.sessionId)}`,
     );
-    ws.onopen = () => this.handlers.onOpen?.();
+    ws.onopen = () => {
+      this.reconnectAttempt = 0;
+      this.handlers.onOpen?.();
+    };
     ws.onmessage = (event) => {
       if (typeof event.data !== 'string') return;
       try {
@@ -40,9 +59,23 @@ export class CodingWs {
     ws.onclose = (event) => {
       this.ws = null;
       this.handlers.onClose?.(event);
+      this.scheduleReconnect();
     };
     ws.onerror = (event) => this.handlers.onError?.(event);
     this.ws = ws;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closedByUser || this.reconnectTimer !== null) return;
+    const delay = Math.min(
+      RECONNECT_MAX_MS,
+      RECONNECT_BASE_MS * 2 ** Math.min(this.reconnectAttempt, 5),
+    );
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.closedByUser && !this.ws) this.open();
+    }, delay);
   }
 
   isOpen(): boolean {
@@ -59,6 +92,11 @@ export class CodingWs {
   }
 
   close(): void {
+    this.closedByUser = true;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
       try {
         this.ws.close();

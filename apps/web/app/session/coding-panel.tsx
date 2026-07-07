@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   AnswerProvider,
   CodingLanguage,
@@ -61,6 +61,14 @@ export type AgentStep =
 export interface AgentTraceState {
   status: CodingSolutionStatus;
   steps: AgentStep[];
+  /** Epoch ms when this run started — drives the live elapsed counter. */
+  startedAt: number;
+}
+
+/** Session-cumulative agent usage (subscription time is the real cost). */
+export interface AgentSessionStats {
+  runs: number;
+  totalMs: number;
 }
 
 export interface CodingProblemTab {
@@ -120,6 +128,9 @@ export interface CodingPanelProps {
    *  Runs on the current tab; the trace + verified answer replace the tab's
    *  one-shot solution. */
   onAgentSolve: () => void;
+  /** Session-cumulative agent usage (runs + wall-clock) — surfaces the
+   *  subscription cost the way the cost pill does for API providers. */
+  agentStats: AgentSessionStats;
   frameInfo: { changed_bits: number; interval_ms: number } | null;
   error: string | null;
   privacyMode: boolean;
@@ -150,6 +161,7 @@ export function CodingPanel({
   onCancel,
   onRefine,
   onAgentSolve,
+  agentStats,
   frameInfo,
   error,
   privacyMode,
@@ -338,6 +350,7 @@ export function CodingPanel({
           onCancel={onCancel}
           onRefine={onRefine}
           onAgentSolve={onAgentSolve}
+          agentStats={agentStats}
           privacyMode={privacyMode}
         />
       ) : null}
@@ -557,6 +570,7 @@ function ActiveProblemView({
   onCancel,
   onRefine,
   onAgentSolve,
+  agentStats,
   privacyMode,
 }: {
   tab: CodingProblemTab;
@@ -566,6 +580,7 @@ function ActiveProblemView({
   onCancel: () => void;
   onRefine: (feedback: string) => void;
   onAgentSolve: () => void;
+  agentStats: AgentSessionStats;
   privacyMode: boolean;
 }) {
   const { problem, solution, status, error, agent } = tab;
@@ -742,6 +757,15 @@ function ActiveProblemView({
               Saved
             </span>
           ) : null}
+          {agentStats.runs > 0 ? (
+            <span
+              className="rounded-full bg-violet-500/15 px-2 py-0.5 font-mono text-[10px] text-violet-700 dark:text-violet-300"
+              title="Claude agent usage this session (bills your subscription)"
+            >
+              🤖 {agentStats.runs} run{agentStats.runs === 1 ? '' : 's'} ·{' '}
+              {Math.round(agentStats.totalMs / 60000)}m
+            </span>
+          ) : null}
           <span className="rounded-full bg-neutral-100 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
             {provider} · {tab.language}
           </span>
@@ -813,6 +837,17 @@ function ActiveProblemView({
 
 function AgentTraceView({ agent }: { agent: AgentTraceState }) {
   const running = agent.status === 'streaming';
+  // Live elapsed counter — a long agent run should read as deliberate work,
+  // not a frozen panel. Ticks only while running.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [running]);
+  const elapsedS = Math.max(0, Math.round((now - agent.startedAt) / 1000));
+  const elapsed =
+    elapsedS >= 60 ? `${Math.floor(elapsedS / 60)}m ${elapsedS % 60}s` : `${elapsedS}s`;
   return (
     <div className="rounded-lg border border-violet-200 bg-violet-50/40 dark:border-violet-500/30 dark:bg-violet-950/20">
       <div className="flex items-center gap-2 border-b border-violet-200/70 px-3 py-1.5 dark:border-violet-500/20">
@@ -822,7 +857,7 @@ function AgentTraceView({ agent }: { agent: AgentTraceState }) {
         </span>
         <span className="ml-auto text-[10px] font-medium text-violet-500 dark:text-violet-400/80">
           {running
-            ? `working · ${agent.steps.length} steps`
+            ? `working · ${elapsed} · ${agent.steps.length} steps`
             : agent.status === 'error'
               ? 'stopped'
               : agent.status === 'cancelled'
