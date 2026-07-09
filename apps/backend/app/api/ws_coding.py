@@ -117,16 +117,23 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
             ):
                 if event.type == "step":
                     text = event.text.strip()
-                    if text.startswith("### 🎯"):
-                        # EARLY ANSWER: the agent emits the full formatted
-                        # solution as soon as its examples pass, then keeps
-                        # hardening. Surface it as a provisional solution so
-                        # the user reads it minutes before the final one; the
-                        # terminal `result` event overwrites it if improved.
-                        solution_text = text
-                        trace.append({"kind": "solution", "provisional": True, "text": text})
+                    # EARLY ANSWER: the agent emits the full formatted solution
+                    # as soon as its examples pass, then keeps hardening.
+                    # Despite the prompt, it often prefixes a narration line
+                    # ("Both examples pass. Now emitting…"), so look for the
+                    # marker anywhere and slice from it rather than demanding
+                    # the message start with it.
+                    marker = text.find("### 🎯")
+                    if marker != -1:
+                        # Surface it as a provisional solution so the user
+                        # reads it minutes before the final one; the terminal
+                        # `result` event overwrites it if improved.
+                        solution_text = text[marker:]
+                        trace.append(
+                            {"kind": "solution", "provisional": True, "text": solution_text}
+                        )
                         await send_json(
-                            {"type": "agent_solution", "text": text, "provisional": True}
+                            {"type": "agent_solution", "text": solution_text, "provisional": True}
                         )
                     else:
                         trace.append({"kind": "step", "text": event.text})

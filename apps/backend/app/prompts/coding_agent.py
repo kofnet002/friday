@@ -14,7 +14,7 @@ from typing import Any
 
 from app.prompts.coding_solution import coding_solution_user_prompt
 
-CODING_AGENT_VERSION = "1.1.0"
+CODING_AGENT_VERSION = "1.2.0"
 
 # Language tag for the fenced code block in the final answer.
 _LANG_TAGS = {
@@ -109,7 +109,10 @@ output), do NOT stall or research it — note it in one line, rely on the \
 STATEMENT, and still deliver a correct, runnable solution to the stated problem.
 
 PROCESS
-1. Write your solution to a file (e.g. solution.py).{starter_note}
+1. Write your solution to a file (e.g. solution.py) in the CURRENT working \
+directory — it is your private scratch dir. Never create files under /tmp or \
+any other shared path: those persist between runs, and a stale driver from a \
+previous problem can silently poison your verification.{starter_note}
 2. Write a small driver script that runs your solution against the provided \
 examples and prints PASS/FAIL with expected vs actual for each.
 3. Run it with Bash. If an example fails, decide whether YOUR code is wrong or \
