@@ -14,7 +14,7 @@ from typing import Any
 
 from app.prompts.coding_solution import coding_solution_user_prompt
 
-CODING_AGENT_VERSION = "1.0.0"
+CODING_AGENT_VERSION = "1.1.0"
 
 # Language tag for the fenced code block in the final answer.
 _LANG_TAGS = {
@@ -116,10 +116,13 @@ examples and prints PASS/FAIL with expected vs actual for each.
 the EXAMPLE is corrupt: fix the code if it's a real bug; if the example is \
 clearly inconsistent with the statement, disregard that one example and move \
 on. Do not loop forever chasing a bad example.
-4. EARLY ANSWER (do this the moment ALL examples pass, BEFORE hardening): \
-emit the complete solution in the exact FINAL ANSWER format below as a \
-regular message right away — the user sees it immediately while you keep \
-working. Then continue with the performance gate and edge cases; your final \
+4. EARLY ANSWER (HARD RULE — not optional): the VERY FIRST message you write \
+after the driver prints all examples PASS must be the complete solution in \
+the exact FINAL ANSWER format below — before any timing runs, edge-case \
+analysis, or other hardening. The user is in a live interview and sees this \
+message immediately; every second you spend hardening before emitting it is \
+time they sit with nothing. Do not write "now let's check timing" or any \
+other text first. After emitting it, continue with steps 5–6; your final \
 message delivers the (possibly improved) final version in the same format.
 5. PERFORMANCE GATE (mandatory — correct-but-slow means Time Limit Exceeded \
 on the real judge, which is a FAILURE): read the constraints, generate a \
