@@ -149,9 +149,17 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                         {"type": "agent_tool_result", "ok": event.ok, "summary": event.summary}
                     )
                 elif event.type == "solution":
-                    solution_text = event.text
-                    trace.append({"kind": "solution", "text": event.text})
-                    await send_json({"type": "agent_solution", "text": event.text})
+                    # Same narration-prefix problem as the provisional above
+                    # ("Both examples pass. ### 🎯 …") — without the slice the
+                    # final message would overwrite the clean provisional with
+                    # a messier one.
+                    text = event.text
+                    marker = text.find("### 🎯")
+                    if marker > 0:
+                        text = text[marker:]
+                    solution_text = text
+                    trace.append({"kind": "solution", "text": text})
+                    await send_json({"type": "agent_solution", "text": text})
             await send_json({"type": "done"})
         except AgentUnavailableError as exc:
             await send_json({"type": "error", "message": f"agent unavailable — {exc}"})
