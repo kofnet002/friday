@@ -190,6 +190,14 @@ def _build_command() -> list[str]:
         "-p",
         "--output-format",
         "stream-json",
+        # stream-json INPUT is what makes warm starts work: in plain-text
+        # stdin mode the CLI gives up after 3s with no data ("no stdin data
+        # received in 3s") and exits, so a pre-spawned process is dead by the
+        # time it's claimed. In stream-json input mode it waits indefinitely
+        # for a JSON user message (verified: alive after 75s idle, answers
+        # in ~2.5s, exits on its own after result + stdin EOF).
+        "--input-format",
+        "stream-json",
         # stream-json in print mode requires --verbose to emit per-turn events.
         "--verbose",
         "--allowedTools",
@@ -358,9 +366,21 @@ async def stream_coding_agent(
             await asyncio.to_thread(
                 Path(workspace, starter_file).write_text, starter + "\n", "utf-8"
             )
-        # Feed the prompt via stdin — avoids argv length limits on big problems.
+        # Feed the prompt via stdin as a stream-json user message (see
+        # _build_command for why not plain text). Closing stdin after the one
+        # message tells the CLI no more turns are coming; it exits after the
+        # final result on its own.
         assert proc.stdin is not None
-        proc.stdin.write(prompt.encode("utf-8"))
+        stdin_msg = json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                },
+            }
+        )
+        proc.stdin.write((stdin_msg + "\n").encode("utf-8"))
         await proc.stdin.drain()
         proc.stdin.close()
 
