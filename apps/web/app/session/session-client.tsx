@@ -34,6 +34,8 @@ import type {
   CodingSolutionServerMessage,
   ExtractedProblem,
   QAHistoryRow,
+  QdModel,
+  QdState,
   TranscriptEvent,
   WsServerMessage,
 } from '@friday/shared-types';
@@ -48,10 +50,12 @@ import {
   getCodingLanguagePreference,
   getOrCreateSessionId,
   getProviderPreference,
+  getQdModelPreference,
   patchSessionProvider,
   sessionExportUrl,
   setCodingLanguagePreference,
   setProviderPreference,
+  setQdModelPreference,
   type SessionUsageSummary,
 } from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
@@ -59,7 +63,13 @@ import { cn } from '@/lib/utils';
 
 import { SetupForm } from '../setup/setup-form';
 import { AnswerPanel, type AnswerStatus } from './answer-panel';
-import { CodingPanel, type CodingProblemTab, type CodingScratchState } from './coding-panel';
+import {
+  CodingPanel,
+  type AgentSessionStats,
+  type AgentStep,
+  type CodingProblemTab,
+  type CodingScratchState,
+} from './coding-panel';
 import { FeatureBar, SECONDARY_FEATURES, getFeatureWidth, type FeatureKey } from './feature-bar';
 import {
   ConnectionPill,
@@ -98,10 +108,10 @@ interface AnswerEntry {
 
 const AUTOSCROLL_THRESHOLD_PX = 48;
 
-// The three non-solve coding modes. Carved out as a type alias because
-// codingScratchByMode keys against this set — solve uses tabs, not the
-// scratch buffer, so it's excluded.
-type ScratchMode = Exclude<CodingMode, 'solve'>;
+// The three scratch coding modes. Carved out as a type alias because
+// codingScratchByMode keys against this set. `solve` uses tabs, and `agent`
+// runs on the active tab (not a scratch buffer), so both are excluded.
+type ScratchMode = Exclude<CodingMode, 'solve' | 'agent'>;
 // Force-ask (⌘⇧Space) sends the last N finalized transcript chunks to the
 // copilot. The interviewer's question often isn't the *last* thing said —
 // they ask, then keep narrating. Keep this window wide enough that the
@@ -140,6 +150,24 @@ export function SessionClient() {
   const [answerConnected, setAnswerConnected] = useState(false);
   const streamingIdRef = useRef<string | null>(null);
 
+  // Question-detection model + lifecycle state. The model is a user
+  // preference; the state reflects the per-session detector's current
+  // phase (idle/listening/detecting) and drives the Listen-panel pill.
+  const [qdModel, setQdModelState] = useState<QdModel>('gemini-2.5-flash-lite');
+  const [qdState, setQdState] = useState<QdState>('idle');
+  // Non-null when the backend has fallen back from Gemini to GPT-4o for
+  // QD (typically a 429). Reset when the user explicitly picks a new
+  // model. Drives the "fallback" badge next to the QD dropdown.
+  const [qdFallbackModel, setQdFallbackModel] = useState<string | null>(null);
+  // Non-null when BOTH Gemini and the fallback provider are unavailable.
+  // QD has effectively stopped — surfaced as a critical badge.
+  const [qdError, setQdError] = useState<string | null>(null);
+  // Briefly highlights the status pill when the detector saw a question
+  // and suppressed it as a duplicate. Auto-clears.
+  const [qdDedupAt, setQdDedupAt] = useState<number>(0);
+  const qdModelRef = useRef<QdModel>('gemini-2.5-flash-lite');
+  qdModelRef.current = qdModel;
+
   // Coding panel state
   const [codingActive, setCodingActive] = useState(false);
   const [codingLanguage, setCodingLanguage] = useState<CodingLanguage>('Python');
@@ -176,6 +204,19 @@ export function SessionClient() {
   // ref to route incoming tokens to the right scratch slice. null = no
   // scratch stream in flight (tokens go to the solve-mode active tab).
   const codingScratchStreamingModeRef = useRef<ScratchMode | null>(null);
+  // True while an agent-mode run is streaming into the active tab. Agent runs
+  // route by activeFingerprint (like solve) but need to be distinguished from
+  // a normal solve so started/done/error patch the tab's `agent` slice.
+  const codingAgentStreamingRef = useRef<boolean>(false);
+  // Fingerprints that already got their ONE automatic agent escalation this
+  // session. Prevents the verify-fail → agent → refine → verify-fail loop
+  // from re-launching the agent forever (esp. when an OCR-corrupted example
+  // can never pass). Manual Agent-button runs are not gated by this.
+  const autoEscalatedRef = useRef<Set<string>>(new Set());
+  // Session-cumulative agent usage — surfaced as a pill so subscription
+  // spend is visible the way the cost pill shows API spend.
+  const [agentStats, setAgentStats] = useState<AgentSessionStats>({ runs: 0, totalMs: 0 });
+  const agentRunStartRef = useRef<number>(0);
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
@@ -214,6 +255,23 @@ export function SessionClient() {
   const toastTimerRef = useRef<number | null>(null);
   const shieldRef = useRef<HTMLDivElement>(null);
   const entriesRef = useRef<AnswerEntry[]>([]);
+  // Mirror entryIndex into a ref so callbacks with stable identity
+  // (onTranscribeMessage, followUp) can read the current value without
+  // depending on it. Without this, the empty-deps useCallback below
+  // would route auto-detected follow-ups to the index from the first
+  // render even after the user chevroned away.
+  const entryIndexRef = useRef<number>(-1);
+  // Timestamp of the most recent force-ask. Auto-detected questions that
+  // arrive within a short cooldown of a force-ask are suppressed — the
+  // user already triggered a manual ask on substantially the same
+  // transcript window, so the auto-detect is almost certainly redundant.
+  const lastForceAskAtRef = useRef<number>(0);
+  // Must exceed the backend's ceiling timer (4500ms default) PLUS typical
+  // LLM latency (500-1500ms) so a force-ask reliably suppresses the
+  // matching auto-detect that lands ~5-6s later. 7000ms gives a comfortable
+  // margin without making the suppression window so wide that genuinely
+  // separate questions get dropped.
+  const FORCE_ASK_AUTODETECT_COOLDOWN_MS = 7000;
 
   finalsRef.current = finals;
   providerRef.current = provider;
@@ -221,6 +279,7 @@ export function SessionClient() {
   activeFingerprintRef.current = activeFingerprint;
   codingTabsRef.current = codingTabs;
   entriesRef.current = entries;
+  entryIndexRef.current = entryIndex;
 
   const currentEntry = entryIndex >= 0 && entryIndex < entries.length ? entries[entryIndex] : null;
 
@@ -232,6 +291,7 @@ export function SessionClient() {
     setSessionIdState(sid);
     setProvider(getProviderPreference());
     setCodingLanguage(getCodingLanguagePreference());
+    setQdModelState(getQdModelPreference());
 
     const ws = new AnswerWs(sid, {
       onMessage: onAnswerMessage,
@@ -482,7 +542,29 @@ export function SessionClient() {
       handleTranscript(msg);
       return;
     }
+    if (msg.type === 'qd_state') {
+      setQdState(msg.state);
+      return;
+    }
+    if (msg.type === 'qd_fallback') {
+      setQdFallbackModel(msg.model);
+      setQdError(null);
+      return;
+    }
+    if (msg.type === 'qd_error') {
+      setQdError(msg.reason);
+      return;
+    }
+    if (msg.type === 'qd_dedup') {
+      setQdDedupAt(Date.now());
+      return;
+    }
     if (msg.type === 'question_detected') {
+      // Force-ask cooldown: if the user just fired a manual ask, swallow
+      // auto-detected questions for a short window. The user already
+      // started a thread on substantially the same transcript content.
+      const sinceForce = Date.now() - lastForceAskAtRef.current;
+      if (sinceForce < FORCE_ASK_AUTODETECT_COOLDOWN_MS) return;
       // The backend detector can fire multiple times for the same
       // question while the speaker keeps talking — the recent transcript
       // window still contains the question, the model still sees it as
@@ -538,6 +620,28 @@ export function SessionClient() {
           skipReason: msg.skip_reason ?? null,
         },
       }));
+      // Auto-escalate: the fast solve failed its own examples, so hand the
+      // problem to the Claude agent (writes + runs + fixes code until the
+      // examples pass). Capped at ONCE per fingerprint for the session:
+      // `tab.agent` alone is not a durable guard (a later refine solve resets
+      // it for a clean slate), and an OCR-corrupted example can NEVER pass —
+      // without the cap, each refine re-launched the agent in a quota-burning
+      // loop. After the one auto-run, further escalation is the user's call
+      // (the Agent button still works any time).
+      const failed = msg.ran && msg.cases.length > 0 && msg.cases.some((c) => !c.ok);
+      const tab = codingTabsRef.current.find((t) => t.fingerprint === msg.fingerprint);
+      if (
+        failed &&
+        tab &&
+        !tab.agent &&
+        !codingAgentStreamingRef.current &&
+        !autoEscalatedRef.current.has(msg.fingerprint)
+      ) {
+        autoEscalatedRef.current.add(msg.fingerprint);
+        setActiveFingerprint(msg.fingerprint);
+        showFallbackToast('Examples failed · escalating to Claude agent');
+        requestAgentSolve(msg.fingerprint);
+      }
       return;
     }
     if (msg.type === 'provider_changed') {
@@ -545,6 +649,82 @@ export function SessionClient() {
       // (e.g. Gemini overloaded, switched to OpenAI mid-solve).
       showFallbackToast(`${msg.from} → ${msg.to} · fallback`);
       return;
+    }
+
+    // ─── Agent mode ───────────────────────────────────────────────────────
+    // The agent runs the tool loop on the active tab. `started` with
+    // mode 'agent' opens the trace; agent_* events append to it; the final
+    // answer arrives whole in agent_solution (no `token` events). done /
+    // cancelled / error close out the trace AND the tab status.
+    if (msg.type === 'started' && msg.mode === 'agent') {
+      codingAgentStreamingRef.current = true;
+      agentRunStartRef.current = Date.now();
+      const fp = activeFingerprintRef.current;
+      if (fp) {
+        updateTab(fp, (t) => ({
+          ...t,
+          status: 'streaming',
+          error: null,
+          // Keep the fast solution + its ✗ verdict visible while the agent
+          // works below — the agent's verified answer replaces `solution`
+          // when it finishes (agent_solution). Don't blank the panel.
+          agent: { status: 'streaming', steps: [], startedAt: Date.now() },
+        }));
+      }
+      return;
+    }
+    if (
+      msg.type === 'agent_step' ||
+      msg.type === 'agent_tool' ||
+      msg.type === 'agent_tool_result' ||
+      msg.type === 'agent_solution'
+    ) {
+      const fp = activeFingerprintRef.current;
+      if (!fp) return;
+      if (msg.type === 'agent_solution') {
+        updateTab(fp, (t) => ({ ...t, solution: msg.text }));
+        return;
+      }
+      const step: AgentStep =
+        msg.type === 'agent_step'
+          ? { kind: 'text', text: msg.text }
+          : msg.type === 'agent_tool'
+            ? { kind: 'tool', tool: msg.tool, summary: msg.summary }
+            : { kind: 'result', ok: msg.ok, summary: msg.summary };
+      updateTab(fp, (t) => ({
+        ...t,
+        agent: {
+          status: t.agent?.status ?? 'streaming',
+          steps: [...(t.agent?.steps ?? []), step],
+          startedAt: t.agent?.startedAt ?? Date.now(),
+        },
+      }));
+      return;
+    }
+    if (codingAgentStreamingRef.current) {
+      const fp = activeFingerprintRef.current;
+      const finalize = (status: CodingProblemTab['status']) => {
+        codingAgentStreamingRef.current = false;
+        // Every termination consumed subscription time — count it.
+        const startedAt = agentRunStartRef.current;
+        if (startedAt > 0) {
+          const elapsed = Date.now() - startedAt;
+          setAgentStats((prev) => ({ runs: prev.runs + 1, totalMs: prev.totalMs + elapsed }));
+          agentRunStartRef.current = 0;
+        }
+        if (!fp) return;
+        updateTab(fp, (t) => ({
+          ...t,
+          status,
+          agent: t.agent ? { ...t.agent, status } : t.agent,
+          ...(msg.type === 'error' ? { error: msg.message } : {}),
+        }));
+      };
+      if (msg.type === 'done') return finalize('done');
+      if (msg.type === 'cancelled') return finalize('cancelled');
+      if (msg.type === 'error') return finalize('error');
+      // saved / test_results fall through to the shared handlers above (they
+      // route by their own fingerprint), so nothing else to do here.
     }
 
     // Stream routing: when a non-solve mode is in flight, the entire stream
@@ -600,6 +780,8 @@ export function SessionClient() {
         savedId: null,
         // A fresh stream invalidates any prior verification result.
         tests: null,
+        // ...and any prior agent trace — this is a fresh one-shot solve.
+        agent: null,
       }));
       return;
     }
@@ -657,44 +839,120 @@ export function SessionClient() {
     if (!fp) return;
     const tab = codingTabsRef.current.find((t) => t.fingerprint === fp);
     if (!tab) return;
-    requestSolve(fp, tab.problem, codingLanguageRef.current, {
+    // Refines go to the CLAUDE AGENT, not another one-shot fast solve: a
+    // refine means the fast answer already failed (locally or on the real
+    // judge), and re-rolling the same model mostly re-rolls the same bug.
+    // The agent gets the failed code + the user's feedback and diagnoses it
+    // with its write→run→fix loop.
+    showFallbackToast('Refining with Claude agent…');
+    requestAgentSolve(fp, {
       feedback,
       // Send ONLY the code block, not the full Markdown response. With the
-      // full response the model treats `**Previous attempt:**` as "extend
-      // this finished answer" and cosmetically refines instead of
-      // diagnosing. Code-only framing makes "this is the buggy code you
-      // need to fix" unambiguous.
+      // full response the model treats the previous attempt as "extend this
+      // finished answer" and cosmetically refines instead of diagnosing.
+      // Code-only framing makes "this is the buggy code you need to fix"
+      // unambiguous.
       priorSolution: extractFirstCodeBlock(tab.solution),
     });
+  };
+
+  // Escalate the active problem to the Claude Code agent. Same {type:'solve'}
+  // frame the backend already handles, tagged mode:'agent' so ws_coding routes
+  // it to the CLI tool loop. The trace + verified answer stream back onto this
+  // tab (see the agent-mode block in onCodingSolutionMessage).
+  const requestAgentSolve = (
+    fingerprint?: string,
+    opts: { feedback?: string; priorSolution?: string } = {},
+  ) => {
+    const fp = fingerprint ?? activeFingerprintRef.current;
+    if (!fp) return;
+    const tab = codingTabsRef.current.find((t) => t.fingerprint === fp);
+    if (!tab) return;
+    const ws = codingWsRef.current;
+    if (!ws || !ws.isOpen()) {
+      setCodingError('coding WS not connected');
+      return;
+    }
+    codingAgentStreamingRef.current = true;
+    ws.send({
+      type: 'solve',
+      mode: 'agent',
+      problem: tab.problem,
+      language: codingLanguageRef.current,
+      provider: providerRef.current,
+      // Refine inputs — when present the agent starts from the failed
+      // attempt + feedback (diagnose) instead of solving from scratch.
+      feedback: opts.feedback?.trim() || undefined,
+      prior_solution: opts.priorSolution?.trim() || undefined,
+    });
+    updateTab(fp, (t) => ({
+      ...t,
+      status: 'streaming',
+      error: null,
+      // Keep any existing fast solution + verdict on screen while the agent
+      // runs; it's replaced only when the agent returns its verified answer.
+      agent: { status: 'streaming', steps: [], startedAt: Date.now() },
+    }));
   };
 
   const onCodingProblemDetected = (problem: ExtractedProblem, fingerprint: string) => {
     setCodingError(null);
     const lang = codingLanguageRef.current;
+    const existing = codingTabsRef.current.find((t) => t.fingerprint === fingerprint);
+    // A solve/agent is currently streaming somewhere. Weaker vision models
+    // re-extract the SAME on-screen problem with slightly different text →
+    // different fingerprints → a fresh tab whose auto-solve would cancel the
+    // one already running (ws_coding is single-in-flight), so nothing ever
+    // finishes. Never auto-solve — nor steal focus — while a solve is live.
+    const anyStreaming = codingTabsRef.current.some((t) => t.status === 'streaming');
+    // Auto-solve only when nothing is streaming AND this problem isn't already
+    // solved (or solving). A re-emit of an existing tab just refreshes text.
+    const shouldAutoSolve =
+      !anyStreaming && (!existing || (existing.status !== 'streaming' && !existing.solution));
+
     setCodingTabs((prev) => {
-      const existing = prev.find((t) => t.fingerprint === fingerprint);
-      if (existing) {
-        return prev.map((t) => (t.fingerprint === fingerprint ? { ...t, problem } : t));
+      const ex = prev.find((t) => t.fingerprint === fingerprint);
+      if (ex) {
+        return prev.map((t) =>
+          t.fingerprint === fingerprint
+            ? {
+                ...t,
+                problem,
+                // Reset for a fresh stream only when we're actually re-solving.
+                ...(shouldAutoSolve
+                  ? { solution: '', status: 'streaming' as const, error: null, tests: null }
+                  : {}),
+              }
+            : t,
+        );
       }
       const tab: CodingProblemTab = {
         fingerprint,
         problem,
         language: lang,
         solution: '',
-        status: 'streaming',
+        // Idle (not "streaming") when we're not kicking off a solve — otherwise
+        // the tab shows "Generating…" forever with no request behind it.
+        status: shouldAutoSolve ? 'streaming' : 'idle',
         error: null,
         savedId: null,
         tests: null,
+        agent: null,
       };
       const next = [...prev, tab];
       return next.length > MAX_CODING_TABS ? next.slice(-MAX_CODING_TABS) : next;
     });
-    setActiveFingerprint(fingerprint);
     setActiveFeature('coding');
-    // Auto-kick off the solve.
-    const ws = codingWsRef.current;
-    if (ws && ws.isOpen()) {
-      ws.send({ type: 'solve', problem, language: lang, provider: providerRef.current });
+    // Keep focus on the in-flight solve; only jump to the new problem when we
+    // actually start solving it (or it already exists as the active target).
+    if (shouldAutoSolve || existing) {
+      setActiveFingerprint(fingerprint);
+    }
+    if (shouldAutoSolve) {
+      const ws = codingWsRef.current;
+      if (ws && ws.isOpen()) {
+        ws.send({ type: 'solve', problem, language: lang, provider: providerRef.current });
+      }
     }
   };
 
@@ -754,9 +1012,18 @@ export function SessionClient() {
     setPanelError(null);
     setEntries((prev) => {
       const next = [...prev, entry];
-      // Auto-jump to the new entry — the user just asked and wants to see
-      // the answer. They can chevron back to older ones afterward.
-      setEntryIndex(next.length - 1);
+      // Auto-jump rules:
+      //   * Manual ask (force-ask / custom prompt) → always jump. User
+      //     explicitly fired this and expects to see it.
+      //   * Auto-detected → jump only when the user has no entry selected
+      //     (idx < 0) or is parked at the latest entry. Anywhere else
+      //     means the user is reading something older; don't yank them
+      //     away mid-read.
+      const idx = entryIndexRef.current;
+      const wasAtLatest = prev.length === 0 || idx < 0 || idx >= prev.length - 1;
+      if (!opts.autoDetected || wasAtLatest) {
+        setEntryIndex(next.length - 1);
+      }
       return next;
     });
     streamingIdRef.current = id;
@@ -775,7 +1042,12 @@ export function SessionClient() {
       setPanelError('copilot WS not connected');
       return;
     }
-    const current = entriesRef.current[entryIndex];
+    // Read entryIndex from ref so this function (captured by stable
+    // callbacks like onTranscribeMessage) targets the entry the user
+    // is currently viewing, not the one they were viewing at first
+    // render. Falls back to the newest entry when nothing is selected.
+    const idx = entryIndexRef.current >= 0 ? entryIndexRef.current : entriesRef.current.length - 1;
+    const current = entriesRef.current[idx];
     if (!current) {
       // No active thread — treat as a fresh ask. Matches what a user
       // probably means when they hit "More detail" on an empty panel.
@@ -823,7 +1095,26 @@ export function SessionClient() {
 
     const ws = new TranscribeWs({
       onMessage: onTranscribeMessage,
-      onOpen: () => ws.sendControl({ type: 'start' }),
+      onOpen: () => {
+        // ORDER MATTERS: set_qd_model BEFORE start. The backend's `start`
+        // unblocks the Deepgram audio path; the first transcript final
+        // can arrive within ~100ms of start. Sending the model first
+        // guarantees detection on that very first final uses the user's
+        // pick, not the server-side default.
+        ws.sendControl({ type: 'set_qd_model', model: qdModelRef.current });
+        ws.sendControl({ type: 'start' });
+        // QD signals are per-detector (per-WS) on the backend. A fresh
+        // socket = fresh detector, so clear any stale UI state from the
+        // previous session.
+        setQdFallbackModel(null);
+        setQdState('idle');
+        setQdError(null);
+        setQdDedupAt(0);
+        // The force-ask cooldown was set in the prior session and would
+        // otherwise carry over and suppress legitimate auto-detects in
+        // the new session for a few seconds.
+        lastForceAskAtRef.current = 0;
+      },
       onClose: () => setStatus((prev) => (prev === 'error' ? prev : 'idle')),
       onError: () => {
         setError('WebSocket error');
@@ -958,6 +1249,25 @@ export function SessionClient() {
     if (sessionId) void patchSessionProvider(sessionId, p);
   };
 
+  const onQdModelChange = (m: QdModel) => {
+    const samePick = m === qdModelRef.current;
+    if (!samePick) {
+      setQdModelState(m);
+      setQdModelPreference(m);
+    }
+    // Always clear fallback/error badges — re-picking the current model
+    // is an explicit "retry this model" gesture (the dropdown's only
+    // way to ask the backend to lift fallback or unstick the error
+    // state). The backend's set_model also resets _fallback_active.
+    setQdFallbackModel(null);
+    setQdError(null);
+    // Push to the live transcribe WS so the next detection run uses the
+    // new model. Send even on samePick so the backend's set_model runs
+    // and clears its own sticky state. No-op when the socket isn't open
+    // yet — set_qd_model is also sent on connect from the preference.
+    transcribeRef.current?.sendControl({ type: 'set_qd_model', model: m });
+  };
+
   const submitCustom = (q: string) => askAnswer(q);
 
   // ─── hotkeys: ⌘⇧␣ (force-ask), ⌘⇧C (coding), ⌘⇧. (panic blur) ─────────────
@@ -968,6 +1278,7 @@ export function SessionClient() {
         e.preventDefault();
         const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
         if (recent) {
+          lastForceAskAtRef.current = Date.now();
           askAnswer(recent);
           setActiveFeature('listen');
         } else {
@@ -982,13 +1293,21 @@ export function SessionClient() {
       }
       // Panic blur — when someone walks behind the screen, hit ⌘⇧. to
       // (a) flip privacyMode on so all rendered text + answers blur, and
-      // (b) close whatever feature popover is open so the bar collapses
-      // to a small floating pill. Press again to release.
+      // (b) close every popover / modal so the bar collapses to a small
+      // floating pill with no leaky indicators visible. Press again to
+      // release.
       if (e.code === 'Period' || e.key === '.') {
         e.preventDefault();
         setPrivacyMode((v) => {
           const next = !v;
-          if (next) setActiveFeature(null);
+          if (next) {
+            // Close anything that could reveal session context.
+            setActiveFeature(null);
+            setOverflowOpen(false);
+            setShieldOpen(false);
+            setShortcutsOpen(false);
+            setStealthDisableConfirmOpen(false);
+          }
           return next;
         });
         return;
@@ -1083,7 +1402,10 @@ export function SessionClient() {
   // active tab, not whichever mode is currently visible if the user has
   // already switched away).
   const runCodingScratch = () => {
-    if (codingMode === 'solve') return;
+    // solve = tab flow, agent = action button on the active tab — neither
+    // uses the scratch runner. (The mode strip never selects 'agent', but the
+    // CodingMode type includes it, so guard for narrowing.)
+    if (codingMode === 'solve' || codingMode === 'agent') return;
     const scratchMode = codingMode satisfies ScratchMode;
     const patchSlice = (patch: Partial<CodingScratchState>) =>
       setCodingScratchByMode((prev) => ({
@@ -1126,7 +1448,7 @@ export function SessionClient() {
   };
 
   const updateCodingScratch = (patch: Partial<CodingScratchState>) => {
-    if (codingMode === 'solve') return;
+    if (codingMode === 'solve' || codingMode === 'agent') return;
     const m = codingMode satisfies ScratchMode;
     setCodingScratchByMode((prev) => ({
       ...prev,
@@ -1196,6 +1518,21 @@ export function SessionClient() {
     await applyStealthMode(false);
   }, [applyStealthMode]);
 
+  // Belt-and-suspenders: whenever privacyMode flips on, force every
+  // popover/modal closed. The panic shortcut already does this, but
+  // the same guarantee should hold if privacy was toggled from anywhere
+  // else (settings panel, programmatic). Without this, an observer
+  // could see a "live" / model selection / cost pill flashing visible
+  // for the moment between the toggle and the next user action.
+  useEffect(() => {
+    if (!privacyMode) return;
+    setActiveFeature(null);
+    setOverflowOpen(false);
+    setShieldOpen(false);
+    setShortcutsOpen(false);
+    setStealthDisableConfirmOpen(false);
+  }, [privacyMode]);
+
   const centerDesktopWindow = async () => {
     const appWindow = window.friday?.appWindow;
     if (!appWindow) return;
@@ -1248,6 +1585,9 @@ export function SessionClient() {
       // Cancel any in-flight stream for the tab we're closing.
       codingWsRef.current?.cancel();
     }
+    // Closing a tab is a deliberate fresh start — re-arm its one automatic
+    // agent escalation for a future re-detection.
+    autoEscalatedRef.current.delete(fingerprint);
     setCodingTabs((prev) => {
       const next = prev.filter((t) => t.fingerprint !== fingerprint);
       if (activeFingerprintRef.current === fingerprint) {
@@ -1316,6 +1656,12 @@ export function SessionClient() {
           <AnswerPanel
             provider={provider}
             onProviderChange={onProviderChange}
+            qdModel={qdModel}
+            onQdModelChange={onQdModelChange}
+            qdState={qdState}
+            qdFallbackModel={qdFallbackModel}
+            qdError={qdError}
+            qdDedupAt={qdDedupAt}
             question={currentEntry?.question ?? null}
             answer={currentEntry?.answer ?? ''}
             messages={currentEntry?.messages ?? []}
@@ -1366,16 +1712,20 @@ export function SessionClient() {
             onReExtract={onCodingReExtract}
             onCancel={onCodingCancel}
             onRefine={onCodingRefine}
+            onAgentSolve={() => requestAgentSolve()}
+            agentStats={agentStats}
             frameInfo={codingFrame}
             error={codingError}
             privacyMode={privacyMode}
             mode={codingMode}
             onModeChange={onCodingModeChange}
             scratch={
-              // Solve mode has no scratch view (tabs handle output) — pass
-              // an empty slice so the prop stays typed; CodingPanel
+              // Solve/agent modes have no scratch view (tabs handle output) —
+              // pass an empty slice so the prop stays typed; CodingPanel
               // ignores it when isSolveMode is true.
-              codingMode === 'solve' ? blankScratch('explain') : codingScratchByMode[codingMode]
+              codingMode === 'solve' || codingMode === 'agent'
+                ? blankScratch('explain')
+                : codingScratchByMode[codingMode]
             }
             onScratchChange={updateCodingScratch}
             onRunScratch={runCodingScratch}
@@ -1433,20 +1783,27 @@ export function SessionClient() {
               <FridayMark className="h-5 w-5" />
               <span>Friday</span>
               <span className="relative flex h-2 w-2" aria-hidden>
+                {/* In privacyMode, suppress the red pulsing ring + dot.
+                    A red pulsing indicator is the single biggest tell
+                    that "this app is recording something right now." We
+                    fall back to a neutral gray dot regardless of
+                    actual recording state. */}
                 <span
                   className={cn(
                     'absolute inline-flex h-full w-full rounded-full opacity-75',
-                    isRecording ? 'animate-ping bg-red-400' : 'bg-transparent',
+                    isRecording && !privacyMode ? 'animate-ping bg-red-400' : 'bg-transparent',
                   )}
                 />
                 <span
                   className={cn(
                     'relative inline-flex h-2 w-2 rounded-full',
-                    isRecording
-                      ? 'bg-red-500'
-                      : isPaused
-                        ? 'bg-amber-500'
-                        : 'bg-neutral-400 dark:bg-neutral-600',
+                    privacyMode
+                      ? 'bg-neutral-400 dark:bg-neutral-600'
+                      : isRecording
+                        ? 'bg-red-500'
+                        : isPaused
+                          ? 'bg-amber-500'
+                          : 'bg-neutral-400 dark:bg-neutral-600',
                   )}
                 />
               </span>
@@ -2028,6 +2385,7 @@ function AnswerLatencyBadge({
     gemini: 'gem',
     openai: 'gpt',
     deepseek: 'ds',
+    claude: 'cla',
   };
   // Tooltip: list every provider we've seen with their most recent
   // elapsed_ms. Useful when comparing providers or debugging slow runs.
@@ -2394,7 +2752,7 @@ function Transcript({
               </p>
             </div>
           ) : (
-            <div className={cn(privacyMode && 'select-none blur-sm')}>
+            <div className={cn(privacyMode && 'select-none blur-md')}>
               {finals.map((text, idx) => (
                 <p
                   key={idx}

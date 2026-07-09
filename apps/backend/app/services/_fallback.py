@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TypeVar
 
 from app.logging import log
+from app.services import _breaker
 
 ProviderName = TypeVar("ProviderName", bound=str)
 
@@ -64,6 +65,7 @@ async def stream_with_fallback(
                 provider=provider,
                 elapsed_ms=round(elapsed_ms, 1),
             )
+            _breaker.record_success(provider)
             return
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = (time.monotonic() - start) * 1000
@@ -76,6 +78,9 @@ async def stream_with_fallback(
                 error=str(exc)[:200],
             )
             last_exc = exc
+            # Feed the quota breaker so chain builders can skip a provider
+            # whose quota is exhausted instead of re-failing on every call.
+            _breaker.record_failure(provider, str(exc))
             # If we already streamed something to the caller we can't
             # safely switch — the partial output is in the wire. Re-raise.
             if emitted:

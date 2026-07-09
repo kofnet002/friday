@@ -9,7 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.db import append_qa, get_session
 from app.logging import log
 from app.prompts.answer_generation import AnswerContext, PriorTurn
-from app.redis_client import recent_transcript_text
+from app.redis_client import recent_transcript_text, set_last_answer
 from app.services.answer import Provider, stream_answer
 from app.services.limits import check_token_budget
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
@@ -96,6 +96,13 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         # Pre-flight budget check.
         budget = await check_token_budget(session_id)
         if not budget.ok:
+            # Mirror of ws_coding: budget bounces must be visible in logs.
+            log.warning(
+                "ws_answer.limit_exceeded",
+                session_id=session_id,
+                used=budget.used,
+                limit=budget.limit,
+            )
             await send_json(
                 {
                     "type": "limit_exceeded",
@@ -138,6 +145,8 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             model = settings.gemini_model
         elif provider == "deepseek":
             model = settings.deepseek_model
+        elif provider == "claude":
+            model = settings.anthropic_model
         else:
             model = settings.openai_model
 
@@ -162,6 +171,8 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 effective_model = settings.gemini_model
             elif nxt == "deepseek":
                 effective_model = settings.deepseek_model
+            elif nxt == "claude":
+                effective_model = settings.anthropic_model
             else:
                 effective_model = settings.openai_model
             await send_json(
@@ -205,6 +216,14 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 await send_json({"type": "saved", "id": row_id, "thread_id": thread_id})
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws_answer.save_failed", error=str(exc))
+            # Cache the latest Q+A so the follow-up classifier gets real
+            # answer context, not just the prior question. Best-effort —
+            # Redis-down is fine; classifier degrades gracefully to
+            # question-only context.
+            try:
+                await set_last_answer(session_id, question, answer_text)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ws_answer.qa_cache_failed", error=str(exc))
 
             # Record answer-stream usage so the cost pill reflects copilot
             # spend (previously uncounted entirely). Token counts are a

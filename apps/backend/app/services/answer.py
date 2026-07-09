@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
+from anthropic import AsyncAnthropic
+from anthropic.types import MessageParam
 from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
@@ -14,19 +16,21 @@ from app.prompts.answer_generation import (
     answer_system_prompt,
     answer_user_prompt,
 )
+from app.services import _breaker
 from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
 
-Provider = Literal["gemini", "openai", "deepseek"]
+Provider = Literal["gemini", "openai", "deepseek", "claude"]
 
 # Default fallback chain. If the user picks gemini and it 503s through all
 # in-provider retries, we try openai next, then deepseek. Different primaries
 # get their own chain — the primary is always tried first.
 _FALLBACK_ORDER: dict[Provider, list[Provider]] = {
-    "gemini": ["gemini", "openai", "deepseek"],
-    "openai": ["openai", "gemini", "deepseek"],
-    "deepseek": ["deepseek", "gemini", "openai"],
+    "gemini": ["gemini", "openai", "deepseek", "claude"],
+    "openai": ["openai", "gemini", "deepseek", "claude"],
+    "deepseek": ["deepseek", "gemini", "openai", "claude"],
+    "claude": ["claude", "gemini", "openai", "deepseek"],
 }
 
 
@@ -41,7 +45,12 @@ def _provider_chain(primary: Provider) -> list[Provider]:
         available.add("openai")
     if settings.deepseek_api_key:
         available.add("deepseek")
+    if settings.anthropic_api_key:
+        available.add("claude")
     chain = [p for p in _FALLBACK_ORDER[primary] if p in available]
+    # Skip providers whose quota breaker is open (e.g. Gemini free tier
+    # exhausted) — no point paying the guaranteed-429 tax on every call.
+    chain = _breaker.filter_chain(chain)
     # If only the primary is available, the chain has one entry — no
     # fallback. If even the primary is missing, return [primary] so the
     # caller hits the existing "API_KEY not set" RuntimeError cleanly.
@@ -83,17 +92,25 @@ async def stream_answer(
             )
             base = lambda: _stream_gemini(system, user)  # noqa: E731
         else:
-            # OpenAI / DeepSeek path: pass prior turns as real assistant/user
-            # messages on the wire. Strip <thread> from the user prompt so
-            # we don't duplicate the history.
+            # OpenAI / DeepSeek / Claude path: pass prior turns as real
+            # assistant/user messages on the wire. Strip <thread> from the
+            # user prompt so we don't duplicate the history.
             user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
             if p == "deepseek":
                 base = lambda: _stream_deepseek(system, user, context.prior_turns)  # noqa: E731
+            elif p == "claude":
+                base = lambda: _stream_anthropic(system, user, context.prior_turns)  # noqa: E731
             else:
                 base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
         return retry_stream(base, label=f"answer.{p}")
 
     chain = _provider_chain(provider)
+    # Same head-substitution honesty as stream_coding: if the selected
+    # provider isn't in the resolved chain (no API key / breaker open), tell
+    # the WS layer up front so usage is credited to the provider that
+    # actually runs, not the one the user selected.
+    if on_fallback is not None and chain and chain[0] != provider:
+        await on_fallback(provider, chain[0], "selected provider unavailable")
     async for token in stream_with_fallback(
         providers=chain,
         factory=make_factory,
@@ -166,6 +183,42 @@ async def _stream_openai(
         delta = chunk.choices[0].delta
         if delta and delta.content:
             yield delta.content
+
+
+def _anthropic_messages(user: str, prior: tuple[PriorTurn, ...]) -> list[MessageParam]:
+    """Build the Anthropic `messages` array. The system prompt is passed
+    separately (top-level `system=`), so this only carries the conversation:
+    prior assistant/user turns followed by the current user turn. Anthropic
+    requires the first turn to be `user` and merges consecutive same-role
+    turns, so the prior thread (which starts user, ends assistant) slots in
+    cleanly ahead of the final user question."""
+    msgs: list[MessageParam] = [
+        {"role": turn.role, "content": turn.content} for turn in prior
+    ]
+    msgs.append({"role": "user", "content": user})
+    return msgs
+
+
+async def _stream_anthropic(
+    system: str,
+    user: str,
+    prior: tuple[PriorTurn, ...],
+) -> AsyncIterator[str]:
+    if not settings.anthropic_api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    # No temperature/top_p — the Opus 4.x family rejects them. Thinking is
+    # omitted for the lowest first-token latency; the answer system prompt
+    # already pins the output format tightly.
+    async with client.messages.stream(
+        model=settings.anthropic_model,
+        max_tokens=1500,
+        system=system,
+        messages=_anthropic_messages(user, prior),
+    ) as stream:
+        async for text in stream.text_stream:
+            if text:
+                yield text
 
 
 async def _stream_deepseek(

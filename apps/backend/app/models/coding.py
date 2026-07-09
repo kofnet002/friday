@@ -17,6 +17,11 @@ class CodingExample(BaseModel):
     input: str
     output: str
     explanation: str | None = None
+    # Set by the extractor when it can't reconcile the transcribed example
+    # with the statement / the example's own explanation (OCR misread).
+    # Unreliable examples are excluded from self-verification — a corrupted
+    # test makes a correct solution look wrong — and flagged to the solver.
+    unreliable: bool = False
 
 
 class ExtractedProblem(BaseModel):

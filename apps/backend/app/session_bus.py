@@ -21,6 +21,14 @@ def register(session_id: str, send: SendFn) -> None:
     _registry[session_id] = send
 
 
+def has_subscriber(session_id: str) -> bool:
+    """True if a live handler (an open /ws/coding-solution) is registered for
+    this session. The vision endpoint uses this to skip the expensive model
+    call when no panel is listening — a detection would just be dropped
+    (publish → emitted=False) otherwise."""
+    return session_id in _registry
+
+
 def unregister(session_id: str, send: SendFn | None = None) -> None:
     """Remove the registration if it still matches `send` (or unconditionally
     if `send` is None). Prevents a reconnect from clobbering a stale handler."""

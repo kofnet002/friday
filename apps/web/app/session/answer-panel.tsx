@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
-import type { AnswerMessage, AnswerProvider } from '@friday/shared-types';
+import type { AnswerMessage, AnswerProvider, QdModel, QdState } from '@friday/shared-types';
+
+import { ALL_QD_MODELS } from '@/lib/session-context';
 
 import {
   Bot,
@@ -36,6 +38,25 @@ export type AnswerStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error'
 export interface AnswerPanelProps {
   provider: AnswerProvider;
   onProviderChange: (p: AnswerProvider) => void;
+  /** Model used for question detection (silence + ceiling + speaker-turn).
+   *  User-selectable so they own the cost/quality tradeoff now that
+   *  detection fires more often. */
+  qdModel: QdModel;
+  onQdModelChange: (m: QdModel) => void;
+  /** Lifecycle state of the per-session question detector. Drives the
+   *  status dot next to the connection pill. */
+  qdState: QdState;
+  /** Non-null when the backend has fallen back from Gemini to GPT-4o for
+   *  QD (e.g. due to a 429). Surfaces a small badge next to the QD model
+   *  dropdown so the user knows their pick is being overridden. */
+  qdFallbackModel: string | null;
+  /** Non-null when QD has stopped because both providers are unavailable.
+   *  Renders a critical badge so the user knows detection has paused. */
+  qdError: string | null;
+  /** Timestamp (Date.now()) of the most recent dedup signal — used to
+   *  flash a subtle "heard it" pulse on the status pill without spawning
+   *  a new entry. 0 means never. */
+  qdDedupAt: number;
   question: string | null;
   answer: string;
   /** Full thread for the current entry, oldest first. Used to render
@@ -72,6 +93,12 @@ export interface AnswerPanelProps {
 export function AnswerPanel({
   provider,
   onProviderChange,
+  qdModel,
+  onQdModelChange,
+  qdState,
+  qdFallbackModel,
+  qdError,
+  qdDedupAt,
   question,
   answer,
   messages,
@@ -174,84 +201,111 @@ export function AnswerPanel({
     // glass frame. Keep this transparent so we don't end up with nested
     // containers.
     <div className="flex h-full flex-col gap-4">
-      <div className="flex items-center gap-2.5">
-        <span
-          className="flex items-center gap-1.5 rounded-md bg-sky-100/70 px-2 py-1 text-sm font-semibold text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
-          aria-label="Copilot"
-        >
-          <Bot className="h-4 w-4" aria-hidden />
-          Copilot
-        </span>
-        <span
-          className={cn(
-            'flex items-center gap-1.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider',
-            connected
-              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
-              : 'bg-neutral-200/60 text-neutral-500 dark:bg-neutral-800/80 dark:text-neutral-500',
-          )}
-          title={connected ? 'WebSocket connected' : 'WebSocket disconnected'}
-        >
+      {/* In privacyMode the entire header bar collapses: no Copilot badge,
+          no connection / QD / fallback / error indicators, no model
+          selectors, no history pager. An over-the-shoulder observer
+          should see nothing that hints at AI assistance. */}
+      {!privacyMode ? (
+        <div className="flex items-center gap-2.5">
+          <span
+            className="flex items-center gap-1.5 rounded-md bg-sky-100/70 px-2 py-1 text-sm font-semibold text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+            aria-label="Copilot"
+          >
+            <Bot className="h-4 w-4" aria-hidden />
+            Copilot
+          </span>
           <span
             className={cn(
-              'h-1.5 w-1.5 rounded-full',
-              connected ? 'animate-pulse bg-emerald-500' : 'bg-neutral-400',
+              'flex items-center gap-1.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider',
+              connected
+                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                : 'bg-neutral-200/60 text-neutral-500 dark:bg-neutral-800/80 dark:text-neutral-500',
             )}
-          />
-          {connected ? 'live' : 'offline'}
-        </span>
-        <Select
-          value={provider}
-          onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
-          className="ml-auto h-7 text-xs"
-        >
-          <option value="gemini">Gemini 2.5 Flash</option>
-          <option value="openai">GPT-4o</option>
-          <option value="deepseek">DeepSeek</option>
-        </Select>
+            title={connected ? 'WebSocket connected' : 'WebSocket disconnected'}
+          >
+            <span
+              className={cn(
+                'h-1.5 w-1.5 rounded-full',
+                connected ? 'animate-pulse bg-emerald-500' : 'bg-neutral-400',
+              )}
+            />
+            {connected ? 'live' : 'offline'}
+          </span>
+          <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
+          <div className="ml-auto flex items-center gap-1.5">
+            <Select
+              value={qdModel}
+              onChange={(e) => onQdModelChange(e.target.value as QdModel)}
+              className="h-7 text-xs"
+              title="Model used to detect questions in the live transcript"
+              aria-label="Question detection model"
+            >
+              {ALL_QD_MODELS.map((m) => (
+                <option key={m} value={m}>
+                  QD: {qdModelLabel(m)}
+                </option>
+              ))}
+            </Select>
+            {qdError ? <QdErrorBadge reason={qdError} /> : null}
+            {qdFallbackModel && !qdError ? <QdFallbackBadge model={qdFallbackModel} /> : null}
+          </div>
+          <Select
+            value={provider}
+            onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+            className="h-7 text-xs"
+          >
+            <option value="gemini">Gemini 2.5 Flash</option>
+            <option value="openai">GPT-4o</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="claude">Claude Opus 4.8</option>
+          </Select>
 
-        {/* History pager — chevrons step through every Q&A asked this
+          {/* History pager — chevrons step through every Q&A asked this
             session (auto-detect or force-ask), so a new question never
             stomps an older answer. Disabled at the boundaries. */}
-        <div
-          className="flex items-center gap-0.5 rounded-md border border-neutral-200 bg-white/70 p-0.5 dark:border-neutral-800 dark:bg-neutral-900/70"
-          role="group"
-          aria-label="Answer history"
-        >
-          <button
-            type="button"
-            onClick={onPrev}
-            disabled={entryCount === 0 || entryIndex <= 1}
-            aria-label="Previous answer"
-            title="Previous answer"
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
+          <div
+            className="flex items-center gap-0.5 rounded-md border border-neutral-200 bg-white/70 p-0.5 dark:border-neutral-800 dark:bg-neutral-900/70"
+            role="group"
+            aria-label="Answer history"
           >
-            <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
-          </button>
-          <span
-            className="min-w-[2.5rem] text-center font-mono text-[10px] tabular-nums text-neutral-600 dark:text-neutral-400"
-            aria-live="polite"
-          >
-            {entryCount === 0 ? '0/0' : `${entryIndex}/${entryCount}`}
-          </span>
-          <button
-            type="button"
-            onClick={onNext}
-            disabled={entryCount === 0 || entryIndex >= entryCount}
-            aria-label="Next answer"
-            title="Next answer"
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
-          >
-            <ChevronRight className="h-3.5 w-3.5" aria-hidden />
-          </button>
+            <button
+              type="button"
+              onClick={onPrev}
+              disabled={entryCount === 0 || entryIndex <= 1}
+              aria-label="Previous answer"
+              title="Previous answer"
+              className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
+            </button>
+            <span
+              className="min-w-[2.5rem] text-center font-mono text-[10px] tabular-nums text-neutral-600 dark:text-neutral-400"
+              aria-live="polite"
+            >
+              {entryCount === 0 ? '0/0' : `${entryIndex}/${entryCount}`}
+            </span>
+            <button
+              type="button"
+              onClick={onNext}
+              disabled={entryCount === 0 || entryIndex >= entryCount}
+              aria-label="Next answer"
+              title="Next answer"
+              className="flex h-6 w-6 items-center justify-center rounded text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            >
+              <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {/* The LLM now emits a `**💬 Question:**` line inside the answer body
           (see ANSWER_GENERATION_VERSION 1.1+), so the previous "Detected
           question" pill is suppressed to avoid showing the question twice.
           The `question` prop is still kept for accessibility / data flow. */}
 
-      {error
+      {/* Error banner hidden in privacyMode — error text could itself leak
+          context (provider names, model names, quota details) to a viewer. */}
+      {error && !privacyMode
         ? (() => {
             const f = friendlyError(error);
             return (
@@ -478,7 +532,7 @@ function AnswerBody({
         // padding only; the popover's frame handles the rest.
         'min-h-[200px] flex-1 overflow-y-auto py-1 transition-opacity',
         marked && 'opacity-50',
-        privacyMode && 'select-none blur-sm',
+        privacyMode && 'select-none blur-md',
       )}
     >
       {priorTurns.length > 0 ? (
@@ -581,5 +635,119 @@ function MenuItem({
       </span>
       {label}
     </button>
+  );
+}
+
+function qdModelLabel(model: QdModel): string {
+  switch (model) {
+    case 'gemini-2.5-flash-lite':
+      return 'Flash-Lite';
+    case 'gemini-2.5-flash':
+      return 'Flash';
+    case 'gemini-2.5-pro':
+      return 'Pro';
+    case 'gpt-4o-mini':
+      return '4o-mini';
+    case 'gpt-4o':
+      return '4o';
+  }
+}
+
+function QdFallbackBadge({ model }: { model: string }) {
+  return (
+    <span
+      className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-amber-700 dark:text-amber-400"
+      title={`Gemini was rate-limited — question detection fell back to ${model}. Pick a model again to retry Gemini.`}
+      role="status"
+      aria-label={`Question detection fell back to ${model}`}
+    >
+      → {model}
+    </span>
+  );
+}
+
+function QdErrorBadge({ reason }: { reason: string }) {
+  // Both providers unavailable — QD has effectively stopped. Surfaced as
+  // critical so the user can take action (pick a different model, wait
+  // for quota to reset, or fall back to ⌘⇧Space for manual asks).
+  const label =
+    reason === 'both_providers_unavailable'
+      ? 'QD paused — pick another model'
+      : `QD paused — ${reason}`;
+  return (
+    <span
+      className="inline-flex items-center rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-red-700 dark:text-red-400"
+      title={`Auto question-detection is paused (${reason}). Use ⌘⇧Space to ask manually, or pick a different QD model.`}
+      role="status"
+      aria-live="assertive"
+    >
+      ⚠ {label}
+    </span>
+  );
+}
+
+function QdStatePill({
+  state,
+  dedupAt,
+  error,
+}: {
+  state: QdState;
+  dedupAt: number;
+  error: string | null;
+}) {
+  // Briefly flash a "heard it" pulse when the backend deduped a question.
+  // Lets the user know the detector is alive without spawning an entry.
+  const [showDedup, setShowDedup] = useState(false);
+  useEffect(() => {
+    if (!dedupAt) return;
+    setShowDedup(true);
+    const t = window.setTimeout(() => setShowDedup(false), 1400);
+    return () => window.clearTimeout(t);
+  }, [dedupAt]);
+
+  // Error state suppresses the normal pill (the error badge tells the
+  // story). Idle + no recent dedup = silent.
+  if (error) return null;
+  if (state === 'idle' && !showDedup) return null;
+
+  if (showDedup) {
+    return (
+      <span
+        className="flex items-center gap-1.5 rounded-full bg-purple-500/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-purple-700 dark:text-purple-400"
+        title="Heard a question we already answered — skipped"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
+        heard it
+      </span>
+    );
+  }
+
+  const isDetecting = state === 'detecting';
+  return (
+    <span
+      className={cn(
+        'flex items-center gap-1.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider',
+        isDetecting
+          ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+          : 'bg-sky-500/15 text-sky-700 dark:text-sky-400',
+      )}
+      title={
+        isDetecting
+          ? 'Analyzing the recent transcript for a question'
+          : 'Listening — a question may be forming'
+      }
+      // aria-live="off" deliberately: state cycles frequently and was
+      // generating dozens of screen-reader announcements per session.
+      // The badge is purely visual; users who need an alert see the
+      // QdErrorBadge (assertive) or QdFallbackBadge (status).
+    >
+      <span
+        className={cn(
+          'h-1.5 w-1.5 rounded-full',
+          isDetecting ? 'animate-pulse bg-amber-500' : 'bg-sky-500',
+        )}
+      />
+      {isDetecting ? 'analyzing' : 'listening'}
+    </span>
   );
 }

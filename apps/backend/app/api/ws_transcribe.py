@@ -52,14 +52,41 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
             }
         )
 
-    detector = QuestionDetector(effective_session_id, on_question)
+    async def on_qd_state(state: str) -> None:
+        await send_json_safe({"type": "qd_state", "state": state})
+
+    async def on_qd_fallback(model: str) -> None:
+        await send_json_safe({"type": "qd_fallback", "model": model})
+
+    async def on_qd_error(reason: str) -> None:
+        await send_json_safe({"type": "qd_error", "reason": reason})
+
+    async def on_qd_dedup(question: str) -> None:
+        await send_json_safe({"type": "qd_dedup", "question": question})
+
+    detector = QuestionDetector(
+        effective_session_id,
+        on_question,
+        on_state=on_qd_state,
+        on_fallback=on_qd_fallback,
+        on_error=on_qd_error,
+        on_dedup=on_qd_dedup,
+    )
+    # Restore the fallback flag if a prior WS connection persisted one.
+    # Survives transient reconnects so we don't pay another wasted Gemini
+    # retry per reconnect.
+    await detector.restore_persistent_state()
 
     async def on_transcript(payload: dict[str, Any]) -> None:
         await send_json_safe(payload)
         if payload.get("is_final") and payload.get("text"):
             await append_transcript(effective_session_id, payload)
-            # Arm the silence timer for auto question-detection.
-            detector.notify_final()
+            # Arm timers (or fire on speaker-turn) for auto question-detection.
+            sp_raw = payload.get("speaker")
+            speaker = sp_raw if isinstance(sp_raw, int) else None
+            text_raw = payload.get("text")
+            text = str(text_raw) if isinstance(text_raw, str) else None
+            detector.notify_final(speaker=speaker, text=text)
 
     async def on_error(message: str) -> None:
         await send_json_safe({"type": "error", "message": message})
@@ -130,6 +157,17 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
                     paused = True
                     await deepgram.start_keepalive()
                     log.info("ws.pause", session_id=effective_session_id)
+                elif kind == "set_qd_model":
+                    model = control.get("model")
+                    if isinstance(model, str):
+                        ok = detector.set_model(model)
+                        if not ok:
+                            await send_json_safe(
+                                {
+                                    "type": "error",
+                                    "message": f"invalid qd model: {model}",
+                                }
+                            )
                 elif kind == "stop":
                     log.info("ws.stop", session_id=effective_session_id)
                     break

@@ -80,6 +80,72 @@ async def recent_transcript_text(session_id: str, window_seconds: float) -> str:
     return " ".join(str(e["text"]) for e in entries).strip()
 
 
+# ─── question-detection cross-WS state ──────────────────────────────────────
+
+# Survive WS reconnects: persist fallback state and the most recent answer
+# (used as context by the follow-up classifier). Both TTL'd to ~2h to clear
+# automatically when a session ends.
+QD_STATE_TTL_S = 60 * 60 * 2
+
+
+async def set_qd_fallback(session_id: str, model: str | None) -> None:
+    """Persist (or clear) the active fallback model for this session.
+
+    Called when the detector flips into fallback (write model) or when the
+    user picks a new model via set_qd_model (write None / DEL). Survives
+    WS reconnects so a transient network blip doesn't cost a wasted
+    Gemini retry.
+    """
+    client = await get_redis()
+    if client is None:
+        return
+    key = f"session:{session_id}:qd_fallback"
+    if model is None:
+        await cast(Awaitable[Any], client.delete(key))
+        return
+    await cast(Awaitable[Any], client.set(key, model, ex=QD_STATE_TTL_S))
+
+
+async def get_qd_fallback(session_id: str) -> str | None:
+    client = await get_redis()
+    if client is None:
+        return None
+    key = f"session:{session_id}:qd_fallback"
+    raw = await cast(Awaitable[str | None], client.get(key))
+    return raw if isinstance(raw, str) and raw else None
+
+
+async def set_last_answer(session_id: str, question: str, answer: str) -> None:
+    """Cache the latest Q+A for follow-up classification. The detector
+    reads this so it can show the classifier the prior *answer*, not just
+    the prior *question* (the old behavior, which biased the classifier
+    toward false follow-ups)."""
+    client = await get_redis()
+    if client is None:
+        return
+    key = f"session:{session_id}:qd_last_qa"
+    payload = json.dumps({"q": question, "a": answer})
+    await cast(Awaitable[Any], client.set(key, payload, ex=QD_STATE_TTL_S))
+
+
+async def get_last_answer(session_id: str) -> dict[str, str] | None:
+    """Return {"q": ..., "a": ...} or None if not set / Redis down."""
+    client = await get_redis()
+    if client is None:
+        return None
+    key = f"session:{session_id}:qd_last_qa"
+    raw = await cast(Awaitable[str | None], client.get(key))
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {"q": str(parsed.get("q") or ""), "a": str(parsed.get("a") or "")}
+
+
 # ─── coding mode ────────────────────────────────────────────────────────────
 
 CODING_PROBLEM_TTL_S = 60 * 60

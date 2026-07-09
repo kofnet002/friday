@@ -65,7 +65,12 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
     if (latest.language) setLanguage(latest.language);
     if (latest.extra_instructions) setExtra(latest.extra_instructions);
     if (latest.interview_type) setInterviewType(latest.interview_type);
-    if (latest.default_provider === 'gemini' || latest.default_provider === 'openai') {
+    if (
+      latest.default_provider === 'gemini' ||
+      latest.default_provider === 'openai' ||
+      latest.default_provider === 'deepseek' ||
+      latest.default_provider === 'claude'
+    ) {
       setDefaultProvider(latest.default_provider);
     }
   };
@@ -160,6 +165,7 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
               <option value="gemini">Gemini 2.5 Pro</option>
               <option value="openai">GPT-4o</option>
               <option value="deepseek">DeepSeek</option>
+              <option value="claude">Claude Opus 4.8</option>
             </Select>
           </Labeled>
           <Labeled label="Language">

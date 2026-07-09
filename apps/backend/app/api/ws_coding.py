@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app import session_bus
-from app.db import record_coding_solution
+from app.db import record_agent_trace, record_coding_solution
 from app.logging import log
 from app.prompts.coding_modes import CodingMode
 from app.redis_client import store_solution
 from app.services.code_runner import run_solution_tests
+from app.services.coding_agent import (
+    AgentUnavailableError,
+    prewarm_agent,
+    stream_coding_agent,
+)
 from app.services.coding_extraction import problem_fingerprint
 from app.services.coding_solution import (
     Provider,
@@ -47,6 +53,207 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
     if session_id:
         session_bus.register(session_id, send_json)
 
+    # A session panel just opened — pre-boot a CLI process so a later agent
+    # run (button or auto-escalation) skips cold-start latency. No-op when
+    # the agent is disabled or a warm slot already exists.
+    prewarm_task = asyncio.create_task(prewarm_agent())
+    prewarm_task.add_done_callback(lambda t: t.exception())
+
+    async def _run_agent_stream(
+        problem: dict[str, Any],
+        language: str,
+        extra: str | None,
+        send_json: Any,
+        prior_solution: str | None = None,
+        feedback: str | None = None,
+    ) -> None:
+        """Drive the Claude Code CLI agent for one problem.
+
+        Emits agent_step / agent_tool / agent_tool_result trace events as the
+        agent works, an agent_solution with the final formatted answer, then
+        persists + self-verifies it exactly like a solve so the panel shows
+        ✓/✗ against the examples. Streams no `token` events — the solution
+        arrives whole in agent_solution once the loop finishes."""
+        fp = _fingerprint(problem)
+        await send_json(
+            {
+                "type": "started",
+                "provider": "claude",
+                "language": language,
+                "model": "claude-code",
+                "mode": "agent",
+            }
+        )
+
+        # Full step trace, persisted at the end of the run (any outcome) so
+        # "what did the agent actually do?" survives the panel state.
+        trace: list[dict[str, Any]] = []
+        run_started = time.monotonic()
+        run_status = "done"
+
+        async def _save_trace() -> None:
+            if not (session_id and trace):
+                return
+            try:
+                await record_agent_trace(
+                    session_id=session_id,
+                    fingerprint=fp,
+                    status=run_status,
+                    duration_s=round(time.monotonic() - run_started, 1),
+                    trace=trace,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("agent_trace.save_failed", error=str(exc))
+
+        solution_text = ""
+        try:
+            async for event in stream_coding_agent(
+                problem=problem,
+                language=language,
+                session_id=session_id,
+                extra_instructions=extra,
+                prior_solution=prior_solution,
+                feedback=feedback,
+            ):
+                if event.type == "step":
+                    text = event.text.strip()
+                    # EARLY ANSWER: the agent emits the full formatted solution
+                    # as soon as its examples pass, then keeps hardening.
+                    # Despite the prompt, it often prefixes a narration line
+                    # ("Both examples pass. Now emitting…"), so look for the
+                    # marker anywhere and slice from it rather than demanding
+                    # the message start with it.
+                    marker = text.find("### 🎯")
+                    if marker != -1:
+                        # Surface it as a provisional solution so the user
+                        # reads it minutes before the final one; the terminal
+                        # `result` event overwrites it if improved.
+                        solution_text = text[marker:]
+                        trace.append(
+                            {"kind": "solution", "provisional": True, "text": solution_text}
+                        )
+                        await send_json(
+                            {"type": "agent_solution", "text": solution_text, "provisional": True}
+                        )
+                    else:
+                        trace.append({"kind": "step", "text": event.text})
+                        await send_json({"type": "agent_step", "text": event.text})
+                elif event.type == "tool":
+                    trace.append({"kind": "tool", "tool": event.tool, "summary": event.summary})
+                    await send_json(
+                        {"type": "agent_tool", "tool": event.tool, "summary": event.summary}
+                    )
+                elif event.type == "tool_result":
+                    trace.append({"kind": "result", "ok": event.ok, "summary": event.summary})
+                    await send_json(
+                        {"type": "agent_tool_result", "ok": event.ok, "summary": event.summary}
+                    )
+                elif event.type == "solution":
+                    # Same narration-prefix problem as the provisional above
+                    # ("Both examples pass. ### 🎯 …") — without the slice the
+                    # final message would overwrite the clean provisional with
+                    # a messier one.
+                    text = event.text
+                    marker = text.find("### 🎯")
+                    if marker > 0:
+                        text = text[marker:]
+                    solution_text = text
+                    trace.append({"kind": "solution", "text": text})
+                    await send_json({"type": "agent_solution", "text": text})
+            await send_json({"type": "done"})
+        except AgentUnavailableError as exc:
+            await send_json({"type": "error", "message": f"agent unavailable — {exc}"})
+            return
+        except asyncio.CancelledError:
+            run_status = "cancelled"
+            await _save_trace()
+            await send_json({"type": "cancelled"})
+            raise
+        except Exception as exc:  # noqa: BLE001
+            run_status = "error"
+            await _save_trace()
+            log.error("ws_coding.agent_error", error=str(exc))
+            await send_json({"type": "error", "message": str(exc)})
+            return
+        await _save_trace()
+
+        solution_text = solution_text.strip()
+        if not solution_text:
+            return
+
+        # Persist + record usage against Claude, mirroring the solve path so
+        # agent answers show up in history like any other solution.
+        if session_id:
+            try:
+                await store_solution(session_id, fp, solution_text)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ws_coding.store_solution_failed", error=str(exc))
+            try:
+                row_id = await record_coding_solution(
+                    session_id=session_id,
+                    fingerprint=fp,
+                    problem=problem,
+                    language=language,
+                    provider="claude",
+                    model="claude-code",
+                    solution_text=solution_text,
+                )
+                await send_json({"type": "saved", "id": row_id, "fingerprint": fp})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("coding_solutions.save_failed", error=str(exc))
+            # Usage row for the run. Subscription-billed, so no per-token
+            # cost — the row makes agent runs visible in the usage breakdown
+            # alongside API calls (model name marks the billing source).
+            try:
+                await record_solution_call(
+                    session_id=session_id,
+                    provider="claude",
+                    model="claude-code-agent (subscription)",
+                    input_tokens=max(1, len(str(problem)) // 4),
+                    output_tokens=max(1, len(solution_text) // 4),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Independent self-verify of the agent's final answer (the agent
+        # verifies internally, but we re-run through the same sandbox as solve
+        # so the panel's ✓/✗ is apples-to-apples).
+        examples = _reliable_examples(problem)
+        try:
+            verdict = await run_solution_tests(
+                solution_markdown=solution_text,
+                examples=examples,
+                language=language,
+            )
+            await send_json(
+                {
+                    "type": "test_results",
+                    "fingerprint": fp,
+                    "ran": verdict.ran,
+                    "skip_reason": verdict.skip_reason,
+                    "cases": [
+                        {
+                            "ok": c.ok,
+                            "input": c.input,
+                            "expected": c.expected,
+                            "actual": c.actual,
+                            "error": c.error,
+                        }
+                        for c in verdict.cases
+                    ],
+                }
+            )
+            log.info(
+                "ws_coding.verified",
+                mode="agent",
+                session_id=session_id,
+                ran=verdict.ran,
+                passed=verdict.passed,
+                total=verdict.total,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ws_coding.verify_failed", error=str(exc))
+
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
         language = str(request.get("language") or "Python")
@@ -67,7 +274,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         # missing fields too but we want a clean per-mode error before any
         # tokens fly. Solve and tests need a problem statement; explain and
         # debug need a code snippet (and debug additionally needs an error).
-        if mode in ("solve", "tests") and not problem.get("problem_statement"):
+        if mode in ("solve", "tests", "agent") and not problem.get("problem_statement"):
             await send_json({"type": "error", "message": "problem.problem_statement required"})
             return
         if mode in ("explain", "debug") and not (code and code.strip()):
@@ -79,6 +286,16 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
 
         budget = await check_token_budget(session_id)
         if not budget.ok:
+            # Log it: without this line a budget-bounced request (e.g. an
+            # auto-escalation that never starts) is invisible in the server
+            # logs — a field incident cost a debugging session to trace.
+            log.warning(
+                "ws_coding.limit_exceeded",
+                session_id=session_id,
+                mode=mode,
+                used=budget.used,
+                limit=budget.limit,
+            )
             await send_json(
                 {
                     "type": "limit_exceeded",
@@ -87,6 +304,21 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                     "used": budget.used,
                     "limit": budget.limit,
                 }
+            )
+            return
+
+        # Agent mode is a different animal from the four provider-backed modes:
+        # it drives the local `claude` CLI's tool loop instead of a single
+        # streamed completion (no provider fallback, no token accounting — it
+        # bills against the Claude subscription). Handled in its own path.
+        if mode == "agent":
+            await _run_agent_stream(
+                problem,
+                language,
+                extra,
+                send_json,
+                prior_solution=prior_solution,
+                feedback=feedback,
             )
             return
 
@@ -212,7 +444,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         # pastes anything into the real judge. Best-effort: a verification
         # failure never blocks the solution that already streamed fine.
         if solution_text and mode == "solve":
-            examples = problem.get("examples") or []
+            examples = _reliable_examples(problem)
             try:
                 verdict = await run_solution_tests(
                     solution_markdown=solution_text,
@@ -287,6 +519,22 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         except Exception:  # noqa: BLE001
             pass
         log.info("ws_coding.closed", session_id=session_id)
+
+
+def _reliable_examples(problem: dict[str, Any]) -> list[dict[str, Any]]:
+    """Examples safe to execute as test cases. The extractor marks an example
+    `unreliable` when it couldn't reconcile the transcription with the
+    statement (OCR misread) — running those produces false failures that
+    mislead the refine loop and trigger pointless escalations."""
+    examples = problem.get("examples") or []
+    reliable = [ex for ex in examples if not ex.get("unreliable")]
+    if len(reliable) != len(examples):
+        log.info(
+            "ws_coding.unreliable_examples_skipped",
+            skipped=len(examples) - len(reliable),
+            total=len(examples),
+        )
+    return reliable
 
 
 def _fingerprint(problem: dict[str, Any]) -> str:

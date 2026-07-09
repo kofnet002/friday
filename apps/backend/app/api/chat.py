@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.logging import log
+from app.providers.claude import stream_claude
 from app.providers.deepseek import stream_deepseek
 from app.providers.gemini import stream_gemini
 from app.providers.openai import stream_openai
@@ -14,7 +15,7 @@ from app.services._retry import retry_stream
 
 router = APIRouter()
 
-Provider = Literal["gemini", "openai", "deepseek"]
+Provider = Literal["gemini", "openai", "deepseek", "claude"]
 
 
 class ChatRequest(BaseModel):
@@ -29,6 +30,8 @@ async def _token_events(provider: Provider, message: str) -> AsyncIterator[dict[
             factory = lambda: stream_gemini(message)  # noqa: E731
         elif provider == "deepseek":
             factory = lambda: stream_deepseek(message)  # noqa: E731
+        elif provider == "claude":
+            factory = lambda: stream_claude(message)  # noqa: E731
         else:
             factory = lambda: stream_openai(message)  # noqa: E731
         async for token in retry_stream(factory, label=f"chat.{provider}"):
@@ -42,6 +45,6 @@ async def _token_events(provider: Provider, message: str) -> AsyncIterator[dict[
 
 @router.post("/api/chat")
 async def chat(request: ChatRequest) -> EventSourceResponse:
-    if request.provider not in ("gemini", "openai", "deepseek"):
+    if request.provider not in ("gemini", "openai", "deepseek", "claude"):
         raise HTTPException(status_code=400, detail="invalid provider")
     return EventSourceResponse(_token_events(request.provider, request.message))
