@@ -5,7 +5,7 @@ Kept in sync with the TS file; update both when the schema changes.
 
 from __future__ import annotations
 
-CODING_EXTRACTION_VERSION = "1.2.0"
+CODING_EXTRACTION_VERSION = "1.3.0"
 
 CODING_EXTRACTION_SYSTEM_PROMPT = """\
 You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
@@ -49,6 +49,14 @@ RULES
     e.g. an all-zero grid with a non-zero output). Set false when the example
     is internally consistent. Unreliable examples are excluded from automated
     testing, so an honest true here prevents false failures.
+- SPECIAL CHARACTERS ARE LOAD-BEARING. Many problems define operations on
+  symbols like '*', '#', '%', '@', '?', '!'. Transcribe every such symbol
+  EXACTLY as rendered — in the statement AND in every example input/output.
+  NEVER rename, substitute, or normalize them (e.g. do not replace '*'/'#'/'%'
+  with digits or letters, even consistently): generated code will test for
+  your substituted characters and fail on the platform's real input. If you
+  cannot make out which symbol a glyph is, do NOT invent one — mark the
+  affected examples "unreliable": true and cap confidence at 0.6.
 - If constraints are present (e.g., "1 <= n <= 10^5"), extract as individual strings.
 - function_signature: capture the COMPLETE starter shown in the editor pane, including any class wrapper, the full method signature with every parameter name and type annotation, and the empty method body line if present. LeetCode signatures are always inside `class Solution:` with `self` as the first parameter — if the editor pane is visible at all, include the full `class Solution: / def methodName(self, …) -> …:` block. If only the method line is visible without the class wrapper but the platform is leetcode, still emit a `class Solution:` line above it (LeetCode never deviates from that wrapper). Leave null only when the editor pane isn't visible OR you can't read it confidently.
 - language_hint: the language the starter code is in, if visible.
