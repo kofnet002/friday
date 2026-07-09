@@ -286,6 +286,16 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
 
         budget = await check_token_budget(session_id)
         if not budget.ok:
+            # Log it: without this line a budget-bounced request (e.g. an
+            # auto-escalation that never starts) is invisible in the server
+            # logs — a field incident cost a debugging session to trace.
+            log.warning(
+                "ws_coding.limit_exceeded",
+                session_id=session_id,
+                mode=mode,
+                used=budget.used,
+                limit=budget.limit,
+            )
             await send_json(
                 {
                     "type": "limit_exceeded",

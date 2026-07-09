@@ -96,6 +96,13 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         # Pre-flight budget check.
         budget = await check_token_budget(session_id)
         if not budget.ok:
+            # Mirror of ws_coding: budget bounces must be visible in logs.
+            log.warning(
+                "ws_answer.limit_exceeded",
+                session_id=session_id,
+                used=budget.used,
+                limit=budget.limit,
+            )
             await send_json(
                 {
                     "type": "limit_exceeded",
