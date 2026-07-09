@@ -170,7 +170,14 @@ def _parse_value(raw):
     try:
         return ast.literal_eval(raw)
     except Exception:
+        pass
+    try:
         return json.loads(raw)  # JSON-style true/false/null
+    except Exception:
+        # Bare unquoted string — OCR routinely drops the quotes around
+        # string outputs (`d`, `-`, `abc`). Treating it as a literal string
+        # beats erroring the whole test case.
+        return raw
 
 def _parse_input(s):
     kwargs = {{}}
@@ -261,7 +268,13 @@ function __splitTop(s) {
   if (cur.trim() !== '') parts.push(cur);
   return parts;
 }
-function __parseVal(raw) { return eval('(' + raw.trim() + ')'); }
+function __parseVal(raw) {
+  raw = raw.trim();
+  try { return eval('(' + raw + ')'); }
+  // Bare unquoted string — OCR routinely drops the quotes around string
+  // outputs. Fall back to the literal text instead of erroring the case.
+  catch { return raw; }
+}
 function __parseInput(s) {
   const args = [];
   for (const part of __splitTop(s)) {
