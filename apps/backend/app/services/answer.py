@@ -105,6 +105,12 @@ async def stream_answer(
         return retry_stream(base, label=f"answer.{p}")
 
     chain = _provider_chain(provider)
+    # Same head-substitution honesty as stream_coding: if the selected
+    # provider isn't in the resolved chain (no API key / breaker open), tell
+    # the WS layer up front so usage is credited to the provider that
+    # actually runs, not the one the user selected.
+    if on_fallback is not None and chain and chain[0] != provider:
+        await on_fallback(provider, chain[0], "selected provider unavailable")
     async for token in stream_with_fallback(
         providers=chain,
         factory=make_factory,

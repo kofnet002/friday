@@ -249,6 +249,13 @@ async def stream_coding(
         return retry_stream(base, label=f"coding.{mode}.{p}{'.deep' if deep else ''}")
 
     chain = _coding_provider_chain(provider)
+    # The chain head can differ from what the user selected (no API key for
+    # it, or its quota breaker is open). Without this callback the WS layer
+    # keeps crediting usage — and showing a pill — for a provider that never
+    # ran (field incident: Gemini served the solve, usage row said
+    # claude-opus-4-8 with a fabricated dollar cost).
+    if on_fallback is not None and chain and chain[0] != provider:
+        await on_fallback(provider, chain[0], "selected provider unavailable")
     async for tok in stream_with_fallback(
         providers=chain,
         factory=make_factory,
