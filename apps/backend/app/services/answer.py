@@ -84,6 +84,7 @@ async def stream_answer(
     # retries (`retry_stream`). The outer fallback helper switches providers
     # only after these retries are exhausted or hit a hard error.
     def make_factory(p: Provider) -> AsyncIterator[str]:
+        selected = model if p == provider else None
         if p == "gemini":
             # Gemini path: embed the thread inside the user prompt. We don't
             # use Gemini's native multi-turn contents array here to keep
@@ -91,18 +92,20 @@ async def stream_answer(
             user = answer_user_prompt(
                 question, context.recent_transcript, context.prior_turns
             )
-            base = lambda: _stream_gemini(system, user, model=model)  # noqa: E731
+            base = lambda: _stream_gemini(system, user, model=selected)  # noqa: E731
         else:
             # OpenAI / DeepSeek / Claude path: pass prior turns as real
             # assistant/user messages on the wire. Strip <thread> from the
             # user prompt so we don't duplicate the history.
             user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
             if p == "deepseek":
-                base = lambda: _stream_deepseek(system, user, context.prior_turns, model=model)  # noqa: E731
+                base = lambda: _stream_deepseek(system, user, context.prior_turns, model=selected)  # noqa: E731
             elif p == "claude":
-                base = lambda: _stream_anthropic(system, user, context.prior_turns, model=model)  # noqa: E731
+                base = lambda: _stream_anthropic(system, user, context.prior_turns, model=selected)  # noqa: E731
             else:
-                base = lambda: _stream_openai(system, user, context.prior_turns, model=model)  # noqa: E731
+                # A user-selected model applies only to the selected
+                # provider. Fallback providers must use their own defaults.
+                base = lambda: _stream_openai(system, user, context.prior_turns, model=selected)  # noqa: E731
         return retry_stream(base, label=f"answer.{p}")
 
     chain = _provider_chain(provider)
@@ -173,13 +176,23 @@ async def _stream_openai(
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
-    stream = await client.chat.completions.create(
-        model=model or settings.openai_model,
-        messages=_openai_messages(system, user, prior),
-        stream=True,
-        temperature=0.4,
-        max_tokens=1500,
-    )
+    effective_model = model or settings.openai_model
+    if effective_model.startswith("gpt-5"):
+        stream = await client.chat.completions.create(
+            model=effective_model,
+            messages=_openai_messages(system, user, prior),
+            stream=True,
+            temperature=0.4,
+            max_completion_tokens=1500,
+        )
+    else:
+        stream = await client.chat.completions.create(
+            model=effective_model,
+            messages=_openai_messages(system, user, prior),
+            stream=True,
+            temperature=0.4,
+            max_tokens=1500,
+        )
     async for chunk in stream:
         if not chunk.choices:
             continue

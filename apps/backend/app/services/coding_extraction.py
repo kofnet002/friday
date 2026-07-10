@@ -377,13 +377,18 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
     # Falls back to json_object mode if this model/deployment rejects strict
     # schemas, so a schema quirk can't take OpenAI vision down entirely.
     try:
-        parsed_response = await client.beta.chat.completions.parse(
-            model=model,
-            messages=messages,
-            temperature=EXTRACTION_TEMPERATURE,
-            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-            response_format=_StrictExtraction,
-        )
+        if model.startswith("gpt-5"):
+            parsed_response = await client.beta.chat.completions.parse(
+                model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
+                max_completion_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+                response_format=_StrictExtraction,
+            )
+        else:
+            parsed_response = await client.beta.chat.completions.parse(
+                model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
+                max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+                response_format=_StrictExtraction,
+            )
         message = parsed_response.choices[0].message
         if message.refusal:
             raise RuntimeError(f"openai vision refusal: {message.refusal[:200]}")
@@ -397,13 +402,18 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
     except Exception as exc:  # schema rejected / SDK gap — legacy JSON mode
         log.warning("extraction.strict_schema_fallback", error=str(exc)[:200])
 
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=EXTRACTION_TEMPERATURE,
-        max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-        response_format={"type": "json_object"},
-    )
+    if model.startswith("gpt-5"):
+        response = await client.chat.completions.create(
+            model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
+            max_completion_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            response_format={"type": "json_object"},
+        )
+    else:
+        response = await client.chat.completions.create(
+            model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
+            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            response_format={"type": "json_object"},
+        )
     if not response.choices:
         raise RuntimeError("empty openai vision response")
     text = response.choices[0].message.content or ""
