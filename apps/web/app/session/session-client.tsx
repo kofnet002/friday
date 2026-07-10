@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Square,
 } from 'lucide-react';
+import { MODEL_CATALOG } from '@friday/shared-types';
 import type {
   AnswerMessage,
   AnswerProvider,
@@ -50,11 +51,13 @@ import {
   getCodingLanguagePreference,
   getOrCreateSessionId,
   getProviderPreference,
+  getModelPreference,
   getQdModelPreference,
   patchSessionProvider,
   sessionExportUrl,
   setCodingLanguagePreference,
   setProviderPreference,
+  setModelPreference,
   setQdModelPreference,
   type SessionUsageSummary,
 } from '@/lib/session-context';
@@ -144,6 +147,9 @@ export function SessionClient() {
   // tokens always land on the right entry even if the user navigates away
   // while the LLM is still streaming.
   const [provider, setProvider] = useState<AnswerProvider>('gemini');
+  const [model, setModel] = useState<string>(getModelPreference);
+  const modelRef = useRef(model);
+  modelRef.current = model;
   const [entries, setEntries] = useState<AnswerEntry[]>([]);
   const [entryIndex, setEntryIndex] = useState(-1);
   const [panelError, setPanelError] = useState<string | null>(null);
@@ -774,6 +780,7 @@ export function SessionClient() {
     if (msg.type === 'started') {
       updateTab(fp, (t) => ({
         ...t,
+        model: msg.model ?? t.model,
         solution: '',
         status: 'streaming',
         error: null,
@@ -818,6 +825,7 @@ export function SessionClient() {
       problem,
       language: lang,
       provider: providerRef.current,
+      model: modelRef.current,
       // When the user fires "Refine with feedback" we forward the prior
       // attempt + their note so the backend flips into refine framing.
       // Empty strings are normalized to undefined so they don't trigger
@@ -880,6 +888,7 @@ export function SessionClient() {
       problem: tab.problem,
       language: codingLanguageRef.current,
       provider: providerRef.current,
+      model: modelRef.current,
       // Refine inputs — when present the agent starts from the failed
       // attempt + feedback (diagnose) instead of solving from scratch.
       feedback: opts.feedback?.trim() || undefined,
@@ -930,6 +939,7 @@ export function SessionClient() {
         fingerprint,
         problem,
         language: lang,
+        model,
         solution: '',
         // Idle (not "streaming") when we're not kicking off a solve — otherwise
         // the tab shows "Generating…" forever with no request behind it.
@@ -1032,6 +1042,7 @@ export function SessionClient() {
       messages: [{ role: 'user', content: q }],
       thread_id: threadId,
       provider: providerRef.current,
+      model: modelRef.current,
       auto_detected: opts.autoDetected,
     });
   };
@@ -1247,6 +1258,17 @@ export function SessionClient() {
     // the right provider even when the desktop fires a capture before the
     // setProvider IPC has reached it.
     if (sessionId) void patchSessionProvider(sessionId, p);
+  };
+
+  const onModelChange = (id: string) => {
+    const option = MODEL_CATALOG.find((entry) => entry.id === id);
+    if (!option) return;
+    setModel(id);
+    setModelPreference(id);
+    setProvider(option.provider);
+    setProviderPreference(option.provider);
+    void window.friday?.coding?.setProvider?.(option.provider);
+    if (sessionId) void patchSessionProvider(sessionId, option.provider);
   };
 
   const onQdModelChange = (m: QdModel) => {
@@ -1656,6 +1678,8 @@ export function SessionClient() {
           <AnswerPanel
             provider={provider}
             onProviderChange={onProviderChange}
+            model={model}
+            onModelChange={onModelChange}
             qdModel={qdModel}
             onQdModelChange={onQdModelChange}
             qdState={qdState}
@@ -1703,6 +1727,8 @@ export function SessionClient() {
             onLanguageChange={onCodingLanguageChange}
             provider={provider}
             onProviderChange={onProviderChange}
+            model={model}
+            onModelChange={onModelChange}
             tabs={codingTabs}
             activeFingerprint={activeFingerprint}
             onSelectTab={setActiveFingerprint}

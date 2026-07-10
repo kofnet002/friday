@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import time
+import re
 from typing import Any, Literal, cast
 
 from google import genai
@@ -237,14 +238,22 @@ async def extract_problem(
 
 
 def _parse_extraction_json(text: str) -> ExtractedProblem:
-    text = (text or "").strip()
+    text = _strip_json_fence(text)
     if not text:
         raise RuntimeError("empty extraction response")
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        log.warning("extraction.bad_json", raw=text[:300])
-        raise RuntimeError(f"extraction JSON parse failed: {exc}") from exc
+    except json.JSONDecodeError:
+        # Some OpenAI vision responses contain JavaScript-style object keys or
+        # trailing commas despite the JSON-only instruction. Repair only the
+        # narrow, unambiguous cases before rejecting the response.
+        repaired = re.sub(r",\s*([}\]])", r"\1", text)
+        repaired = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', repaired)
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError as exc:
+            log.warning("extraction.bad_json", raw=text[:300])
+            raise RuntimeError(f"extraction JSON parse failed: {exc}") from exc
     try:
         return ExtractedProblem.model_validate(data)
     except ValidationError as exc:

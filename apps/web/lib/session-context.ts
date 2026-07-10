@@ -1,3 +1,4 @@
+import { MODEL_CATALOG } from '@friday/shared-types';
 import type {
   AnswerProvider,
   CodingLanguage,
@@ -10,6 +11,7 @@ import type {
 
 const SESSION_ID_KEY = 'friday.session.id';
 const PROVIDER_KEY = 'friday.session.provider';
+const MODEL_KEY = 'friday.session.model';
 const CODING_LANGUAGE_KEY = 'friday.session.coding_language';
 const QD_MODEL_KEY = 'friday.session.qd_model';
 const QD_MODELS: readonly QdModel[] = [
@@ -59,6 +61,18 @@ export function getProviderPreference(): AnswerProvider {
 export function setProviderPreference(p: AnswerProvider): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(PROVIDER_KEY, p);
+}
+
+export function getModelPreference(): string {
+  if (typeof window === 'undefined') return 'gemini-2.5-flash';
+  const raw = window.localStorage.getItem(MODEL_KEY);
+  return MODEL_CATALOG.some((model) => model.id === raw) ? raw! : 'gemini-2.5-flash';
+}
+
+export function setModelPreference(model: string): void {
+  if (typeof window === 'undefined') return;
+  if (MODEL_CATALOG.some((entry) => entry.id === model))
+    window.localStorage.setItem(MODEL_KEY, model);
 }
 
 export function getCodingLanguagePreference(): CodingLanguage {

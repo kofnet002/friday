@@ -62,6 +62,7 @@ async def stream_answer(
     question: str,
     context: AnswerContext,
     *,
+    model: str | None = None,
     on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
 ) -> AsyncIterator[str]:
     """Yield answer tokens for the given question using the selected provider.
@@ -90,18 +91,18 @@ async def stream_answer(
             user = answer_user_prompt(
                 question, context.recent_transcript, context.prior_turns
             )
-            base = lambda: _stream_gemini(system, user)  # noqa: E731
+            base = lambda: _stream_gemini(system, user, model=model)  # noqa: E731
         else:
             # OpenAI / DeepSeek / Claude path: pass prior turns as real
             # assistant/user messages on the wire. Strip <thread> from the
             # user prompt so we don't duplicate the history.
             user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
             if p == "deepseek":
-                base = lambda: _stream_deepseek(system, user, context.prior_turns)  # noqa: E731
+                base = lambda: _stream_deepseek(system, user, context.prior_turns, model=model)  # noqa: E731
             elif p == "claude":
-                base = lambda: _stream_anthropic(system, user, context.prior_turns)  # noqa: E731
+                base = lambda: _stream_anthropic(system, user, context.prior_turns, model=model)  # noqa: E731
             else:
-                base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
+                base = lambda: _stream_openai(system, user, context.prior_turns, model=model)  # noqa: E731
         return retry_stream(base, label=f"answer.{p}")
 
     chain = _provider_chain(provider)
@@ -141,12 +142,12 @@ def _openai_messages(
     return msgs
 
 
-async def _stream_gemini(system: str, user: str) -> AsyncIterator[str]:
+async def _stream_gemini(system: str, user: str, *, model: str | None = None) -> AsyncIterator[str]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     client = genai.Client(api_key=settings.gemini_api_key)
     stream = await client.aio.models.generate_content_stream(
-        model=settings.gemini_model,
+        model=model or settings.gemini_model,
         contents=user,
         config=genai_types.GenerateContentConfig(
             system_instruction=system,
@@ -166,12 +167,14 @@ async def _stream_openai(
     system: str,
     user: str,
     prior: tuple[PriorTurn, ...],
+    *,
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     stream = await client.chat.completions.create(
-        model=settings.openai_model,
+        model=model or settings.openai_model,
         messages=_openai_messages(system, user, prior),
         stream=True,
         temperature=0.4,
@@ -203,6 +206,8 @@ async def _stream_anthropic(
     system: str,
     user: str,
     prior: tuple[PriorTurn, ...],
+    *,
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     if not settings.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
@@ -211,7 +216,7 @@ async def _stream_anthropic(
     # omitted for the lowest first-token latency; the answer system prompt
     # already pins the output format tightly.
     async with client.messages.stream(
-        model=settings.anthropic_model,
+        model=model or settings.anthropic_model,
         max_tokens=1500,
         system=system,
         messages=_anthropic_messages(user, prior),
@@ -225,6 +230,8 @@ async def _stream_deepseek(
     system: str,
     user: str,
     prior: tuple[PriorTurn, ...],
+    *,
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     if not settings.deepseek_api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
@@ -233,7 +240,7 @@ async def _stream_deepseek(
         base_url=settings.deepseek_base_url,
     )
     stream = await client.chat.completions.create(
-        model=settings.deepseek_model,
+        model=model or settings.deepseek_model,
         messages=_openai_messages(system, user, prior),
         stream=True,
         temperature=0.4,

@@ -88,6 +88,8 @@ export interface QuestionDetectedEvent {
 // ─── /ws/answer ──────────────────────────────────────────────────────────────
 
 export type AnswerProvider = 'gemini' | 'openai' | 'deepseek' | 'claude';
+export type { ModelCapability, ModelOption } from './model-catalog';
+export { MODEL_CATALOG, modelOption } from './model-catalog';
 
 export interface AnswerSessionContext {
   resume_text?: string;
@@ -122,6 +124,7 @@ export type AnswerClientMessage =
        *  follow-ups back into the conversation that produced them. */
       thread_id?: string;
       provider: AnswerProvider;
+      model?: string;
       session_context?: AnswerSessionContext;
       auto_detected?: boolean;
     }
@@ -259,6 +262,7 @@ export type CodingMode = 'solve' | 'explain' | 'debug' | 'tests' | 'agent';
 export type CodingSolutionClientMessage =
   | {
       type: 'solve';
+      model?: string;
       /** Defaults to 'solve' when absent — keeps legacy clients working. */
       mode?: CodingMode;
       /** Required for solve and tests modes. */

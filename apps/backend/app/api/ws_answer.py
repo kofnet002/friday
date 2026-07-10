@@ -11,6 +11,7 @@ from app.logging import log
 from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import recent_transcript_text, set_last_answer
 from app.services.answer import Provider, stream_answer
+from app.models.catalog import provider_for_model
 from app.services.limits import check_token_budget
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
@@ -63,6 +64,13 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
 
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
+        selected_model = request.get("model")
+        if selected_model:
+            model_provider = provider_for_model(str(selected_model))
+            if model_provider is None:
+                await send_json({"type": "error", "message": f"Unknown model: {selected_model}"})
+                return
+            provider = model_provider
         thread_id = request.get("thread_id") or None
 
         # Accept either the new threaded payload (messages: [...]) or the
@@ -188,7 +196,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         collected: list[str] = []
         try:
             async for token in stream_answer(
-                provider, question, context, on_fallback=_on_fallback
+                provider, question, context, model=selected_model, on_fallback=_on_fallback
             ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})

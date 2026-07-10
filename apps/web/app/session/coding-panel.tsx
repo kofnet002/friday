@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { MODEL_CATALOG } from '@friday/shared-types';
 import type {
   AnswerProvider,
   CodingLanguage,
@@ -75,6 +76,7 @@ export interface CodingProblemTab {
   fingerprint: string;
   problem: ExtractedProblem;
   language: CodingLanguage;
+  model: string;
   solution: string;
   status: CodingSolutionStatus;
   error: string | null;
@@ -112,6 +114,8 @@ export interface CodingPanelProps {
   onLanguageChange: (lang: CodingLanguage) => void;
   provider: AnswerProvider;
   onProviderChange: (provider: AnswerProvider) => void;
+  model: string;
+  onModelChange: (model: string) => void;
   tabs: CodingProblemTab[];
   activeFingerprint: string | null;
   onSelectTab: (fingerprint: string) => void;
@@ -150,7 +154,8 @@ export function CodingPanel({
   language,
   onLanguageChange,
   provider,
-  onProviderChange,
+  model,
+  onModelChange,
   tabs,
   activeFingerprint,
   onSelectTab,
@@ -191,15 +196,16 @@ export function CodingPanel({
           </span>
           <ActivePill active={active} />
           <Select
-            value={provider}
-            onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+            value={model}
+            onChange={(e) => onModelChange(e.target.value)}
             className="ml-auto h-8 text-xs"
             aria-label="model"
           >
-            <option value="gemini">Gemini 2.5 Flash</option>
-            <option value="openai">GPT-4o</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="claude">Claude Opus 4.8</option>
+            {MODEL_CATALOG.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}
+              </option>
+            ))}
           </Select>
           <Select
             value={language}
@@ -767,7 +773,7 @@ function ActiveProblemView({
             </span>
           ) : null}
           <span className="rounded-full bg-neutral-100 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
-            {provider} · {tab.language}
+            {provider} · {tab.model} · {tab.language}
           </span>
         </div>
       </div>

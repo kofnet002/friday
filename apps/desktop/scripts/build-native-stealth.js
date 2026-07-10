@@ -6,8 +6,16 @@ const projectRoot = path.resolve(__dirname, '..');
 const sourcePath = path.join(projectRoot, 'native', 'stealth.mm');
 const outputDir = path.join(projectRoot, 'build', 'Release');
 const outputPath = path.join(outputDir, 'friday-stealth.node');
+// `process.config.variables.node_prefix` is reported as `/` by some Node
+// distributions (notably nvm), even when the headers live beside the active
+// executable. Prefer the executable-derived location and keep the config
+// value as a fallback for system Node installations.
 const nodePrefix = process.config.variables.node_prefix;
-const includeDir = path.join(nodePrefix, 'include', 'node');
+const includeCandidates = [
+  path.join(path.dirname(path.dirname(process.execPath)), 'include', 'node'),
+  path.join(nodePrefix, 'include', 'node'),
+];
+const includeDir = includeCandidates.find((candidate) => fs.existsSync(candidate));
 
 if (process.platform !== 'darwin') {
   console.log('Skipping friday-stealth build on non-macOS platform');
@@ -18,8 +26,8 @@ if (!fs.existsSync(sourcePath)) {
   throw new Error(`Missing source file: ${sourcePath}`);
 }
 
-if (!fs.existsSync(includeDir)) {
-  throw new Error(`Missing Node headers: ${includeDir}`);
+if (!includeDir) {
+  throw new Error(`Missing Node headers. Checked: ${includeCandidates.join(', ')}`);
 }
 
 fs.mkdirSync(outputDir, { recursive: true });

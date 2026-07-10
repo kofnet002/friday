@@ -49,6 +49,8 @@ cp .env.example .env
 #   DEEPGRAM_API_KEY=…   (free tier OK; paid for sustained use)
 #   GEMINI_API_KEY=…     (free tier hits 20/day per model)
 #   OPENAI_API_KEY=…     (paid; needs credit balance)
+# The model selector supports multiple models per provider. OPENAI_MODEL,
+# GEMINI_MODEL, and the other *_MODEL values are backend defaults.
 # Optional overrides:
 #   GEMINI_MODEL=gemini-2.5-flash         (answer/coding stream)
 #   QUESTION_DETECTION_MODEL=gemini-2.5-flash-lite

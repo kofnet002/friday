@@ -2,7 +2,13 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
-import type { AnswerMessage, AnswerProvider, QdModel, QdState } from '@friday/shared-types';
+import {
+  MODEL_CATALOG,
+  type AnswerMessage,
+  type AnswerProvider,
+  type QdModel,
+  type QdState,
+} from '@friday/shared-types';
 
 import { ALL_QD_MODELS } from '@/lib/session-context';
 
@@ -38,6 +44,8 @@ export type AnswerStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error'
 export interface AnswerPanelProps {
   provider: AnswerProvider;
   onProviderChange: (p: AnswerProvider) => void;
+  model: string;
+  onModelChange: (model: string) => void;
   /** Model used for question detection (silence + ceiling + speaker-turn).
    *  User-selectable so they own the cost/quality tradeoff now that
    *  detection fires more often. */
@@ -91,8 +99,8 @@ export interface AnswerPanelProps {
 }
 
 export function AnswerPanel({
-  provider,
-  onProviderChange,
+  model,
+  onModelChange,
   qdModel,
   onQdModelChange,
   qdState,
@@ -250,14 +258,15 @@ export function AnswerPanel({
             {qdFallbackModel && !qdError ? <QdFallbackBadge model={qdFallbackModel} /> : null}
           </div>
           <Select
-            value={provider}
-            onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+            value={model}
+            onChange={(e) => onModelChange(e.target.value)}
             className="h-7 text-xs"
           >
-            <option value="gemini">Gemini 2.5 Flash</option>
-            <option value="openai">GPT-4o</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="claude">Claude Opus 4.8</option>
+            {MODEL_CATALOG.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}
+              </option>
+            ))}
           </Select>
 
           {/* History pager — chevrons step through every Q&A asked this
