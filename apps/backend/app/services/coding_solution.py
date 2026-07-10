@@ -41,6 +41,10 @@ from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek", "claude"]
 
+
+def _gemini_thinking_budget(model: str) -> int:
+    return -1 if "pro" in model else 0
+
 # Coding shares the same fallback ordering as answer (primary → the rest).
 _CODING_FALLBACK_ORDER: dict[Provider, list[Provider]] = {
     "gemini": ["gemini", "openai", "deepseek", "claude"],
@@ -284,7 +288,9 @@ async def _stream_gemini(system: str, user: str, *, deep: bool = False) -> Async
         # the visible code mid-function. We pay for thinking only when
         # refining, where the budget bump (REFINE_MAX_OUTPUT_TOKENS)
         # accommodates both reasoning + code.
-        thinking = genai_types.ThinkingConfig(thinking_budget=0)
+        thinking = genai_types.ThinkingConfig(
+            thinking_budget=_gemini_thinking_budget(model)
+        )
     stream = await client.aio.models.generate_content_stream(
         model=model,
         contents=user,

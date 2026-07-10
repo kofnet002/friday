@@ -23,6 +23,11 @@ from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek", "claude"]
 
+
+def _gemini_thinking_config(model: str) -> genai_types.ThinkingConfig:
+    """Gemini Pro requires thinking; Flash permits it to be disabled."""
+    return genai_types.ThinkingConfig(thinking_budget=-1 if "pro" in model else 0)
+
 # Default fallback chain. If the user picks gemini and it 503s through all
 # in-provider retries, we try openai next, then deepseek. Different primaries
 # get their own chain — the primary is always tried first.
@@ -157,7 +162,7 @@ async def _stream_gemini(system: str, user: str, *, model: str | None = None) ->
             temperature=0.4,
             max_output_tokens=1500,
             top_p=0.9,
-            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            thinking_config=_gemini_thinking_config(model or settings.gemini_model),
         ),
     )
     async for chunk in stream:
