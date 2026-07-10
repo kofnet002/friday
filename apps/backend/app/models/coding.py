@@ -26,6 +26,8 @@ class CodingExample(BaseModel):
 
 class ExtractedProblem(BaseModel):
     is_coding_problem: bool
+    is_screen_question: bool = False
+    question: str | None = None
     platform: Platform | None = None
     title: str | None = None
     difficulty: Difficulty | None = None

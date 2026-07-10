@@ -16,6 +16,8 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
 
 {
   "is_coding_problem": boolean,
+  "is_screen_question": boolean,
+  "question": string | null,
   "platform": "leetcode" | "turing" | "hackerrank" | "coderpad" | "other" | null,
   "title": string | null,
   "difficulty": "easy" | "medium" | "hard" | null,
@@ -30,6 +32,8 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
 RULES
 
 - is_coding_problem: true only if the screenshot clearly contains a coding problem statement. An empty IDE, a problem list, or a code editor without a visible problem = false.
+- is_screen_question: true for a readable natural-language interview or technical question that is not a coding-platform problem.
+- question: transcribe that question exactly when is_screen_question is true; otherwise null.
 - Extract the problem statement verbatim. Preserve formatting of input/output examples.
 - If constraints are present (e.g., "1 <= n <= 10^5"), extract as individual strings.
 - If a function signature / starter code is visible, extract it exactly.

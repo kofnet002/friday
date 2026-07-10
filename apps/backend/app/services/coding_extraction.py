@@ -125,7 +125,7 @@ async def store_result(session_id: str, image_hash: str, problem: ExtractedProbl
 def problem_fingerprint(problem: ExtractedProblem) -> str:
     """Stable hash of the problem statement — used to dedup the "have we
     already shown this problem this session?" check."""
-    blob = (problem.problem_statement or "").strip().lower()
+    blob = (problem.problem_statement or problem.question or "").strip().lower()
     if problem.title:
         blob = problem.title.strip().lower() + "\n" + blob
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]

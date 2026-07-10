@@ -103,6 +103,26 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
 
     emitted = False
     if (
+        problem.is_screen_question
+        and problem.confidence >= EXTRACTION_MIN_CONFIDENCE
+        and problem.question
+    ):
+        fingerprint = problem_fingerprint(problem)
+        emitted = await session_bus.publish(
+            request.session_id,
+            {
+                "type": "screen_question_detected",
+                "question": problem.question,
+                "fingerprint": fingerprint,
+            },
+        )
+        log.info(
+            "vision.screen_question_emitted",
+            session_id=request.session_id,
+            fingerprint=fingerprint,
+            emitted=emitted,
+        )
+    elif (
         problem.is_coding_problem
         and problem.confidence >= EXTRACTION_MIN_CONFIDENCE
         and problem.problem_statement

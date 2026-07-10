@@ -248,6 +248,12 @@ export interface CodingProblemDetectedEvent {
   fingerprint: string;
 }
 
+export interface ScreenQuestionDetectedEvent {
+  type: 'screen_question_detected';
+  question: string;
+  fingerprint: string;
+}
+
 /** Operating modes for /ws/coding-solution. `solve` is the existing
  *  problem→solution path. `explain` walks through a code snippet, `debug`
  *  diagnoses + fixes a snippet given an error message, `tests` generates
@@ -299,6 +305,7 @@ export interface CodingTestCaseResult {
 }
 
 export type CodingSolutionServerMessage =
+  | { type: 'screen_question_detected'; question: string; fingerprint: string }
   | {
       type: 'started';
       provider: AnswerProvider;

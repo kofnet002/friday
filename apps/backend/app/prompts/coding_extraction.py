@@ -14,6 +14,8 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
 
 {
   "is_coding_problem": boolean,
+  "is_screen_question": boolean,
+  "question": string | null,
   "platform": "leetcode" | "turing" | "hackerrank" | "coderpad" | "other" | null,
   "title": string | null,
   "difficulty": "easy" | "medium" | "hard" | null,
@@ -29,6 +31,8 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
 RULES
 
 - is_coding_problem: true only if the screenshot clearly contains a coding problem statement. An empty IDE, a problem list, or a code editor without a visible problem = false.
+- is_screen_question: true when the screenshot contains a readable natural-language interview or technical question that is not a coding-platform problem.
+- question: transcribe that question exactly when is_screen_question is true; otherwise null.
 - Extract the problem statement verbatim. Preserve formatting of input/output examples.
 - EXAMPLES ARE EXECUTED, NOT JUST DISPLAYED. The extracted examples are run
   against generated code as test cases, so a single wrong digit or misplaced
@@ -62,7 +66,7 @@ RULES
 - language_hint: the language the starter code is in, if visible.
 - confidence: your certainty that extraction is complete and accurate. 0.9+ = full problem visible; 0.5-0.9 = partial; below 0.5 = don't trust.
 
-If the screenshot shows multiple problems or a problem list, set is_coding_problem to false."""
+If the screenshot shows multiple problems or a problem list, set is_coding_problem to false. If neither a coding problem nor a readable question is visible, set both flags false."""
 
 
 # Mirrors CODING_EXTRACTION_CONFIG from the TS file.

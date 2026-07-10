@@ -604,6 +604,18 @@ export function SessionClient() {
     // Problem-detected events are pushed from /api/vision/extract via
     // session_bus and arrive on this socket (it's always open while /session
     // is mounted, unlike /ws/transcribe which requires Start).
+    if (msg.type === 'screen_question_detected') {
+      const normalized = msg.question.trim().toLowerCase();
+      const recent = entriesRef.current
+        .flatMap((entry) => entry.messages)
+        .reverse()
+        .find((message) => message.role === 'user');
+      if (!recent || recent.content.trim().toLowerCase() !== normalized) {
+        askAnswer(msg.question, { autoDetected: true });
+        setActiveFeature('listen');
+      }
+      return;
+    }
     if (msg.type === 'coding_problem_detected') {
       onCodingProblemDetected(msg.problem, msg.fingerprint);
       return;
