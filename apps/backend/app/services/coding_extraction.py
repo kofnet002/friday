@@ -336,6 +336,8 @@ class _StrictExample(BaseModel):
 
 class _StrictExtraction(BaseModel):
     is_coding_problem: bool
+    is_screen_question: bool
+    question: str | None
     platform: str | None
     title: str | None
     difficulty: str | None
@@ -364,8 +366,7 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
             "content": [
                 {
                     "type": "text",
-                    "text": "Extract the coding problem from this screenshot"
-                    " as strict JSON matching the schema.",
+                    "text": "Extract either the coding problem or the readable general question from this screenshot as strict JSON matching the schema.",
                 },
                 {"type": "image_url", "image_url": {"url": image_url}},
             ],
