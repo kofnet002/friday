@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils';
 export const SESSION_SHORTCUTS = [
   { keys: '⌘ ⇧ Space', label: 'Force-ask copilot using last 2 transcript finals' },
   { keys: '⌘ ⇧ C', label: 'Toggle coding mode' },
+  { keys: '⌘ ⇧ R', label: 'Capture and analyze the screen now' },
   { keys: '⌘ ⇧ .', label: 'Panic blur — mask all panels, close active popover' },
   { keys: '⌘ /', label: 'Show this shortcuts cheat-sheet' },
 ];

@@ -176,6 +176,8 @@ export function SessionClient() {
 
   // Coding panel state
   const [codingActive, setCodingActive] = useState(false);
+  const codingActiveRef = useRef(false);
+  codingActiveRef.current = codingActive;
   const [codingLanguage, setCodingLanguage] = useState<CodingLanguage>('Python');
   const [codingTabs, setCodingTabs] = useState<CodingProblemTab[]>([]);
   const [activeFingerprint, setActiveFingerprint] = useState<string | null>(null);
@@ -1323,6 +1325,17 @@ export function SessionClient() {
       if (e.code === 'KeyC' || e.key?.toLowerCase() === 'c') {
         e.preventDefault();
         toggleCodingMode();
+        return;
+      }
+      if (e.code === 'KeyR' || e.key?.toLowerCase() === 'r') {
+        e.preventDefault();
+        if (!codingActiveRef.current) {
+          setCodingError('Start Analyze Screen before forcing a capture.');
+          setActiveFeature('coding');
+          return;
+        }
+        void window.friday?.coding?.forceExtract();
+        setActiveFeature('coding');
         return;
       }
       // Panic blur — when someone walks behind the screen, hit ⌘⇧. to
