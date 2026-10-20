@@ -3,7 +3,8 @@
 import { Briefcase, FileText, Sparkles, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, type ReactNode } from 'react';
-import type { AnswerProvider, InterviewType } from '@friday/shared-types';
+import { providerForModel } from '@friday/shared-types';
+import type { InterviewType, ReasoningEffort } from '@friday/shared-types';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,13 +13,19 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   fetchContext,
   fetchLatestSession,
+  getEffortPreference,
+  getModelPreference,
   getOrCreateSessionId,
   saveContext,
+  setEffortPreference,
+  setModelPreference,
   setProviderPreference,
   setSessionId,
   uploadResume,
 } from '@/lib/session-context';
 import { cn } from '@/lib/utils';
+
+import { ModelPicker } from '../session/model-picker';
 
 export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
   const router = useRouter();
@@ -28,7 +35,9 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
   const [language, setLanguage] = useState('en');
   const [extraInstructions, setExtra] = useState('');
   const [interviewType, setInterviewType] = useState<InterviewType>('mixed');
-  const [defaultProvider, setDefaultProvider] = useState<AnswerProvider>('gemini');
+  // Any resolvable model ID (catalog or custom); its provider is derived.
+  const [defaultModel, setDefaultModel] = useState<string>(getModelPreference);
+  const [defaultEffort, setDefaultEffort] = useState<ReasoningEffort | null>(getEffortPreference);
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeStatus, setResumeStatus] = useState<
     | { kind: 'idle' }
@@ -65,13 +74,8 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
     if (latest.language) setLanguage(latest.language);
     if (latest.extra_instructions) setExtra(latest.extra_instructions);
     if (latest.interview_type) setInterviewType(latest.interview_type);
-    if (
-      latest.default_provider === 'gemini' ||
-      latest.default_provider === 'openai' ||
-      latest.default_provider === 'deepseek' ||
-      latest.default_provider === 'claude'
-    ) {
-      setDefaultProvider(latest.default_provider);
+    if (latest.default_model && providerForModel(latest.default_model)) {
+      setDefaultModel(latest.default_model);
     }
   };
 
@@ -97,6 +101,7 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    const defaultProvider = providerForModel(defaultModel) ?? 'gemini';
     setSaving(true);
     const ok = await saveContext({
       session_id: sessionId,
@@ -106,7 +111,11 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
       extra_instructions: extraInstructions || undefined,
       interview_type: interviewType,
       default_provider: defaultProvider,
+      default_model: defaultModel,
     });
+    // The session page reads these on mount, so the pick carries over.
+    setModelPreference(defaultModel);
+    setEffortPreference(defaultEffort);
     setProviderPreference(defaultProvider);
     setSaving(false);
     if (ok) {
@@ -158,15 +167,14 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
       >
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Labeled label="Default copilot model">
-            <Select
-              value={defaultProvider}
-              onChange={(e) => setDefaultProvider(e.target.value as AnswerProvider)}
-            >
-              <option value="gemini">Gemini 2.5 Pro</option>
-              <option value="openai">GPT-4o</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="claude">Claude Opus 4.8</option>
-            </Select>
+            <ModelPicker
+              density="comfortable"
+              model={defaultModel}
+              onModelChange={setDefaultModel}
+              effort={defaultEffort}
+              onEffortChange={setDefaultEffort}
+              className="w-full [&>div:first-child]:min-w-0 [&>div:first-child]:flex-1"
+            />
           </Labeled>
           <Labeled label="Language">
             <Select value={language} onChange={(e) => setLanguage(e.target.value)}>

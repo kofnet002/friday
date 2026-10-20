@@ -17,6 +17,7 @@ const fs = require('node:fs');
 const { AudioSupervisor } = require('./audio');
 const { CodingCapture } = require('./coding');
 const stealth = require('./stealth');
+const services = require('./services');
 
 const DEV_URL = process.env.FRIDAY_WEB_URL || 'http://127.0.0.1:3333';
 const OPACITY_STEP = 0.1;
@@ -43,6 +44,15 @@ const DEFAULT_WINDOW_STATE = Object.freeze({
     moveCursorOnStealth: false,
   },
 });
+
+// Packaged builds keep data in ~/Library/Application Support/Friday and logs
+// in ~/Library/Logs/Friday; the package name would otherwise give
+// "@friday/desktop". Must run before anything reads userData.
+if (app.isPackaged) {
+  app.setName('Friday');
+  app.setPath('userData', path.join(app.getPath('appData'), 'Friday'));
+  app.setAppLogsPath(path.join(app.getPath('home'), 'Library', 'Logs', 'Friday'));
+}
 
 const audio = new AudioSupervisor();
 const coding = new CodingCapture();
@@ -287,6 +297,9 @@ function registerGlobalHotkeys() {
     ['CommandOrControl+Shift+-', () => adjustOpacity(-OPACITY_STEP)],
     ['CommandOrControl+Shift+=', () => adjustOpacity(OPACITY_STEP)],
     ['CommandOrControl+Shift+0', resetWindowState],
+    // ⌘Q only reaches a focused app; the overlay usually isn't. ⌘⇧Q and
+    // ⌘⌥⇧Q are macOS Log Out, so quit lives on ⌘⌥Q.
+    ['CommandOrControl+Alt+Q', () => app.quit()],
   ];
   for (const [accelerator, handler] of bindings) {
     globalShortcut.register(accelerator, handler);
@@ -354,6 +367,49 @@ async function ensurePermissions() {
         'Open System Settings → Privacy & Security → Screen & System Audio Recording, then enable Friday. The first audio:start call will also trigger the system prompt.',
       buttons: ['OK'],
     });
+  }
+}
+
+// Packaged app only: boot the bundled backend + web server (dev uses
+// `pnpm dev`). Returns false after telling the user why it couldn't start.
+async function startBundledServices() {
+  try {
+    const { envPath, createdEnv } = await services.startBundledServices({
+      resourcesPath: process.resourcesPath,
+      userDataPath: app.getPath('userData'),
+      logsPath: app.getPath('logs'),
+      electronPath: process.execPath,
+      onUnexpectedExit: (message) => {
+        dialog.showErrorBox(
+          'Friday stopped working',
+          `${message}\n\nRelaunch Friday to restart it.`,
+        );
+        app.quit();
+      },
+    });
+    if (createdEnv) {
+      // Not awaited: the window still opens behind the prompt.
+      dialog
+        .showMessageBox({
+          type: 'info',
+          title: 'Add your API keys',
+          message: 'Friday created a settings file for your API keys.',
+          detail: `Fill in ${envPath} (at least DEEPGRAM_API_KEY plus one LLM key), save it, then quit and relaunch Friday from the menu bar.`,
+          buttons: ['Open settings file', 'Later'],
+          defaultId: 0,
+        })
+        .then(({ response }) => {
+          if (response === 0) shell.openPath(envPath);
+        });
+    }
+    return true;
+  } catch (err) {
+    // Interrupted by a quit — nothing went wrong.
+    if (err instanceof services.ServicesStoppedError) return false;
+    await services.stopBundledServices();
+    dialog.showErrorBox('Friday could not start', err instanceof Error ? err.message : String(err));
+    app.quit();
+    return false;
   }
 }
 
@@ -439,6 +495,7 @@ ipcMain.handle('coding:set_provider', (_evt, provider) => {
   return { ok: true, provider: coding.provider };
 });
 ipcMain.handle('window:status', () => buildStatusPayload());
+ipcMain.handle('window:quit_app', () => app.quit());
 ipcMain.handle('window:toggle_visibility', () => {
   toggleWindowVisibility();
   return buildStatusPayload();
@@ -488,7 +545,18 @@ ipcMain.handle('stealth:disable', () => {
 });
 ipcMain.handle('stealth:status', () => stealthStatus);
 
+// A second launch would find the first one's ports taken; focus it instead.
+const hasInstanceLock = app.requestSingleInstanceLock();
+if (!hasInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) showWindow();
+  });
+}
+
 app.whenReady().then(async () => {
+  if (!hasInstanceLock) return;
   ({ default: Store } = await import('electron-store'));
   windowState = createWindowStateStore();
   applyShellPreferences();
@@ -506,6 +574,7 @@ app.whenReady().then(async () => {
       }
     }
   }
+  if (app.isPackaged && !(await startBundledServices())) return;
   await ensurePermissions();
   createWindow();
   createTray();
@@ -523,8 +592,25 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+// `kill`/logout send SIGTERM, which skips before-quit unless we route it
+// through app.quit() — otherwise the bundled services outlive the app.
+if (app.isPackaged) {
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => app.quit());
+  }
+}
+
+app.on('before-quit', (event) => {
   audio.stop();
   coding.stop();
   globalShortcut.unregisterAll();
+  // Hold the quit until the services have exited (SIGKILL after a grace
+  // period) so none outlives the app holding its port; then quit again.
+  // Also cancels a startup still in progress.
+  const mustWait = services.hasRunningServices();
+  const stopped = services.stopBundledServices();
+  if (mustWait) {
+    event.preventDefault();
+    stopped.then(() => app.quit());
+  }
 });

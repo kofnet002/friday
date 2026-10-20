@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.db import (
     append_qa,
@@ -19,6 +19,7 @@ from app.db import (
     session_usage_summary,
     upsert_session,
 )
+from app.models.catalog import resolve_model
 from app.redis_client import recent_transcript_entries
 
 router = APIRouter(prefix="/api/sessions")
@@ -32,6 +33,14 @@ class CreateSessionPayload(BaseModel):
     extra_instructions: str | None = None
     interview_type: str | None = None
     default_provider: str | None = None
+    default_model: str | None = None
+
+    @field_validator("default_model")
+    @classmethod
+    def _valid_model(cls, value: str | None) -> str | None:
+        if value is not None and resolve_model(value, provider_hint=None) is None:
+            raise ValueError("default_model must be a resolvable model ID")
+        return value
 
 
 @router.post("")
@@ -44,6 +53,7 @@ async def create_session(payload: CreateSessionPayload) -> dict[str, Any]:
         extra_instructions=payload.extra_instructions,
         interview_type=payload.interview_type,
         default_provider=payload.default_provider,
+        default_model=payload.default_model,
     )
     row = await get_session(payload.session_id)
     return {"ok": True, "session": row}
@@ -63,6 +73,7 @@ async def patch_session(
         extra_instructions=payload.extra_instructions,
         interview_type=payload.interview_type,
         default_provider=payload.default_provider,
+        default_model=payload.default_model,
     )
     row = await get_session(session_id)
     return {"ok": True, "session": row}
@@ -159,6 +170,8 @@ def _render_markdown(
         out.append(f"**Language:** {session['language']}")
     if session.get("default_provider"):
         out.append(f"**Default provider:** {session['default_provider']}")
+    if session.get("default_model"):
+        out.append(f"**Default model:** {session['default_model']}")
     out.append("")
 
     if session.get("extra_instructions"):

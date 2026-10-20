@@ -4,8 +4,61 @@
   "private": true,
   "main": "main.js",
   "build": {
-    "extendInfo": {
-      "LSUIElement": true
+    "appId": "dev.friday.desktop",
+    "productName": "Friday",
+    "directories": {
+      "output": "dist",
+      "buildResources": "packaging"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "audio.js",
+      "coding.js",
+      "stealth.js",
+      "services.js",
+      "parent-watchdog.js",
+      "build/Release/*.node",
+      "build/icon.icns"
+    ],
+    "asarUnpack": [
+      "build/Release/*.node",
+      "node_modules/sharp/**",
+      "node_modules/@img/**"
+    ],
+    "extraResources": [
+      {
+        "from": "bundle/backend",
+        "to": "backend"
+      },
+      {
+        "from": "bundle/friday-audio",
+        "to": "friday-audio"
+      },
+      {
+        "from": "bundle/env.example",
+        "to": "env.example"
+      }
+    ],
+    "afterPack": "scripts/after-pack.js",
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "LSUIElement": true,
+        "NSMicrophoneUsageDescription": "Friday can transcribe your microphone during a session.",
+        "NSAudioCaptureUsageDescription": "Friday transcribes system audio during a session."
+      }
     }
   },
   "scripts": {
@@ -14,9 +67,12 @@
     "build:swift": "swift build -c release --package-path swift",
     "build:native:stealth": "node scripts/build-native-stealth.js",
     "build:icon": "node scripts/build-icon.js",
+    "stage": "node scripts/stage-bundle.js",
+    "dist": "pnpm --filter @friday/web build && pnpm --filter @friday/backend build:binary && pnpm run build && pnpm run stage && electron-builder --mac",
     "postinstall": "pnpm run build || true",
     "lint": "echo 'desktop lint not configured yet'",
-    "typecheck": "echo 'desktop typecheck not configured yet'"
+    "typecheck": "echo 'desktop typecheck not configured yet'",
+    "test": "node --test"
   },
   "dependencies": {
     "electron-store": "^11.0.2",
@@ -25,6 +81,7 @@
   "devDependencies": {
     "cross-env": "^7.0.3",
     "electron": "^33.2.1",
+    "electron-builder": "26.15.3",
     "wait-on": "^8.0.1"
   }
 }

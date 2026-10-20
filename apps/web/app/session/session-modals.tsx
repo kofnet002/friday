@@ -35,6 +35,7 @@ export const DESKTOP_SHORTCUTS = [
   { keys: '⌘ ⇧ -', label: 'Decrease window opacity' },
   { keys: '⌘ ⇧ =', label: 'Increase window opacity' },
   { keys: '⌘ ⇧ 0', label: 'Reset opacity and recenter the window' },
+  { keys: '⌘ ⌥ Q', label: 'Quit Friday' },
 ];
 
 export function ModalShell({
@@ -379,7 +380,7 @@ export function HistoryList({ qa, loading, onExport }: HistoryListProps) {
         </p>
         <p className="max-w-[36ch] text-xs text-neutral-500 dark:text-neutral-400">
           Ask the copilot directly, hit ⌘⇧Space, or let auto question-detection trigger one —
-          they'll appear here once they finish streaming.
+          they&apos;ll appear here once they finish streaming.
         </p>
         {onExport ? (
           <Button type="button" variant="outline" size="sm" onClick={onExport} className="mt-2">

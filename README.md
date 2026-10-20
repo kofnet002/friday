@@ -53,7 +53,7 @@ cp .env.example .env
 # GEMINI_MODEL, and the other *_MODEL values are backend defaults.
 # Optional overrides:
 #   GEMINI_MODEL=gemini-2.5-flash         (answer/coding stream)
-#   QUESTION_DETECTION_MODEL=gemini-2.5-flash-lite
+#   QUESTION_DETECTION_MODEL=gemini-3.5-flash-lite
 #   VISION_EXTRACTION_MODEL=gemini-2.5-flash
 #   SESSION_TOKEN_LIMIT=500000
 #   SESSION_AUDIO_MINUTE_LIMIT=120

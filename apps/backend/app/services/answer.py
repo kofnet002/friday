@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Literal
+from contextlib import aclosing
+from typing import Any
 
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam
@@ -10,6 +11,21 @@ from google.genai import types as genai_types
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
+from app.models.catalog import Effort, Provider
+from app.models.params import (
+    anthropic_options,
+    effort_max_tokens,
+    gemini_thinking_config,
+    open_with_param_fallback,
+    openai_options,
+)
+from app.models.streams import (
+    OPENAI_STREAM_OPTIONS,
+    UsageCallback,
+    anthropic_text,
+    gemini_text,
+    openai_text,
+)
 from app.prompts.answer_generation import (
     AnswerContext,
     PriorTurn,
@@ -21,12 +37,13 @@ from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
 
-Provider = Literal["gemini", "openai", "deepseek", "claude"]
+ANSWER_MAX_TOKENS = 1500
+ANSWER_TEMPERATURE = 0.4
 
 
 def _gemini_thinking_config(model: str) -> genai_types.ThinkingConfig:
     """Gemini Pro requires thinking; Flash permits it to be disabled."""
-    return genai_types.ThinkingConfig(thinking_budget=-1 if "pro" in model else 0)
+    return gemini_thinking_config(model, None)
 
 # Default fallback chain. If the user picks gemini and it 503s through all
 # in-provider retries, we try openai next, then deepseek. Different primaries
@@ -68,7 +85,9 @@ async def stream_answer(
     context: AnswerContext,
     *,
     model: str | None = None,
+    effort: Effort | None = None,
     on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
+    on_usage: UsageCallback | None = None,
 ) -> AsyncIterator[str]:
     """Yield answer tokens for the given question using the selected provider.
 
@@ -83,13 +102,19 @@ async def stream_answer(
     When `on_fallback` is provided and the primary provider fails before
     emitting any tokens, the next provider in the chain is tried. The
     callback fires once per switch so the WS layer can notify the client.
+
+    `on_usage(input, output)` fires with the provider-reported token counts
+    of the attempt that completed (none if the stream was cut short).
     """
     system = answer_system_prompt(context)
     # Build a per-provider factory that handles in-provider transient
     # retries (`retry_stream`). The outer fallback helper switches providers
     # only after these retries are exhausted or hit a hard error.
     def make_factory(p: Provider) -> AsyncIterator[str]:
+        # A user-selected model + effort apply only to the selected provider;
+        # fallback providers use their own env defaults.
         selected = model if p == provider else None
+        level = effort if p == provider else None
         if p == "gemini":
             # Gemini path: embed the thread inside the user prompt. We don't
             # use Gemini's native multi-turn contents array here to keep
@@ -97,20 +122,36 @@ async def stream_answer(
             user = answer_user_prompt(
                 question, context.recent_transcript, context.prior_turns
             )
-            base = lambda: _stream_gemini(system, user, model=selected)  # noqa: E731
+            base = lambda: _stream_gemini(  # noqa: E731
+                system, user, model=selected, effort=level, on_usage=on_usage
+            )
         else:
             # OpenAI / DeepSeek / Claude path: pass prior turns as real
             # assistant/user messages on the wire. Strip <thread> from the
             # user prompt so we don't duplicate the history.
             user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
             if p == "deepseek":
-                base = lambda: _stream_deepseek(system, user, context.prior_turns, model=selected)  # noqa: E731
+                base = lambda: _stream_deepseek(  # noqa: E731
+                    system, user, context.prior_turns, model=selected, on_usage=on_usage
+                )
             elif p == "claude":
-                base = lambda: _stream_anthropic(system, user, context.prior_turns, model=selected)  # noqa: E731
+                base = lambda: _stream_anthropic(  # noqa: E731
+                    system,
+                    user,
+                    context.prior_turns,
+                    model=selected,
+                    effort=level,
+                    on_usage=on_usage,
+                )
             else:
-                # A user-selected model applies only to the selected
-                # provider. Fallback providers must use their own defaults.
-                base = lambda: _stream_openai(system, user, context.prior_turns, model=selected)  # noqa: E731
+                base = lambda: _stream_openai(  # noqa: E731
+                    system,
+                    user,
+                    context.prior_turns,
+                    model=selected,
+                    effort=level,
+                    on_usage=on_usage,
+                )
         return retry_stream(base, label=f"answer.{p}")
 
     chain = _provider_chain(provider)
@@ -150,25 +191,43 @@ def _openai_messages(
     return msgs
 
 
-async def _stream_gemini(system: str, user: str, *, model: str | None = None) -> AsyncIterator[str]:
+async def _stream_gemini(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    effort: Effort | None = None,
+    on_usage: UsageCallback | None = None,
+) -> AsyncIterator[str]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     client = genai.Client(api_key=settings.gemini_api_key)
-    stream = await client.aio.models.generate_content_stream(
-        model=model or settings.gemini_model,
-        contents=user,
-        config=genai_types.GenerateContentConfig(
+    effective_model = model or settings.gemini_model
+
+    def config(thinking: genai_types.ThinkingConfig | None) -> genai_types.GenerateContentConfig:
+        return genai_types.GenerateContentConfig(
             system_instruction=system,
-            temperature=0.4,
-            max_output_tokens=1500,
+            temperature=ANSWER_TEMPERATURE,
+            max_output_tokens=effort_max_tokens(effort, ANSWER_MAX_TOKENS),
             top_p=0.9,
-            thinking_config=_gemini_thinking_config(model or settings.gemini_model),
-        ),
+            thinking_config=thinking,
+        )
+
+    async def open_stream(opts: dict[str, Any]) -> AsyncIterator[Any]:
+        return await client.aio.models.generate_content_stream(
+            model=effective_model, contents=user, config=opts["config"]
+        )
+
+    stream = await open_with_param_fallback(
+        open_stream,
+        {"config": config(gemini_thinking_config(effective_model, effort))},
+        # Fallback keeps the legacy thinking config (budget 0 on Flash) —
+        # dropping it would re-enable dynamic thinking and truncate answers.
+        {"config": config(gemini_thinking_config(effective_model, None))},
+        label="answer.gemini",
     )
-    async for chunk in stream:
-        text = getattr(chunk, "text", None)
-        if text:
-            yield text
+    async for text in gemini_text(stream, on_usage):
+        yield text
 
 
 async def _stream_openai(
@@ -177,33 +236,39 @@ async def _stream_openai(
     prior: tuple[PriorTurn, ...],
     *,
     model: str | None = None,
+    effort: Effort | None = None,
+    on_usage: UsageCallback | None = None,
 ) -> AsyncIterator[str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     effective_model = model or settings.openai_model
-    if effective_model.startswith("gpt-5"):
-        stream = await client.chat.completions.create(
+    messages = _openai_messages(system, user, prior)
+
+    async def open_stream(opts: dict[str, Any]) -> Any:
+        return await client.chat.completions.create(
             model=effective_model,
-            messages=_openai_messages(system, user, prior),
+            messages=messages,
             stream=True,
-            temperature=0.4,
-            max_completion_tokens=1500,
+            stream_options=OPENAI_STREAM_OPTIONS,
+            **opts,
         )
-    else:
-        stream = await client.chat.completions.create(
-            model=effective_model,
-            messages=_openai_messages(system, user, prior),
-            stream=True,
-            temperature=0.4,
-            max_tokens=1500,
-        )
-    async for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        if delta and delta.content:
-            yield delta.content
+
+    stream = await open_with_param_fallback(
+        open_stream,
+        openai_options(
+            effective_model,
+            effort=effort,
+            max_tokens=ANSWER_MAX_TOKENS,
+            temperature=ANSWER_TEMPERATURE,
+        ),
+        openai_options(
+            effective_model, effort=None, max_tokens=ANSWER_MAX_TOKENS, temperature=None
+        ),
+        label="answer.openai",
+    )
+    async for text in openai_text(stream, on_usage):
+        yield text
 
 
 def _anthropic_messages(user: str, prior: tuple[PriorTurn, ...]) -> list[MessageParam]:
@@ -226,22 +291,34 @@ async def _stream_anthropic(
     prior: tuple[PriorTurn, ...],
     *,
     model: str | None = None,
+    effort: Effort | None = None,
+    on_usage: UsageCallback | None = None,
 ) -> AsyncIterator[str]:
     if not settings.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    # No temperature/top_p — the Opus 4.x family rejects them. Thinking is
-    # omitted for the lowest first-token latency; the answer system prompt
-    # already pins the output format tightly.
-    async with client.messages.stream(
-        model=model or settings.anthropic_model,
-        max_tokens=1500,
-        system=system,
-        messages=_anthropic_messages(user, prior),
-    ) as stream:
-        async for text in stream.text_stream:
-            if text:
-                yield text
+    effective_model = model or settings.anthropic_model
+    messages = _anthropic_messages(user, prior)
+
+    # No temperature/top_p — recent Claude models reject them. Without an
+    # explicit effort, thinking is omitted for the lowest first-token latency;
+    # with one, adaptive thinking runs at that effort (see models/params.py).
+    async def open_stream(opts: dict[str, Any]) -> Any:
+        return await client.messages.create(
+            model=effective_model, system=system, messages=messages, stream=True, **opts
+        )
+
+    stream = await open_with_param_fallback(
+        open_stream,
+        anthropic_options(effort=effort, max_tokens=ANSWER_MAX_TOKENS),
+        anthropic_options(effort=None, max_tokens=ANSWER_MAX_TOKENS),
+        label="answer.claude",
+    )
+    # aclosing: an outer cancel must reach anthropic_text's finally, which
+    # closes the HTTP response so an abandoned generation stops billing.
+    async with aclosing(anthropic_text(stream, on_usage)) as texts:
+        async for text in texts:
+            yield text
 
 
 async def _stream_deepseek(
@@ -250,6 +327,7 @@ async def _stream_deepseek(
     prior: tuple[PriorTurn, ...],
     *,
     model: str | None = None,
+    on_usage: UsageCallback | None = None,
 ) -> AsyncIterator[str]:
     if not settings.deepseek_api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
@@ -261,12 +339,9 @@ async def _stream_deepseek(
         model=model or settings.deepseek_model,
         messages=_openai_messages(system, user, prior),
         stream=True,
-        temperature=0.4,
-        max_tokens=1500,
+        stream_options=OPENAI_STREAM_OPTIONS,
+        temperature=ANSWER_TEMPERATURE,
+        max_tokens=ANSWER_MAX_TOKENS,
     )
-    async for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        if delta and delta.content:
-            yield delta.content
+    async for text in openai_text(stream, on_usage):
+        yield text

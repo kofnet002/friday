@@ -1,4 +1,5 @@
-import { MODEL_CATALOG } from '@friday/shared-types';
+import { isReasoningEffort, providerForModel } from '@friday/shared-types';
+import type { ReasoningEffort } from '@friday/shared-types';
 import type {
   AnswerProvider,
   CodingLanguage,
@@ -12,14 +13,18 @@ import type {
 const SESSION_ID_KEY = 'friday.session.id';
 const PROVIDER_KEY = 'friday.session.provider';
 const MODEL_KEY = 'friday.session.model';
+const EFFORT_KEY = 'friday.session.effort';
 const CODING_LANGUAGE_KEY = 'friday.session.coding_language';
 const QD_MODEL_KEY = 'friday.session.qd_model';
+// Presets shown in the QD dropdown. Any resolvable ID is also accepted
+// (Claude / DeepSeek need their API key on the backend).
 const QD_MODELS: readonly QdModel[] = [
-  'gemini-2.5-flash-lite',
+  'gemini-3.5-flash-lite',
   'gemini-2.5-flash',
   'gemini-2.5-pro',
   'gpt-4o-mini',
   'gpt-4o',
+  'claude-haiku-5-5',
 ];
 const CODING_LANGUAGES: readonly CodingLanguage[] = [
   'Python',
@@ -66,13 +71,26 @@ export function setProviderPreference(p: AnswerProvider): void {
 export function getModelPreference(): string {
   if (typeof window === 'undefined') return 'gemini-2.5-flash';
   const raw = window.localStorage.getItem(MODEL_KEY);
-  return MODEL_CATALOG.some((model) => model.id === raw) ? raw! : 'gemini-2.5-flash';
+  // Any resolvable ID is valid — custom models persist like catalog ones.
+  return raw && providerForModel(raw) ? raw : 'gemini-2.5-flash';
 }
 
 export function setModelPreference(model: string): void {
   if (typeof window === 'undefined') return;
-  if (MODEL_CATALOG.some((entry) => entry.id === model))
-    window.localStorage.setItem(MODEL_KEY, model);
+  if (providerForModel(model)) window.localStorage.setItem(MODEL_KEY, model);
+}
+
+/** null = provider default (no explicit reasoning effort). */
+export function getEffortPreference(): ReasoningEffort | null {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(EFFORT_KEY);
+  return isReasoningEffort(raw) ? raw : null;
+}
+
+export function setEffortPreference(effort: ReasoningEffort | null): void {
+  if (typeof window === 'undefined') return;
+  if (effort) window.localStorage.setItem(EFFORT_KEY, effort);
+  else window.localStorage.removeItem(EFFORT_KEY);
 }
 
 export function getCodingLanguagePreference(): CodingLanguage {
@@ -92,12 +110,10 @@ export function setCodingLanguagePreference(lang: CodingLanguage): void {
 export const ALL_CODING_LANGUAGES = CODING_LANGUAGES;
 
 export function getQdModelPreference(): QdModel {
-  if (typeof window === 'undefined') return 'gemini-2.5-flash-lite';
+  if (typeof window === 'undefined') return 'gemini-3.5-flash-lite';
   const raw = window.localStorage.getItem(QD_MODEL_KEY);
-  if (raw && (QD_MODELS as readonly string[]).includes(raw)) {
-    return raw as QdModel;
-  }
-  return 'gemini-2.5-flash-lite';
+  if (raw && providerForModel(raw)) return raw;
+  return 'gemini-3.5-flash-lite';
 }
 
 export function setQdModelPreference(model: QdModel): void {
@@ -127,6 +143,7 @@ export async function saveContext(payload: {
   extra_instructions?: string;
   interview_type?: InterviewType | null;
   default_provider?: AnswerProvider | null;
+  default_model?: string | null;
 }): Promise<boolean> {
   // /api/sessions handles the fuller schema (interview_type, default_provider).
   const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions`, {
@@ -191,13 +208,19 @@ export interface SessionUsageSummary {
 export async function patchSessionProvider(
   sessionId: string,
   provider: AnswerProvider,
+  model?: string,
 ): Promise<boolean> {
   if (!sessionId) return false;
   try {
     const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions/${sessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId, default_provider: provider }),
+      // default_model lets screen extraction use the picked model too.
+      body: JSON.stringify({
+        session_id: sessionId,
+        default_provider: provider,
+        default_model: model,
+      }),
     });
     return res.ok;
   } catch {

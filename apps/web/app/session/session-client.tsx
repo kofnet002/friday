@@ -16,6 +16,7 @@ import {
   Download,
   Eraser,
   Keyboard,
+  Power,
   Loader2,
   MoreVertical,
   Move,
@@ -25,7 +26,7 @@ import {
   ShieldCheck,
   Square,
 } from 'lucide-react';
-import { MODEL_CATALOG } from '@friday/shared-types';
+import { providerForModel } from '@friday/shared-types';
 import type {
   AnswerMessage,
   AnswerProvider,
@@ -37,6 +38,7 @@ import type {
   QAHistoryRow,
   QdModel,
   QdState,
+  ReasoningEffort,
   TranscriptEvent,
   WsServerMessage,
 } from '@friday/shared-types';
@@ -51,12 +53,14 @@ import {
   getCodingLanguagePreference,
   getOrCreateSessionId,
   getProviderPreference,
+  getEffortPreference,
   getModelPreference,
   getQdModelPreference,
   patchSessionProvider,
   sessionExportUrl,
   setCodingLanguagePreference,
   setProviderPreference,
+  setEffortPreference,
   setModelPreference,
   setQdModelPreference,
   type SessionUsageSummary,
@@ -150,6 +154,9 @@ export function SessionClient() {
   const [model, setModel] = useState<string>(getModelPreference);
   const modelRef = useRef(model);
   modelRef.current = model;
+  const [effort, setEffort] = useState<ReasoningEffort | null>(getEffortPreference);
+  const effortRef = useRef(effort);
+  effortRef.current = effort;
   const [entries, setEntries] = useState<AnswerEntry[]>([]);
   const [entryIndex, setEntryIndex] = useState(-1);
   const [panelError, setPanelError] = useState<string | null>(null);
@@ -159,7 +166,7 @@ export function SessionClient() {
   // Question-detection model + lifecycle state. The model is a user
   // preference; the state reflects the per-session detector's current
   // phase (idle/listening/detecting) and drives the Listen-panel pill.
-  const [qdModel, setQdModelState] = useState<QdModel>('gemini-2.5-flash-lite');
+  const [qdModel, setQdModelState] = useState<QdModel>('gemini-3.5-flash-lite');
   const [qdState, setQdState] = useState<QdState>('idle');
   // Non-null when the backend has fallen back from Gemini to GPT-4o for
   // QD (typically a 429). Reset when the user explicitly picks a new
@@ -171,7 +178,7 @@ export function SessionClient() {
   // Briefly highlights the status pill when the detector saw a question
   // and suppressed it as a duplicate. Auto-clears.
   const [qdDedupAt, setQdDedupAt] = useState<number>(0);
-  const qdModelRef = useRef<QdModel>('gemini-2.5-flash-lite');
+  const qdModelRef = useRef<QdModel>('gemini-3.5-flash-lite');
   qdModelRef.current = qdModel;
 
   // Coding panel state
@@ -840,6 +847,7 @@ export function SessionClient() {
       language: lang,
       provider: providerRef.current,
       model: modelRef.current,
+      effort: effortRef.current ?? undefined,
       // When the user fires "Refine with feedback" we forward the prior
       // attempt + their note so the backend flips into refine framing.
       // Empty strings are normalized to undefined so they don't trigger
@@ -903,6 +911,7 @@ export function SessionClient() {
       language: codingLanguageRef.current,
       provider: providerRef.current,
       model: modelRef.current,
+      effort: effortRef.current ?? undefined,
       // Refine inputs — when present the agent starts from the failed
       // attempt + feedback (diagnose) instead of solving from scratch.
       feedback: opts.feedback?.trim() || undefined,
@@ -975,7 +984,14 @@ export function SessionClient() {
     if (shouldAutoSolve) {
       const ws = codingWsRef.current;
       if (ws && ws.isOpen()) {
-        ws.send({ type: 'solve', problem, language: lang, provider: providerRef.current });
+        ws.send({
+          type: 'solve',
+          problem,
+          language: lang,
+          provider: providerRef.current,
+          model: modelRef.current,
+          effort: effortRef.current ?? undefined,
+        });
       }
     }
   };
@@ -1057,6 +1073,7 @@ export function SessionClient() {
       thread_id: threadId,
       provider: providerRef.current,
       model: modelRef.current,
+      effort: effortRef.current ?? undefined,
       auto_detected: opts.autoDetected,
     });
   };
@@ -1109,6 +1126,8 @@ export function SessionClient() {
       messages: nextMessages.slice(0, -1),
       thread_id: current.threadId,
       provider: providerRef.current,
+      model: modelRef.current,
+      effort: effortRef.current ?? undefined,
     });
   };
 
@@ -1275,14 +1294,21 @@ export function SessionClient() {
   };
 
   const onModelChange = (id: string) => {
-    const option = MODEL_CATALOG.find((entry) => entry.id === id);
-    if (!option) return;
+    // Any resolvable ID works (catalog or custom); its provider drives the
+    // provider badge + vision routing.
+    const nextProvider = providerForModel(id);
+    if (!nextProvider) return;
     setModel(id);
     setModelPreference(id);
-    setProvider(option.provider);
-    setProviderPreference(option.provider);
-    void window.friday?.coding?.setProvider?.(option.provider);
-    if (sessionId) void patchSessionProvider(sessionId, option.provider);
+    setProvider(nextProvider);
+    setProviderPreference(nextProvider);
+    void window.friday?.coding?.setProvider?.(nextProvider);
+    if (sessionId) void patchSessionProvider(sessionId, nextProvider, id);
+  };
+
+  const onEffortChange = (next: ReasoningEffort | null) => {
+    setEffort(next);
+    setEffortPreference(next);
   };
 
   const onQdModelChange = (m: QdModel) => {
@@ -1487,6 +1513,8 @@ export function SessionClient() {
       hint: slice.hint || undefined,
       language: codingLanguageRef.current,
       provider: providerRef.current,
+      model: modelRef.current,
+      effort: effortRef.current ?? undefined,
     });
   };
 
@@ -1705,6 +1733,8 @@ export function SessionClient() {
             onProviderChange={onProviderChange}
             model={model}
             onModelChange={onModelChange}
+            effort={effort}
+            onEffortChange={onEffortChange}
             qdModel={qdModel}
             onQdModelChange={onQdModelChange}
             qdState={qdState}
@@ -1754,6 +1784,8 @@ export function SessionClient() {
             onProviderChange={onProviderChange}
             model={model}
             onModelChange={onModelChange}
+            effort={effort}
+            onEffortChange={onEffortChange}
             tabs={codingTabs}
             activeFingerprint={activeFingerprint}
             onSelectTab={setActiveFingerprint}
@@ -1947,6 +1979,7 @@ export function SessionClient() {
                 exportSession();
                 setOverflowOpen(false);
               }}
+              onQuit={inElectron ? () => void window.friday?.appWindow.quitApp() : undefined}
             />
 
             {/* Drag handle — the entire .session-bar already has
@@ -2487,6 +2520,7 @@ function OverflowMenu({
   onClearTranscript,
   onShortcuts,
   onExport,
+  onQuit,
 }: {
   open: boolean;
   onOpenChange: (next: boolean) => void;
@@ -2508,6 +2542,8 @@ function OverflowMenu({
   onClearTranscript: () => void;
   onShortcuts: () => void;
   onExport: () => void;
+  /** Desktop app only — the browser has nothing to quit. */
+  onQuit?: () => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -2674,6 +2710,22 @@ function OverflowMenu({
               />
               <span>Export session</span>
             </button>
+            {onQuit ? (
+              <button
+                type="button"
+                onClick={onQuit}
+                className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/10"
+              >
+                <span className="flex items-center gap-2">
+                  <Power
+                    className="h-3.5 w-3.5 text-neutral-500 dark:text-neutral-400"
+                    aria-hidden
+                  />
+                  <span>Quit Friday</span>
+                </span>
+                <span className="font-mono text-[10px] text-neutral-500">⌘⌥Q</span>
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}

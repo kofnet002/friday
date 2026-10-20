@@ -104,7 +104,7 @@ running heavy tests today, switch to a different model:
 
 ```
 GEMINI_MODEL=gemini-2.5-flash
-QUESTION_DETECTION_MODEL=gemini-2.5-flash-lite
+QUESTION_DETECTION_MODEL=gemini-3.5-flash-lite
 VISION_EXTRACTION_MODEL=gemini-2.5-flash
 ```
 

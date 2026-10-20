@@ -7,8 +7,11 @@ streaming calls — we pass ``None`` and just record input usage in that case.
 
 from __future__ import annotations
 
+import json
+
 from app.db import log_usage
 from app.logging import log
+from app.settings import settings
 
 # USD per 1M tokens. Rough approximations; refine as needed.
 # PRICING: dict[str, tuple[float, float]] = {
@@ -45,8 +48,61 @@ ANSWER_PROMPT_OVERHEAD_TOKENS = 2500
 VISION_IMAGE_TOKENS = 1500
 
 
-def _cost(model: str, input_tokens: int, output_tokens: int | None) -> float | None:
+# Uncatalogued Claude IDs (e.g. a newer generation) are priced at their tier's
+# list price above. Approximate — set MODEL_PRICING for exact figures.
+_FAMILY_PRICING: tuple[tuple[str, str], ...] = (
+    ("claude-opus-", "claude-opus-4-8"),
+    ("claude-sonnet-", "claude-sonnet-4-6"),
+    ("claude-haiku-", "claude-haiku-4-5"),
+)
+
+
+def _env_pricing() -> dict[str, tuple[float, float]]:
+    """MODEL_PRICING env override: JSON {"model": [in_per_1m, out_per_1m]}.
+    Malformed entries are skipped (logged) rather than breaking accounting."""
+    raw = settings.model_pricing.strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("usage.model_pricing_invalid", error="not valid JSON")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, tuple[float, float]] = {}
+    for model, rates in data.items():
+        if (
+            isinstance(rates, list)
+            and len(rates) == 2
+            and all(isinstance(r, int | float) for r in rates)
+        ):
+            out[str(model)] = (float(rates[0]), float(rates[1]))
+    return out
+
+
+# Marks a model label that ran on the Claude subscription (not metered per
+# token) so it's never priced, even though its ID matches a Claude tier.
+SUBSCRIPTION_SUFFIX = " (subscription)"
+
+
+def _price_for(model: str) -> tuple[float, float] | None:
+    if model.endswith(SUBSCRIPTION_SUFFIX):
+        return None
+    override = _env_pricing().get(model)
+    if override:
+        return override
     price = PRICING.get(model)
+    if price:
+        return price
+    for prefix, reference in _FAMILY_PRICING:
+        if model.startswith(prefix):
+            return PRICING[reference]
+    return None
+
+
+def _cost(model: str, input_tokens: int, output_tokens: int | None) -> float | None:
+    price = _price_for(model)
     if not price:
         return None
     in_rate, out_rate = price

@@ -377,7 +377,8 @@ async def test_set_model_clears_fallback(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_set_model_rejects_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     det, _rec = _make_detector(monkeypatch)
-    assert det.set_model("gpt-5-omega") is False
+    # No allowlist any more — only IDs whose provider can't be resolved fail.
+    assert det.set_model("omega-model") is False
     assert det.set_model("gemini-2.5-flash") is True
     assert det.set_model("gpt-4o-mini") is True
 
@@ -713,3 +714,59 @@ async def test_close_does_not_hang_on_slow_callback(
     await det.close()
     elapsed = time.time() - start
     assert elapsed < 1.0, f"close() took {elapsed:.2f}s, should be < CLOSE_TIMEOUT_S"
+
+
+# ─── model-agnostic QD ──────────────────────────────────────────────────────
+
+
+def test_qd_accepts_any_gemini_or_openai_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    det, _ = _make_detector(monkeypatch)
+    assert det.set_model("gemini-3-flash-preview") is True
+    assert det.set_model("gpt-5.5-mini") is True
+    assert det.set_model("not a model!") is False
+
+
+def test_qd_accepts_claude_and_deepseek_only_with_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    det, _ = _make_detector(monkeypatch)
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+    monkeypatch.setattr(settings, "deepseek_api_key", "")
+    assert det.set_model("claude-haiku-5-5") is False
+    assert det.set_model("deepseek-chat") is False
+    monkeypatch.setattr(settings, "anthropic_api_key", "k")
+    monkeypatch.setattr(settings, "deepseek_api_key", "k")
+    assert det.set_model("claude-haiku-5-5") is True
+    assert det.set_model("deepseek-chat") is True
+
+
+def test_direct_qd_model_is_not_overridden_by_gemini_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    det, _ = _make_detector(monkeypatch)
+    monkeypatch.setattr(settings, "anthropic_api_key", "k")
+    assert det.set_model("claude-haiku-5-5")
+    det._fallback_active = True
+    assert det._effective_qd_model() == "claude-haiku-5-5"
+    assert det._should_probe_gemini() is False
+
+
+async def test_direct_qd_model_routes_to_direct_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    det, _ = _make_detector(monkeypatch)
+    calls: list[str] = []
+
+    async def fake_direct(prompt_kind: str, system: str, user: str, model: str, **_: Any) -> dict:
+        calls.append(model)
+        return {"is_question": False}
+
+    monkeypatch.setattr(det, "_call_direct_json", fake_direct)
+    result = await det._call_qd_llm([], "claude-haiku-5-5")
+
+    assert result == {"is_question": False}
+    assert calls == ["claude-haiku-5-5"]
+
+
+def test_openai_detection_model_helper_uses_prefix_inference() -> None:
+    assert _is_openai_qd_model("o3-mini") is True
+    assert _is_openai_qd_model("openai:my-ft") is True
+    assert _is_openai_qd_model("claude-haiku-5-5") is False

@@ -6,11 +6,14 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, Literal
 
+from anthropic import AsyncAnthropic
 from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 from app.logging import log
+from app.models.catalog import Effort, Provider, resolve_model
+from app.models.params import is_openai_reasoning_model, openai_options
 from app.prompts.follow_up_classification import (
     FOLLOW_UP_SYSTEM_PROMPT,
     follow_up_user_prompt,
@@ -145,24 +148,58 @@ CLOSE_TIMEOUT_S = 5.0
 # strong external signal that the question is complete enough to grade.
 TriggeredBy = Literal["idle", "ceiling", "speaker_turn"]
 
-# Models the user is allowed to pick for question detection. Kept short on
-# purpose — anything outside this set is rejected with a warning. Both
-# Gemini (default) and OpenAI options are accepted so a power user can
-# pre-emptively pick gpt-4o-mini when Gemini's free-tier quota is
-# exhausted, rather than waiting for the first 429.
-ALLOWED_QD_MODELS: frozenset[str] = frozenset(
-    {
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gpt-4o-mini",
-        "gpt-4o",
-    }
-)
+# Any resolvable model ID can run QD. Gemini and OpenAI models go through
+# the quota-fallback machinery below (Gemini → OpenAI on 429); Claude and
+# DeepSeek ("direct" providers) are called as-is with no fallback — the user
+# explicitly picked a paid provider, so there's no free-tier quota to dodge.
+_DIRECT_QD_PROVIDERS: frozenset[Provider] = frozenset({"claude", "deepseek"})
+
+
+def _qd_provider(model: str) -> Provider | None:
+    selection = resolve_model(model, provider_hint=None)
+    return selection.provider if selection else None
+
+
+def _qd_model_id(model: str) -> str:
+    """Wire model ID (strips an explicit `provider:` prefix)."""
+    selection = resolve_model(model, provider_hint=None)
+    return selection.model if selection else model
 
 
 def _is_openai_qd_model(model: str) -> bool:
-    return model.startswith("gpt-")
+    return _qd_provider(model) == "openai"
+
+
+def _is_direct_qd_model(model: str) -> bool:
+    return _qd_provider(model) in _DIRECT_QD_PROVIDERS
+
+
+def _provider_configured(provider: Provider) -> bool:
+    if provider == "gemini":
+        return bool(settings.gemini_api_key)
+    if provider == "openai":
+        return bool(settings.openai_api_key)
+    if provider == "claude":
+        # API key only: the subscription CLI is far too slow for QD's
+        # sub-second budget.
+        return bool(settings.anthropic_api_key)
+    return bool(settings.deepseek_api_key)
+
+
+def _openai_qd_options(model: str, max_tokens: int) -> dict[str, Any]:
+    # Reasoning models spend output tokens thinking; low effort + the bumped
+    # cap keeps a tiny classification from coming back empty.
+    effort: Effort | None = "low" if is_openai_reasoning_model(model) else None
+    return openai_options(model, effort=effort, max_tokens=max_tokens, temperature=0.1)
+
+
+def _strip_json_fence(text: str) -> str:
+    """Claude has no JSON mode and sometimes fences its reply."""
+    text = text.strip()
+    if text.startswith("```"):
+        body = text.split("\n", 1)[1] if "\n" in text else ""
+        text = body.rsplit("```", 1)[0].strip()
+    return text
 
 # How recent the prior question must be for follow-up classification to fire.
 # Interviewers don't usually wait minutes between a question and its
@@ -348,7 +385,7 @@ class QuestionDetector:
         - Otherwise the user's selection (or the configured default) is honored,
           which may itself be an OpenAI model — that's a valid choice.
         """
-        if self._fallback_active:
+        if self._fallback_active and not _is_direct_qd_model(self._model):
             return settings.question_detection_fallback_model
         return self._model
 
@@ -360,11 +397,13 @@ class QuestionDetector:
         Gemini is still rate-limited we'll just fall back again on the next
         call.
         """
-        if model not in ALLOWED_QD_MODELS:
+        provider = _qd_provider(model)
+        if provider is None or not _provider_configured(provider):
             log.warning(
                 "question_detection.model_rejected",
                 session_id=self.session_id,
                 model=model,
+                reason="unresolvable" if provider is None else f"no {provider} credential",
             )
             return False
         was_in_fallback = self._fallback_active
@@ -557,10 +596,11 @@ class QuestionDetector:
         # Need at least one LLM client to do anything useful. We accept
         # OpenAI-only mode (someone running entirely on GPT-4o) — the
         # fallback path treats absent-Gemini as permanently in fallback.
-        if self._client is None and self._openai_client is None:
+        direct = _is_direct_qd_model(self._model)
+        if self._client is None and self._openai_client is None and not direct:
             log.warning("question_detection.skip_no_key")
             return
-        if self._client is None and not self._fallback_active:
+        if self._client is None and not self._fallback_active and not direct:
             # OpenAI-only deployments don't have a Gemini key to start
             # from; pretend the fallback is already armed so _call_qd_llm
             # routes straight to GPT-4o.
@@ -811,7 +851,7 @@ class QuestionDetector:
             return False
         if self._client is None:
             return False
-        if _is_openai_qd_model(self._model):
+        if _qd_provider(self._model) != "gemini":
             return False
         interval = settings.question_detection_probe_interval
         if interval <= 0:
@@ -828,7 +868,16 @@ class QuestionDetector:
         - OpenAI model → OpenAI directly.
         - Gemini model → Gemini with sticky-fallback-on-429. Periodic
           probes try Gemini again when in fallback (quota may have reset).
+        - Claude / DeepSeek model → that provider directly, no fallback.
         """
+        if _is_direct_qd_model(model_snapshot):
+            return await self._call_direct_json(
+                "question_detection",
+                QUESTION_DETECTION_SYSTEM_PROMPT,
+                question_detection_user_prompt(utterances),
+                model_snapshot,
+                max_tokens=256,
+            )
         # Probe path: in fallback, but enough calls have succeeded that
         # we should try Gemini again. If it works, lift fallback. Note
         # the probe always tries the user's *preferred* Gemini model
@@ -891,6 +940,10 @@ class QuestionDetector:
     ) -> dict[str, Any]:
         """Same routing as _call_qd_llm but for the follow-up classifier."""
         user = follow_up_user_prompt(prior_question, prior_answer, new_question)
+        if _is_direct_qd_model(model_snapshot):
+            return await self._call_direct_json(
+                "follow_up", FOLLOW_UP_SYSTEM_PROMPT, user, model_snapshot, max_tokens=128
+            )
         if _is_openai_qd_model(model_snapshot):
             return await self._call_openai_follow_up_with_usage(
                 user, model_snapshot,
@@ -921,7 +974,7 @@ class QuestionDetector:
         assert self._client is not None
         user_prompt = question_detection_user_prompt(utterances)
         response = await self._client.aio.models.generate_content(
-            model=model,
+            model=_qd_model_id(model),
             contents=user_prompt,
             config=genai_types.GenerateContentConfig(
                 system_instruction=QUESTION_DETECTION_SYSTEM_PROMPT,
@@ -939,7 +992,7 @@ class QuestionDetector:
     ) -> dict[str, Any]:
         assert self._client is not None
         response = await self._client.aio.models.generate_content(
-            model=model,
+            model=_qd_model_id(model),
             contents=user,
             config=genai_types.GenerateContentConfig(
                 system_instruction=FOLLOW_UP_SYSTEM_PROMPT,
@@ -962,14 +1015,13 @@ class QuestionDetector:
         user_prompt = question_detection_user_prompt(utterances)
         try:
             response = await self._openai_client.chat.completions.create(
-                model=model,
+                model=_qd_model_id(model),
                 messages=[
                     {"role": "system", "content": QUESTION_DETECTION_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.1,
-                max_tokens=256,
                 response_format={"type": "json_object"},
+                **_openai_qd_options(model, 256),
             )
         except Exception as exc:  # noqa: BLE001
             if _is_quota_error(exc):
@@ -996,14 +1048,13 @@ class QuestionDetector:
             return {}
         try:
             response = await self._openai_client.chat.completions.create(
-                model=model,
+                model=_qd_model_id(model),
                 messages=[
                     {"role": "system", "content": FOLLOW_UP_SYSTEM_PROMPT},
                     {"role": "user", "content": user},
                 ],
-                temperature=0.1,
-                max_tokens=128,
                 response_format={"type": "json_object"},
+                **_openai_qd_options(model, 128),
             )
         except Exception as exc:  # noqa: BLE001
             if _is_quota_error(exc):
@@ -1018,6 +1069,50 @@ class QuestionDetector:
             return {}
         text = (response.choices[0].message.content or "").strip()
         return _safe_json_dict(text, log_key="follow_up.bad_json")
+
+    async def _call_direct_json(
+        self, kind: str, system: str, user: str, model: str, *, max_tokens: int
+    ) -> dict[str, Any]:
+        """QD / follow-up classification on a direct provider (Claude or
+        DeepSeek). Records usage; returns {} on an unparseable reply."""
+        provider = _qd_provider(model)
+        model_id = _qd_model_id(model)
+        if provider == "claude":
+            client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+            response = await client.messages.create(
+                model=model_id,
+                max_tokens=max_tokens,
+                system=system + "\n\nRespond with ONLY the JSON object.",
+                messages=[{"role": "user", "content": user}],
+            )
+            text = "".join(b.text for b in response.content if b.type == "text")
+            await record_qd_call(
+                session_id=self.session_id,
+                provider="claude",
+                model=model_id,
+                kind=kind,
+                input_tokens=int(response.usage.input_tokens or 0),
+                output_tokens=response.usage.output_tokens,
+            )
+            return _safe_json_dict(_strip_json_fence(text), log_key=f"{kind}.bad_json")
+        ds_client = AsyncOpenAI(
+            api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url
+        )
+        ds_response = await ds_client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.1,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        await self._record_openai_usage(ds_response, model_id, kind=kind, provider="deepseek")
+        if not ds_response.choices:
+            return {}
+        text = (ds_response.choices[0].message.content or "").strip()
+        return _safe_json_dict(text, log_key=f"{kind}.bad_json")
 
     async def _record_gemini_usage(
         self, response: Any, model: str, *, kind: str
@@ -1038,7 +1133,7 @@ class QuestionDetector:
         )
 
     async def _record_openai_usage(
-        self, response: Any, model: str, *, kind: str
+        self, response: Any, model: str, *, kind: str, provider: str = "openai"
     ) -> None:
         usage = getattr(response, "usage", None)
         input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -1048,7 +1143,7 @@ class QuestionDetector:
         )
         await record_qd_call(
             session_id=self.session_id,
-            provider="openai",
+            provider=provider,
             model=model,
             kind=kind,
             input_tokens=input_tokens,

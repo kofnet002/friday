@@ -21,12 +21,7 @@ export type ChatEventName = 'token' | 'done' | 'error';
  *  `ALLOWED_QD_MODELS` in app.services.question_detection. Both Gemini
  *  (default) and OpenAI options are allowed so a power user can
  *  pre-emptively pick gpt-4o-mini when Gemini's quota is exhausted. */
-export type QdModel =
-  | 'gemini-2.5-flash-lite'
-  | 'gemini-2.5-flash'
-  | 'gemini-2.5-pro'
-  | 'gpt-4o-mini'
-  | 'gpt-4o';
+export type QdModel = string;
 
 /** Control messages sent from client → `/ws/transcribe`. */
 export type WsControlMessage =
@@ -88,8 +83,16 @@ export interface QuestionDetectedEvent {
 // ─── /ws/answer ──────────────────────────────────────────────────────────────
 
 export type AnswerProvider = 'gemini' | 'openai' | 'deepseek' | 'claude';
-export type { ModelCapability, ModelOption } from './model-catalog';
-export { MODEL_CATALOG, modelOption } from './model-catalog';
+import type { ReasoningEffort } from './model-catalog';
+export type { ModelCapability, ModelOption, ReasoningEffort } from './model-catalog';
+export {
+  MODEL_CATALOG,
+  REASONING_EFFORTS,
+  isReasoningEffort,
+  isValidModelId,
+  modelOption,
+  providerForModel,
+} from './model-catalog';
 
 export interface AnswerSessionContext {
   resume_text?: string;
@@ -125,6 +128,7 @@ export type AnswerClientMessage =
       thread_id?: string;
       provider: AnswerProvider;
       model?: string;
+      effort?: ReasoningEffort;
       session_context?: AnswerSessionContext;
       auto_detected?: boolean;
     }
@@ -196,6 +200,7 @@ export interface SessionRow {
   resume_text?: string | null;
   interview_type?: InterviewType | null;
   default_provider?: AnswerProvider | null;
+  default_model?: string | null;
   has_resume?: number | boolean;
   created_at: number;
 }
@@ -269,6 +274,7 @@ export type CodingSolutionClientMessage =
   | {
       type: 'solve';
       model?: string;
+      effort?: ReasoningEffort;
       /** Defaults to 'solve' when absent — keeps legacy clients working. */
       mode?: CodingMode;
       /** Required for solve and tests modes. */

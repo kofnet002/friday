@@ -10,10 +10,15 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const { EventEmitter } = require('node:events');
+const { app } = require('electron');
 
 const FRAME_BYTES = 3200; // 16000 Hz * 0.1 s * 2 bytes/sample * 1 channel
 
-const HELPER_PATH = path.join(__dirname, 'swift', '.build', 'release', 'friday-audio');
+// Packaged builds ship the helper in Contents/Resources (it can't run from
+// inside app.asar).
+const HELPER_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, 'friday-audio')
+  : path.join(__dirname, 'swift', '.build', 'release', 'friday-audio');
 
 class AudioSupervisor extends EventEmitter {
   constructor() {

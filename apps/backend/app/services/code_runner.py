@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import resource
 import shutil
@@ -331,14 +332,46 @@ def _set_limits() -> None:
             pass
 
 
+_XCODE_PYTHON_STUB = "/usr/bin/python3"
+
+
+def _python_interpreter() -> list[str] | None:
+    """Interpreter for the Python harness. A PyInstaller build's sys.executable
+    is the backend binary itself, so the packaged app uses the system python3
+    instead (None when there isn't one)."""
+    if not getattr(sys, "frozen", False):
+        return [sys.executable, "-I"]
+    python = shutil.which("python3")
+    if python is None:
+        return None
+    # Without the Command Line Tools /usr/bin/python3 is a stub that only
+    # pops an "install developer tools" dialog.
+    if python == _XCODE_PYTHON_STUB and not _command_line_tools_installed():
+        return None
+    return [python, "-I"]
+
+
+def _command_line_tools_installed() -> bool:
+    try:
+        return subprocess.run(["xcode-select", "-p"], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _harness_env() -> dict[str, str]:
+    """Backend env minus FRIDAY_ENV_FILE, so solution code isn't handed the
+    location of the API-keys file."""
+    return {k: v for k, v in os.environ.items() if k != "FRIDAY_ENV_FILE"}
+
+
 def _run_blocking(
-    harness: str, tests_json: str, *, filename: str = "harness.py", argv0: list[str] | None = None
+    harness: str, tests_json: str, *, filename: str = "harness.py", argv0: list[str]
 ) -> list[dict[str, Any]]:
     """Write the harness to a temp file, run it sandboxed, return the parsed
     JSON results. Raises on a harness-level failure (syntax error in the
-    solution, crash before producing JSON). `argv0` selects the interpreter
-    (default: isolated Python; JS passes ["node"])."""
-    cmd_prefix = argv0 if argv0 is not None else [sys.executable, "-I"]
+    solution, crash before producing JSON). `argv0` is the interpreter
+    command (isolated Python, or ["node"] for JS)."""
+    cmd_prefix = argv0
     with tempfile.TemporaryDirectory(prefix="friday-verify-") as tmp:
         harness_path = f"{tmp}/{filename}"
         with open(harness_path, "w", encoding="utf-8") as fh:
@@ -351,6 +384,7 @@ def _run_blocking(
             timeout=_WALL_TIMEOUT_S,
             preexec_fn=_set_limits,
             cwd=tmp,
+            env=_harness_env(),
         )
     out = proc.stdout.strip()
     if not out:
@@ -384,6 +418,9 @@ async def run_solution_tests(
         )
     if is_js and shutil.which("node") is None:
         return TestRunResult(ran=False, skip_reason="node is not installed — JS not verified")
+    python_cmd = _python_interpreter() if is_python else None
+    if is_python and python_cmd is None:
+        return TestRunResult(ran=False, skip_reason="python3 is not installed — Python not verified")
     if not examples:
         return TestRunResult(ran=False, skip_reason="no examples to verify against")
 
@@ -404,7 +441,7 @@ async def run_solution_tests(
         if entry is None:
             return TestRunResult(ran=False, skip_reason="couldn't find a function to call")
         harness = _build_harness(code, entry[0], entry[1])
-        run_kwargs: dict[str, Any] = {}
+        run_kwargs: dict[str, Any] = {"argv0": python_cmd}
     else:
         entry_js = _find_entry_js(code)
         if entry_js is None:

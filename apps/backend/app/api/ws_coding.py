@@ -10,6 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app import session_bus
 from app.db import record_agent_trace, record_coding_solution
 from app.logging import log
+from app.models.catalog import Provider, parse_effort, resolve_model
 from app.prompts.coding_modes import CodingMode
 from app.redis_client import store_solution
 from app.services.code_runner import run_solution_tests
@@ -20,13 +21,13 @@ from app.services.coding_agent import (
 )
 from app.services.coding_extraction import problem_fingerprint
 from app.services.coding_solution import (
-    Provider,
     resolved_model,
     should_use_deep,
     stream_coding,
 )
 from app.services.limits import check_token_budget
-from app.services.usage import record_solution_call
+from app.services.usage import SUBSCRIPTION_SUFFIX, record_solution_call
+from app.settings import settings
 
 router = APIRouter()
 
@@ -66,6 +67,8 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         send_json: Any,
         prior_solution: str | None = None,
         feedback: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> None:
         """Drive the Claude Code CLI agent for one problem.
 
@@ -80,7 +83,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 "type": "started",
                 "provider": "claude",
                 "language": language,
-                "model": "claude-code",
+                "model": f"claude-code:{model}" if model else "claude-code",
                 "mode": "agent",
             }
         )
@@ -114,6 +117,8 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 extra_instructions=extra,
                 prior_solution=prior_solution,
                 feedback=feedback,
+                model=model,
+                effort=effort,
             ):
                 if event.type == "step":
                     text = event.text.strip()
@@ -256,6 +261,22 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
 
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
+        selected_model: str | None = None
+        raw_model = request.get("model")
+        if raw_model:
+            selection = resolve_model(str(raw_model), provider_hint=provider)
+            if selection is None:
+                await send_json(
+                    {
+                        "type": "error",
+                        "message": f"Can't resolve model {raw_model!r} — use a vendor ID "
+                        "(claude-…, gpt-…, gemini-…, deepseek-…) or provider:model",
+                    }
+                )
+                return
+            provider = selection.provider
+            selected_model = selection.model
+        effort = parse_effort(request.get("effort"))
         language = str(request.get("language") or "Python")
         mode: CodingMode = request.get("mode") or "solve"
         problem = request.get("problem") or {}
@@ -319,6 +340,10 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 send_json,
                 prior_solution=prior_solution,
                 feedback=feedback,
+                # The agent is Claude-only: a picked Claude model drives it;
+                # any other pick leaves it on AGENT_MODEL. Effort applies as-is.
+                model=selected_model if provider == "claude" else None,
+                effort=effort,
             )
             return
 
@@ -327,7 +352,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         # logging report the model that will actually run, not the default
         # Flash tier.
         deep = should_use_deep(mode, problem, prior_solution, feedback)
-        model = resolved_model(provider, deep=deep)
+        model = resolved_model(provider, deep=deep, model=selected_model)
         await send_json(
             {
                 "type": "started",
@@ -358,6 +383,14 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
             )
             log.info("ws_coding.fallback", session_id=session_id, prev=prev, next=nxt, mode=mode)
 
+        # Provider-reported (input, output) tokens (incl. reasoning) for the
+        # attempt that completed. None → the char/4 estimates below.
+        reported_usage: tuple[int | None, int | None] = (None, None)
+
+        def _on_usage(input_tokens: int | None, output_tokens: int | None) -> None:
+            nonlocal reported_usage
+            reported_usage = (input_tokens, output_tokens)
+
         collected: list[str] = []
         # Rough input-token proxy. Use the largest available input source per
         # mode so the usage estimate isn't wildly off for explain/debug.
@@ -380,7 +413,10 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 extra_instructions=extra,
                 prior_solution=prior_solution if mode == "solve" else None,
                 feedback=feedback if mode == "solve" else None,
+                model=selected_model,
+                effort=effort,
                 on_fallback=_on_fallback,
+                on_usage=_on_usage,
             ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})
@@ -425,13 +461,20 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 log.warning("coding_solutions.save_failed", error=str(exc))
 
         if session_id:
-            output_tokens = max(1, len(solution_text) // 4)
+            output_tokens = reported_usage[1] or max(1, len(solution_text) // 4)
+            # Claude without an API key ran on the subscription CLI — not
+            # metered per token, so don't price it as if it were the API.
+            billed_model = (
+                f"{effective_model}{SUBSCRIPTION_SUFFIX}"
+                if effective_provider == "claude" and not settings.anthropic_api_key
+                else effective_model
+            )
             try:
                 await record_solution_call(
                     session_id=session_id,
                     provider=effective_provider,
-                    model=effective_model,
-                    input_tokens=input_tokens,
+                    model=billed_model,
+                    input_tokens=reported_usage[0] or input_tokens,
                     output_tokens=output_tokens,
                 )
             except Exception:  # noqa: BLE001

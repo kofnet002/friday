@@ -1,13 +1,13 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { MODEL_CATALOG } from '@friday/shared-types';
 import type {
   AnswerProvider,
   CodingLanguage,
   CodingMode,
   CodingTestCaseResult,
   ExtractedProblem,
+  ReasoningEffort,
 } from '@friday/shared-types';
 
 import {
@@ -37,6 +37,8 @@ import { friendlyError } from '@/lib/error-messages';
 import { Markdown, useHighlightedCode } from '@/lib/markdown';
 import { ALL_CODING_LANGUAGES } from '@/lib/session-context';
 import { cn } from '@/lib/utils';
+
+import { ModelPicker } from './model-picker';
 
 export type CodingSolutionStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error';
 
@@ -116,6 +118,8 @@ export interface CodingPanelProps {
   onProviderChange: (provider: AnswerProvider) => void;
   model: string;
   onModelChange: (model: string) => void;
+  effort: ReasoningEffort | null;
+  onEffortChange: (effort: ReasoningEffort | null) => void;
   tabs: CodingProblemTab[];
   activeFingerprint: string | null;
   onSelectTab: (fingerprint: string) => void;
@@ -156,6 +160,8 @@ export function CodingPanel({
   provider,
   model,
   onModelChange,
+  effort,
+  onEffortChange,
   tabs,
   activeFingerprint,
   onSelectTab,
@@ -195,18 +201,13 @@ export function CodingPanel({
             Coding Mode
           </span>
           <ActivePill active={active} />
-          <Select
-            value={model}
-            onChange={(e) => onModelChange(e.target.value)}
-            className="ml-auto h-8 text-xs"
-            aria-label="model"
-          >
-            {MODEL_CATALOG.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.label}
-              </option>
-            ))}
-          </Select>
+          <ModelPicker
+            model={model}
+            onModelChange={onModelChange}
+            effort={effort}
+            onEffortChange={onEffortChange}
+            className="ml-auto"
+          />
           <Select
             value={language}
             onChange={(e) => onLanguageChange(e.target.value as CodingLanguage)}

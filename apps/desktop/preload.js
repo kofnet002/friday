@@ -107,6 +107,7 @@ contextBridge.exposeInMainWorld('friday', {
     updatePreferences: (patch) => ipcRenderer.invoke('window:update_preferences', patch),
     setOpacity: (value) => ipcRenderer.invoke('window:set_opacity', value),
     setInteractive: (value) => ipcRenderer.invoke('window:set_interactive', Boolean(value)),
+    quitApp: () => ipcRenderer.invoke('window:quit_app'),
     onStatus: (cb) => {
       windowListeners.status.add(cb);
       return () => windowListeners.status.delete(cb);

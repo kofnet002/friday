@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import Field, model_validator
@@ -6,9 +7,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
 
 
+def env_file_path() -> Path:
+    """The .env to load. The packaged app has no repo root, so Electron points
+    FRIDAY_ENV_FILE at ~/Library/Application Support/Friday/.env."""
+    override = os.environ.get("FRIDAY_ENV_FILE")
+    return Path(override) if override else ROOT_ENV
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(ROOT_ENV),
+        env_file=str(env_file_path()),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -42,7 +50,8 @@ class Settings(BaseSettings):
 
     # Question detection — default to flash-lite so it doesn't share
     # gemini-2.5-flash's free-tier daily bucket with vision + answer streams.
-    question_detection_model: str = Field(default="gemini-2.5-flash-lite")
+    # (gemini-2.5-flash-lite is no longer available to new API keys.)
+    question_detection_model: str = Field(default="gemini-3.5-flash-lite")
     question_detection_silence_ms: int = Field(default=1200)
     # Hard ceiling: even if the interviewer keeps talking without a pause
     # long enough to satisfy the silence timer, fire detection this many ms
@@ -127,6 +136,11 @@ class Settings(BaseSettings):
     # is the slowest/most quota-heavy per frame — override to a faster Claude
     # (e.g. claude-haiku-4-5) if the watch loop feels sluggish.
     claude_vision_model: str = Field(default="claude-opus-4-8")
+
+    # Per-model price overrides for the cost pill, as JSON
+    # {"model-id": [input_usd_per_1M, output_usd_per_1M]}. Use it for models
+    # not in services/usage.py PRICING (custom / newer IDs).
+    model_pricing: str = Field(default="")
 
     # Persistence (SQLite for session context + resume)
     sqlite_path: str = Field(default="data/friday.db")

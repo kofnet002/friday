@@ -183,6 +183,7 @@ async def stream_claude_cli_text(
     prompt: str,
     system: str | None = None,
     model: str | None = None,
+    effort: str | None = None,
     session_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream a plain text completion from `claude -p` (no tools).
@@ -210,6 +211,8 @@ async def stream_claude_cli_text(
         cmd += ["--system-prompt", system]
     if model:
         cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
     # No --allowedTools / --dangerously-skip-permissions: in non-interactive
     # print mode the CLI can't prompt for tool approval, so it just answers in
     # text — exactly what a solve wants.

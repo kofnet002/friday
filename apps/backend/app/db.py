@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     resume_text TEXT,
     interview_type TEXT,
     default_provider TEXT,
+    default_model TEXT,
     created_at REAL NOT NULL
 );
 
@@ -112,7 +113,7 @@ async def init_db() -> None:
         await _ensure_columns(
             db,
             "sessions",
-            {"interview_type": "TEXT", "default_provider": "TEXT"},
+            {"interview_type": "TEXT", "default_provider": "TEXT", "default_model": "TEXT"},
         )
         await _ensure_columns(db, "qa_history", {"thread_id": "TEXT"})
         # Indexes that depend on migrated columns must run AFTER the
@@ -146,14 +147,15 @@ async def upsert_session(
     extra_instructions: str | None = None,
     interview_type: str | None = None,
     default_provider: str | None = None,
+    default_model: str | None = None,
 ) -> None:
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(
             """
             INSERT INTO sessions (session_id, job_title, company, language,
                                   extra_instructions, interview_type,
-                                  default_provider, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                  default_provider, default_model, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_title = COALESCE(excluded.job_title, sessions.job_title),
                 company = COALESCE(excluded.company, sessions.company),
@@ -163,7 +165,9 @@ async def upsert_session(
                 interview_type = COALESCE(excluded.interview_type,
                                           sessions.interview_type),
                 default_provider = COALESCE(excluded.default_provider,
-                                            sessions.default_provider)
+                                            sessions.default_provider),
+                default_model = COALESCE(excluded.default_model,
+                                         sessions.default_model)
             """,
             (
                 session_id,
@@ -173,6 +177,7 @@ async def upsert_session(
                 extra_instructions,
                 interview_type,
                 default_provider,
+                default_model,
                 time.time(),
             ),
         )
@@ -185,7 +190,7 @@ async def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
         async with db.execute(
             """
             SELECT session_id, job_title, company, language, interview_type,
-                   default_provider, created_at,
+                   default_provider, default_model, created_at,
                    (resume_text IS NOT NULL AND length(resume_text) > 0) AS has_resume
             FROM sessions
             ORDER BY created_at DESC

@@ -3,14 +3,16 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import {
-  MODEL_CATALOG,
   type AnswerMessage,
   type AnswerProvider,
   type QdModel,
   type QdState,
+  type ReasoningEffort,
 } from '@friday/shared-types';
 
 import { ALL_QD_MODELS } from '@/lib/session-context';
+
+import { ModelPicker } from './model-picker';
 
 import {
   Bot,
@@ -34,7 +36,6 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select } from '@/components/ui/select';
 import { friendlyError } from '@/lib/error-messages';
 import { Markdown } from '@/lib/markdown';
 import { cn } from '@/lib/utils';
@@ -46,6 +47,8 @@ export interface AnswerPanelProps {
   onProviderChange: (p: AnswerProvider) => void;
   model: string;
   onModelChange: (model: string) => void;
+  effort: ReasoningEffort | null;
+  onEffortChange: (effort: ReasoningEffort | null) => void;
   /** Model used for question detection (silence + ceiling + speaker-turn).
    *  User-selectable so they own the cost/quality tradeoff now that
    *  detection fires more often. */
@@ -101,6 +104,8 @@ export interface AnswerPanelProps {
 export function AnswerPanel({
   model,
   onModelChange,
+  effort,
+  onEffortChange,
   qdModel,
   onQdModelChange,
   qdState,
@@ -241,33 +246,24 @@ export function AnswerPanel({
           </span>
           <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
           <div className="ml-auto flex items-center gap-1.5">
-            <Select
-              value={qdModel}
-              onChange={(e) => onQdModelChange(e.target.value as QdModel)}
-              className="h-7 text-xs"
+            <ModelPicker
+              density="compact"
+              model={qdModel}
+              onModelChange={onQdModelChange}
+              options={QD_OPTIONS}
+              ariaLabel="Question detection model"
               title="Model used to detect questions in the live transcript"
-              aria-label="Question detection model"
-            >
-              {ALL_QD_MODELS.map((m) => (
-                <option key={m} value={m}>
-                  QD: {qdModelLabel(m)}
-                </option>
-              ))}
-            </Select>
+            />
             {qdError ? <QdErrorBadge reason={qdError} /> : null}
             {qdFallbackModel && !qdError ? <QdFallbackBadge model={qdFallbackModel} /> : null}
           </div>
-          <Select
-            value={model}
-            onChange={(e) => onModelChange(e.target.value)}
-            className="h-7 text-xs"
-          >
-            {MODEL_CATALOG.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.label}
-              </option>
-            ))}
-          </Select>
+          <ModelPicker
+            density="compact"
+            model={model}
+            onModelChange={onModelChange}
+            effort={effort}
+            onEffortChange={onEffortChange}
+          />
 
           {/* History pager — chevrons step through every Q&A asked this
             session (auto-detect or force-ask), so a new question never
@@ -647,20 +643,17 @@ function MenuItem({
   );
 }
 
-function qdModelLabel(model: QdModel): string {
-  switch (model) {
-    case 'gemini-2.5-flash-lite':
-      return 'Flash-Lite';
-    case 'gemini-2.5-flash':
-      return 'Flash';
-    case 'gemini-2.5-pro':
-      return 'Pro';
-    case 'gpt-4o-mini':
-      return '4o-mini';
-    case 'gpt-4o':
-      return '4o';
-  }
-}
+const QD_LABELS: Record<string, string> = {
+  'gemini-3.5-flash-lite': 'Flash-Lite 3.5',
+  'gemini-2.5-flash-lite': 'Flash-Lite 2.5',
+  'gemini-2.5-flash': 'Flash',
+  'gemini-2.5-pro': 'Pro',
+  'gpt-4o-mini': '4o-mini',
+  'gpt-4o': '4o',
+  'claude-haiku-5-5': 'Haiku 5.5',
+};
+
+const QD_OPTIONS = ALL_QD_MODELS.map((id) => ({ id, label: `QD: ${QD_LABELS[id] ?? id}` }));
 
 function QdFallbackBadge({ model }: { model: string }) {
   return (

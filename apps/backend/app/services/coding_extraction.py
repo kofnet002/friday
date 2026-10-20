@@ -14,7 +14,9 @@ from pydantic import BaseModel, ValidationError
 
 from app.db import get_session
 from app.logging import log
+from app.models.catalog import resolve_model
 from app.models.coding import ExtractedProblem
+from app.models.params import openai_options
 from app.prompts.coding_extraction import (
     CODING_EXTRACTION_SYSTEM_PROMPT,
     EXTRACTION_MAX_OUTPUT_TOKENS,
@@ -149,6 +151,42 @@ async def _resolve_provider(session_id: str, override: str | None) -> Provider:
     return "gemini"
 
 
+async def _selected_vision_model(session_id: str, provider: Provider) -> str | None:
+    """The session's picked model, if it belongs to the provider running
+    vision. None → that provider's env-configured vision model. A pinned
+    VISION_PROVIDER means "run OCR on the configured model", so the coding
+    selection is ignored then."""
+    if settings.vision_provider:
+        return None
+    sess = await get_session(session_id) or {}
+    raw = sess.get("default_model")
+    if not isinstance(raw, str) or not raw:
+        return None
+    selection = resolve_model(raw, provider_hint=None)
+    if selection is None or selection.provider != provider:
+        return None
+    return selection.model
+
+
+def _vision_chain(
+    chosen: Provider, selected_model: str | None
+) -> list[tuple[Provider, str | None]]:
+    """(provider, model) attempts in order; model None = env default. The
+    picked model goes first, then the same provider's default (the pick may
+    lack image input, e.g. a text-only model), then the other providers."""
+    chain: list[tuple[Provider, str | None]] = []
+    if selected_model:
+        chain.append((chosen, selected_model))
+    chain.append((chosen, None))
+    others: list[tuple[Provider, bool]] = [
+        ("openai", bool(settings.openai_api_key)),
+        ("gemini", bool(settings.gemini_api_key)),
+        ("claude", _claude_vision_available()),
+    ]
+    chain.extend((prov, None) for prov, ok in others if ok and prov != chosen)
+    return chain
+
+
 async def extract_problem(
     image_base64: str,
     session_id: str,
@@ -173,37 +211,36 @@ async def extract_problem(
     # detection: fall through to the other vision-capable providers instead of
     # 502-ing the frame. Claude (subscription CLI) is last — slowest, but a
     # working OCR beats none when the API providers are down.
-    chain: list[Provider] = [chosen]
-    if settings.openai_api_key and "openai" not in chain:
-        chain.append("openai")
-    if settings.gemini_api_key and "gemini" not in chain:
-        chain.append("gemini")
-    if _claude_vision_available() and "claude" not in chain:
-        chain.append("claude")
+    chain = _vision_chain(chosen, await _selected_vision_model(session_id, chosen))
 
     t0 = time.time()
     problem = None
     output_tokens: int | None = None
     model_used = ""
     last_exc: Exception | None = None
-    for attempt, prov in enumerate(chain):
+    for attempt, (prov, model) in enumerate(chain):
         if attempt:
             log.info(
                 "extraction.fallback",
                 reason="provider_failed",
-                prev=chain[attempt - 1],
+                prev=chain[attempt - 1][0],
                 next=prov,
+                model=model,
                 session_id=session_id,
             )
         try:
             if prov == "claude":
                 problem, output_tokens, model_used = await _extract_claude(
-                    image_bytes, session_id
+                    image_bytes, session_id, model=model
                 )
             elif prov == "openai":
-                problem, output_tokens, model_used = await _extract_openai(image_bytes)
+                problem, output_tokens, model_used = await _extract_openai(
+                    image_bytes, model=model
+                )
             else:
-                problem, output_tokens, model_used = await _extract_gemini(image_bytes)
+                problem, output_tokens, model_used = await _extract_gemini(
+                    image_bytes, model=model
+                )
             chosen = prov
             break
         except Exception as exc:  # try the next provider
@@ -261,11 +298,13 @@ def _parse_extraction_json(text: str) -> ExtractedProblem:
         raise RuntimeError(f"extraction schema invalid: {exc}") from exc
 
 
-async def _extract_gemini(image_bytes: bytes) -> tuple[ExtractedProblem, int | None, str]:
+async def _extract_gemini(
+    image_bytes: bytes, *, model: str | None = None
+) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     client = genai.Client(api_key=settings.gemini_api_key)
-    model = settings.vision_extraction_model
+    model = model or settings.vision_extraction_model
     response = await client.aio.models.generate_content(
         model=model,
         contents=[
@@ -300,13 +339,13 @@ def _strip_json_fence(text: str) -> str:
 
 
 async def _extract_claude(
-    image_bytes: bytes, session_id: str
+    image_bytes: bytes, session_id: str, *, model: str | None = None
 ) -> tuple[ExtractedProblem, int | None, str]:
     """Vision extraction via the Claude subscription CLI (no API key needed).
     Claude Code reads the screenshot and returns the extraction JSON."""
     from app.services.claude_cli import run_claude_cli_vision
 
-    model = settings.claude_vision_model
+    model = model or settings.claude_vision_model
     raw = await run_claude_cli_vision(
         image_bytes=image_bytes,
         system=CODING_EXTRACTION_SYSTEM_PROMPT,
@@ -349,14 +388,23 @@ class _StrictExtraction(BaseModel):
     confidence: float
 
 
-async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | None, str]:
+async def _extract_openai(
+    image_bytes: bytes, *, model: str | None = None
+) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     # Fail fast: default SDK timeout is 10min with retries — a network blip
     # would stall the frame for ages. 20s + 1 retry, then the fallback chain
     # takes over.
     client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=20.0, max_retries=1)
-    model = settings.openai_model  # gpt-4o supports vision via chat completions
+    model = model or settings.openai_model  # must accept image input
+    # Token-limit key + temperature vary by model family (gpt-5 / o-series).
+    limits = openai_options(
+        model,
+        effort=None,
+        max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+        temperature=EXTRACTION_TEMPERATURE,
+    )
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     image_url = f"data:image/jpeg;base64,{image_b64}"
     messages: list[Any] = [
@@ -377,18 +425,9 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
     # Falls back to json_object mode if this model/deployment rejects strict
     # schemas, so a schema quirk can't take OpenAI vision down entirely.
     try:
-        if model.startswith("gpt-5"):
-            parsed_response = await client.beta.chat.completions.parse(
-                model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
-                max_completion_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-                response_format=_StrictExtraction,
-            )
-        else:
-            parsed_response = await client.beta.chat.completions.parse(
-                model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
-                max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-                response_format=_StrictExtraction,
-            )
+        parsed_response = await client.beta.chat.completions.parse(
+            model=model, messages=messages, response_format=_StrictExtraction, **limits
+        )
         message = parsed_response.choices[0].message
         if message.refusal:
             raise RuntimeError(f"openai vision refusal: {message.refusal[:200]}")
@@ -402,18 +441,9 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
     except Exception as exc:  # schema rejected / SDK gap — legacy JSON mode
         log.warning("extraction.strict_schema_fallback", error=str(exc)[:200])
 
-    if model.startswith("gpt-5"):
-        response = await client.chat.completions.create(
-            model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
-            max_completion_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-            response_format={"type": "json_object"},
-        )
-    else:
-        response = await client.chat.completions.create(
-            model=model, messages=messages, temperature=EXTRACTION_TEMPERATURE,
-            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-            response_format={"type": "json_object"},
-        )
+    response = await client.chat.completions.create(
+        model=model, messages=messages, response_format={"type": "json_object"}, **limits
+    )
     if not response.choices:
         raise RuntimeError("empty openai vision response")
     text = response.choices[0].message.content or ""

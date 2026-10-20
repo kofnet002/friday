@@ -56,3 +56,6 @@ coverage/
 .nyc_output/
 
 .claude
+# Packaged-app staging (apps/desktop) and PyInstaller work dir (apps/backend)
+apps/desktop/bundle/
+apps/backend/build/

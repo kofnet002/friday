@@ -184,7 +184,9 @@ def _events_from_line(line: str) -> list[AgentEvent]:
     return events
 
 
-def _build_command() -> list[str]:
+def _build_command(model: str | None = None, effort: str | None = None) -> list[str]:
+    """CLI argv. `model`/`effort` are the panel's selection (a Claude model
+    and/or an explicit effort); unset → AGENT_MODEL / AGENT_EFFORT."""
     cmd = [
         settings.claude_cli_path,
         "-p",
@@ -211,10 +213,12 @@ def _build_command() -> list[str]:
         # Non-interactive tool execution. Safe: runs in a throwaway scratch dir
         # under the user's own subscription (see docs/agentic-coding.md).
         cmd.append("--dangerously-skip-permissions")
-    if settings.agent_model:
-        cmd += ["--model", settings.agent_model]
-    if settings.agent_effort.strip():
-        cmd += ["--effort", settings.agent_effort]
+    model = model or settings.agent_model
+    effort = effort or settings.agent_effort.strip()
+    if model:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
     return cmd
 
 
@@ -229,6 +233,15 @@ _warm_lock = asyncio.Lock()
 _warm_proc: asyncio.subprocess.Process | None = None
 _warm_workspace: str | None = None
 _warm_key: str | None = None
+# (model, effort) of the most recent run. The warm slot is spawned with it so
+# a user who picked e.g. Opus + high still gets warm starts (a slot built
+# with different flags doesn't match and is discarded).
+_warm_selection: tuple[str | None, str | None] = (None, None)
+
+
+def _remember_selection(model: str | None, effort: str | None) -> None:
+    global _warm_selection
+    _warm_selection = (model, effort)
 
 
 def _spawn_fingerprint(cmd: list[str], env: dict[str, str]) -> str:
@@ -267,7 +280,7 @@ async def prewarm_agent() -> None:
     async with _warm_lock:
         if _warm_proc is not None and _warm_proc.returncode is None:
             return
-        cmd = _build_command()
+        cmd = _build_command(*_warm_selection)
         env = resolve_agent_env(None)
         try:
             _warm_proc, _warm_workspace = await _spawn_cli(cmd, env)
@@ -314,6 +327,8 @@ async def stream_coding_agent(
     extra_instructions: str | None = None,
     prior_solution: str | None = None,
     feedback: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run the agent on a problem, yielding trace events then a final solution.
 
@@ -326,7 +341,8 @@ async def stream_coding_agent(
         raise AgentUnavailableError(reason)
 
     env = resolve_agent_env(session_id)
-    cmd = _build_command()
+    cmd = _build_command(model, effort)
+    _remember_selection(model, effort)
 
     # Starter code as a real file: the agent handles files more reliably than
     # inline snippets, and the exact signature matters (mismatch = graded

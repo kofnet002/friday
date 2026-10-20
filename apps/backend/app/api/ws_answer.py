@@ -8,10 +8,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.db import append_qa, get_session
 from app.logging import log
+from app.models.catalog import Provider, parse_effort, resolve_model
 from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import recent_transcript_text, set_last_answer
-from app.services.answer import Provider, stream_answer
-from app.models.catalog import provider_for_model
+from app.services.answer import stream_answer
 from app.services.limits import check_token_budget
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
@@ -39,6 +39,18 @@ def _extract_role_content(msg: Any) -> tuple[_Role | None, str | None]:
     return role, content
 
 
+def _default_model(provider: Provider) -> str:
+    """Env-configured model a provider uses when none was selected (also what
+    a fallback provider runs)."""
+    if provider == "gemini":
+        return settings.gemini_model
+    if provider == "deepseek":
+        return settings.deepseek_model
+    if provider == "claude":
+        return settings.anthropic_model
+    return settings.openai_model
+
+
 def _last_user_index(messages: list[Any]) -> int | None:
     for i in range(len(messages) - 1, -1, -1):
         role, _ = _extract_role_content(messages[i])
@@ -64,13 +76,22 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
 
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
-        selected_model = request.get("model")
-        if selected_model:
-            model_provider = provider_for_model(str(selected_model))
-            if model_provider is None:
-                await send_json({"type": "error", "message": f"Unknown model: {selected_model}"})
+        selected_model: str | None = None
+        raw_model = request.get("model")
+        if raw_model:
+            selection = resolve_model(str(raw_model), provider_hint=provider)
+            if selection is None:
+                await send_json(
+                    {
+                        "type": "error",
+                        "message": f"Can't resolve model {raw_model!r} — use a vendor ID "
+                        "(claude-…, gpt-…, gemini-…, deepseek-…) or provider:model",
+                    }
+                )
                 return
-            provider = model_provider
+            provider = selection.provider
+            selected_model = selection.model
+        effort = parse_effort(request.get("effort"))
         thread_id = request.get("thread_id") or None
 
         # Accept either the new threaded payload (messages: [...]) or the
@@ -149,14 +170,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         )
 
         auto_detected = bool(request.get("auto_detected", False))
-        if provider == "gemini":
-            model = settings.gemini_model
-        elif provider == "deepseek":
-            model = settings.deepseek_model
-        elif provider == "claude":
-            model = settings.anthropic_model
-        else:
-            model = settings.openai_model
+        model = selected_model or _default_model(provider)
 
         await send_json(
             {
@@ -175,14 +189,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         async def _on_fallback(prev: Provider, nxt: Provider, reason: str) -> None:
             nonlocal effective_provider, effective_model
             effective_provider = nxt
-            if nxt == "gemini":
-                effective_model = settings.gemini_model
-            elif nxt == "deepseek":
-                effective_model = settings.deepseek_model
-            elif nxt == "claude":
-                effective_model = settings.anthropic_model
-            else:
-                effective_model = settings.openai_model
+            effective_model = _default_model(nxt)
             await send_json(
                 {
                     "type": "provider_changed",
@@ -193,10 +200,24 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             )
             log.info("answer.fallback", session_id=session_id, prev=prev, next=nxt)
 
+        # Provider-reported (input, output) tokens for the attempt that
+        # completed; includes reasoning tokens. None → estimate below.
+        reported_usage: tuple[int | None, int | None] = (None, None)
+
+        def _on_usage(input_tokens: int | None, output_tokens: int | None) -> None:
+            nonlocal reported_usage
+            reported_usage = (input_tokens, output_tokens)
+
         collected: list[str] = []
         try:
             async for token in stream_answer(
-                provider, question, context, model=selected_model, on_fallback=_on_fallback
+                provider,
+                question,
+                context,
+                model=selected_model,
+                effort=effort,
+                on_fallback=_on_fallback,
+                on_usage=_on_usage,
             ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})
@@ -234,17 +255,18 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 log.warning("ws_answer.qa_cache_failed", error=str(exc))
 
             # Record answer-stream usage so the cost pill reflects copilot
-            # spend (previously uncounted entirely). Token counts are a
-            # rough char/4 proxy: input = system-prompt overhead + question
+            # spend. Prefer the provider-reported counts (they include
+            # reasoning tokens, the bulk of a high-effort answer); otherwise
+            # a rough char/4 proxy: input = system-prompt overhead + question
             # + recent transcript + prior thread turns; output = answer.
             try:
                 prior_chars = sum(len(t.content) for t in prior_turns)
                 transcript_chars = len(context.recent_transcript or "")
-                input_tokens = (
+                input_tokens = reported_usage[0] or (
                     ANSWER_PROMPT_OVERHEAD_TOKENS
                     + (len(question) + transcript_chars + prior_chars) // 4
                 )
-                output_tokens = max(1, len(answer_text) // 4)
+                output_tokens = reported_usage[1] or max(1, len(answer_text) // 4)
                 await record_answer_call(
                     session_id=session_id,
                     provider=effective_provider,
