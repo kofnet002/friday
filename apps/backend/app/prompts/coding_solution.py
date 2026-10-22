@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.settings import settings
+
 CODING_SOLUTION_VERSION = "1.2.0"
 
 
@@ -185,11 +187,11 @@ def coding_solution_user_prompt(
 SOLUTION_GEMINI_MODEL = "gemini-2.5-flash"
 SOLUTION_OPENAI_MODEL = "gpt-4o"
 SOLUTION_DEEPSEEK_MODEL = "deepseek-chat"
-# Claude has a single capable tier for coding — Opus 4.8 is used for both the
-# default solve and the deep refine (it already outclasses the Flash/4o solve
-# tier, so there's no cheaper "solve" variant to drop to). Override the model
-# string via ANTHROPIC_MODEL in settings if you want Sonnet/Haiku instead.
-SOLUTION_ANTHROPIC_MODEL = "claude-opus-4-8"
+# Claude has a single capable tier for coding — ANTHROPIC_MODEL (Opus 5.5 by
+# default) is used for both the default solve and the deep refine; the refine
+# gets a higher effort instead of a different model. Set ANTHROPIC_MODEL if
+# you want Sonnet/Haiku instead.
+SOLUTION_ANTHROPIC_MODEL = settings.anthropic_model
 SOLUTION_MAX_OUTPUT_TOKENS = 2500
 SOLUTION_TEMPERATURE = 0.2
 

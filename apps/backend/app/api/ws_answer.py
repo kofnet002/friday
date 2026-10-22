@@ -10,7 +10,7 @@ from app.db import append_qa, get_session
 from app.logging import log
 from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import recent_transcript_text, set_last_answer
-from app.services.answer import Provider, stream_answer
+from app.services.answer import Provider, claude_answer_model, stream_answer
 from app.services.limits import check_token_budget
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
@@ -146,7 +146,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         elif provider == "deepseek":
             model = settings.deepseek_model
         elif provider == "claude":
-            model = settings.anthropic_model
+            model = claude_answer_model()
         else:
             model = settings.openai_model
 
@@ -172,7 +172,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             elif nxt == "deepseek":
                 effective_model = settings.deepseek_model
             elif nxt == "claude":
-                effective_model = settings.anthropic_model
+                effective_model = claude_answer_model()
             else:
                 effective_model = settings.openai_model
             await send_json(

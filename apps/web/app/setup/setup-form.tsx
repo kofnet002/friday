@@ -165,7 +165,7 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
               <option value="gemini">Gemini 2.5 Pro</option>
               <option value="openai">GPT-4o</option>
               <option value="deepseek">DeepSeek</option>
-              <option value="claude">Claude Opus 4.8</option>
+              <option value="claude">Claude Opus 5.5</option>
             </Select>
           </Labeled>
           <Labeled label="Language">

@@ -18,15 +18,21 @@ export interface ChatErrorEvent {
 export type ChatEventName = 'token' | 'done' | 'error';
 
 /** Models the user is allowed to pick for question detection. Mirrors
- *  `ALLOWED_QD_MODELS` in app.services.question_detection. Both Gemini
- *  (default) and OpenAI options are allowed so a power user can
- *  pre-emptively pick gpt-4o-mini when Gemini's quota is exhausted. */
+ *  `ALLOWED_QD_MODELS` in app.services.question_detection. Gemini
+ *  (default), OpenAI and Claude options are allowed so a power user can
+ *  pre-emptively pick gpt-4o-mini when Gemini's quota is exhausted, or
+ *  move detection onto their Claude subscription entirely. The Claude
+ *  options run through the local `claude` CLI when only
+ *  CLAUDE_CODE_OAUTH_TOKEN is set, which adds process-startup latency per
+ *  detection — Haiku is the sane pick there. */
 export type QdModel =
   | 'gemini-2.5-flash-lite'
   | 'gemini-2.5-flash'
   | 'gemini-2.5-pro'
   | 'gpt-4o-mini'
-  | 'gpt-4o';
+  | 'gpt-4o'
+  | 'claude-haiku-4-5'
+  | 'claude-opus-5-5';
 
 /** Control messages sent from client → `/ws/transcribe`. */
 export type WsControlMessage =
@@ -328,4 +334,74 @@ export type CodingSolutionServerMessage =
   /** `provisional: true` = the agent's examples pass but it's still hardening
    *  (perf gate / edge cases); the final message replaces it if improved. */
   | { type: 'agent_solution'; text: string; provisional?: boolean }
-  | CodingProblemDetectedEvent;
+  | CodingProblemDetectedEvent
+  | FunctionCallDetectedEvent;
+
+// ─── function-calling assessments ────────────────────────────────────────────
+// A "Function Calling Test": given a task and a catalog of tools, pick the
+// correct tool and construct its argument payload. Detected on-screen by vision
+// (like a coding problem) or entered by hand; solved + self-verified via the
+// REST endpoints under /api/function-call.
+
+/** One callable tool. `parameters` (OpenAI shape) or `input_schema`
+ *  (Anthropic shape) is a JSON-Schema object describing the arguments. */
+export interface FunctionCallToolSpec {
+  name: string;
+  description?: string | null;
+  parameters?: Record<string, unknown> | null;
+  input_schema?: Record<string, unknown> | null;
+}
+
+/** Mirrors backend app.models.function_calling.ExtractedFunctionCall. */
+export interface ExtractedFunctionCall {
+  is_function_call: boolean;
+  title?: string | null;
+  question?: string | null;
+  tools?: FunctionCallToolSpec[] | null;
+  confidence: number;
+}
+
+/** Pushed over /ws/coding-solution when vision detects a function-calling
+ *  assessment on a frame the coding detector rejected. */
+export interface FunctionCallDetectedEvent {
+  type: 'function_call_detected';
+  assessment: ExtractedFunctionCall;
+  fingerprint: string;
+}
+
+/** One structural self-verify check. `kind` ∈ tool-exists | unknown-tool |
+ *  missing-required | unexpected-param | type-mismatch. */
+export interface FunctionCallCheckResult {
+  ok: boolean;
+  kind: string;
+  detail: string;
+  field?: string | null;
+}
+
+/** Structural self-verify of a predicted call against the tool catalog.
+ *  `ran` false = skipped (no tool named / empty catalog). */
+export interface FunctionCallCheck {
+  ran: boolean;
+  ok: boolean;
+  skip_reason?: string | null;
+  checks: FunctionCallCheckResult[];
+}
+
+/** Graded comparison against an answer key (present only when the request
+ *  supplied expected_tool). */
+export interface FunctionCallGrade {
+  correct: boolean;
+  tool_match: boolean;
+  payload_match: boolean;
+  expected_tool: string;
+  predicted_tool?: string | null;
+  payload_diff?: string | null;
+}
+
+/** Response of POST /api/function-call/solve. */
+export interface FunctionCallSolveResponse {
+  prediction: { tool: string | null; arguments: Record<string, unknown> };
+  model: string;
+  check: FunctionCallCheck;
+  grade?: FunctionCallGrade;
+}

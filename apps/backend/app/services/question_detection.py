@@ -26,6 +26,8 @@ from app.redis_client import (
     recent_transcript_entries,
     set_qd_fallback,
 )
+from app.services.claude_agent_auth import claude_available
+from app.services.claude_api import claude_transport, complete_claude_api
 from app.services.usage import record_qd_call
 from app.settings import settings
 
@@ -76,6 +78,20 @@ def _safe_json_dict(text: str, *, log_key: str) -> dict[str, Any]:
         log.warning(log_key, raw=text[:300])
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _strip_json_fence(text: str) -> str:
+    """Drop a ```json … ``` wrapper if the model added one.
+
+    Gemini and OpenAI are pinned to a JSON response mode, so their replies are
+    always bare. Claude has no such mode here — the prompts ask for JSON only,
+    but a stray fence would otherwise fail the parse silently.
+    """
+    body = text.strip()
+    if not body.startswith("```"):
+        return body
+    body = body.split("\n", 1)[1] if "\n" in body else ""
+    return body.rsplit("```", 1)[0].strip()
 
 
 def _looks_backchannel(text: str) -> bool:
@@ -157,12 +173,28 @@ ALLOWED_QD_MODELS: frozenset[str] = frozenset(
         "gemini-2.5-pro",
         "gpt-4o-mini",
         "gpt-4o",
+        # Claude. Unlike the others these need no API key when a Claude Code
+        # subscription token is configured — the CLI transport bills the
+        # subscription. Haiku is the sane pick here: QD fires every few
+        # seconds and the CLI adds seconds of process startup per call, so
+        # Opus turns detection into a laggard. Both are offered because the
+        # user owns the cost/quality/latency tradeoff.
+        "claude-haiku-4-5",
+        "claude-opus-5-5",
     }
 )
 
 
 def _is_openai_qd_model(model: str) -> bool:
     return model.startswith("gpt-")
+
+
+def _is_claude_qd_model(model: str) -> bool:
+    return model.startswith("claude-")
+
+
+def _is_gemini_qd_model(model: str) -> bool:
+    return model.startswith("gemini-")
 
 # How recent the prior question must be for follow-up classification to fire.
 # Interviewers don't usually wait minutes between a question and its
@@ -343,12 +375,16 @@ class QuestionDetector:
     def _effective_qd_model(self) -> str:
         """Resolve the model that will actually serve the next QD call.
 
-        - If we've fallen back due to quota, the configured fallback model wins
-          (even when the user's selection is a Gemini model).
-        - Otherwise the user's selection (or the configured default) is honored,
-          which may itself be an OpenAI model — that's a valid choice.
+        - A Gemini pick that has 429'd routes to the configured fallback model.
+        - Any other explicit pick is honored exactly as selected.
+
+        The quota fallback only makes sense for a Gemini pick, because Gemini
+        is the only model that can 429 us into it. An explicit OpenAI or Claude
+        pick has its own credential and its own quota, so overriding it would
+        silently downgrade the user's choice — picking `gpt-4o` and quietly
+        getting `gpt-4o-mini` is a quality regression nobody asked for.
         """
-        if self._fallback_active:
+        if self._fallback_active and _is_gemini_qd_model(self._model):
             return settings.question_detection_fallback_model
         return self._model
 
@@ -557,10 +593,11 @@ class QuestionDetector:
         # Need at least one LLM client to do anything useful. We accept
         # OpenAI-only mode (someone running entirely on GPT-4o) — the
         # fallback path treats absent-Gemini as permanently in fallback.
-        if self._client is None and self._openai_client is None:
+        claude_pick = _is_claude_qd_model(self._model) and claude_available()
+        if self._client is None and self._openai_client is None and not claude_pick:
             log.warning("question_detection.skip_no_key")
             return
-        if self._client is None and not self._fallback_active:
+        if self._client is None and not self._fallback_active and not claude_pick:
             # OpenAI-only deployments don't have a Gemini key to start
             # from; pretend the fallback is already armed so _call_qd_llm
             # routes straight to GPT-4o.
@@ -811,7 +848,7 @@ class QuestionDetector:
             return False
         if self._client is None:
             return False
-        if _is_openai_qd_model(self._model):
+        if _is_openai_qd_model(self._model) or _is_claude_qd_model(self._model):
             return False
         interval = settings.question_detection_probe_interval
         if interval <= 0:
@@ -825,10 +862,15 @@ class QuestionDetector:
 
         Routing rules (resolved at the top of _run, not here, so concurrent
         set_qd_model can't change the model mid-call):
+        - Claude model → Claude directly (CLI on a subscription token, or
+          the SDK when an API key is set). No further fallback: the pick is
+          explicit and Claude has its own quota.
         - OpenAI model → OpenAI directly.
         - Gemini model → Gemini with sticky-fallback-on-429. Periodic
           probes try Gemini again when in fallback (quota may have reset).
         """
+        if _is_claude_qd_model(model_snapshot):
+            return await self._call_claude_qd_with_usage(utterances, model_snapshot)
         # Probe path: in fallback, but enough calls have succeeded that
         # we should try Gemini again. If it works, lift fallback. Note
         # the probe always tries the user's *preferred* Gemini model
@@ -891,6 +933,8 @@ class QuestionDetector:
     ) -> dict[str, Any]:
         """Same routing as _call_qd_llm but for the follow-up classifier."""
         user = follow_up_user_prompt(prior_question, prior_answer, new_question)
+        if _is_claude_qd_model(model_snapshot):
+            return await self._call_claude_follow_up_with_usage(user, model_snapshot)
         if _is_openai_qd_model(model_snapshot):
             return await self._call_openai_follow_up_with_usage(
                 user, model_snapshot,
@@ -913,6 +957,79 @@ class QuestionDetector:
             raise
 
     # ─── transport implementations (with usage tracking) ────────────────────
+
+    async def _call_claude_qd_with_usage(
+        self, utterances: list[Utterance], model: str
+    ) -> dict[str, Any]:
+        """Question-detection on Claude."""
+        user_prompt = question_detection_user_prompt(utterances)
+        text = await self._call_claude_text(
+            QUESTION_DETECTION_SYSTEM_PROMPT,
+            user_prompt,
+            model,
+            kind="question_detection",
+            max_tokens=256,
+        )
+        return _safe_json_dict(text, log_key="question_detection.bad_json")
+
+    async def _call_claude_follow_up_with_usage(
+        self, user: str, model: str
+    ) -> dict[str, Any]:
+        text = await self._call_claude_text(
+            FOLLOW_UP_SYSTEM_PROMPT, user, model, kind="follow_up", max_tokens=128
+        )
+        return _safe_json_dict(text, log_key="follow_up.bad_json")
+
+    async def _call_claude_text(
+        self, system: str, user: str, model: str, *, kind: str, max_tokens: int
+    ) -> str:
+        """One JSON-returning Claude call, on the transport claude_transport() picks.
+
+        The subscription CLI is billed at zero marginal cost — usage is logged
+        under ``claude-code:<model>`` so it resolves to no per-token price,
+        with a char/4 token estimate purely for visibility. The API transport
+        uses the SDK and reports real token counts, at ANTHROPIC_EFFORT (low by
+        default) to keep this latency-sensitive classifier fast.
+        """
+        transport = claude_transport()
+        if transport == "cli":
+            from app.services.claude_cli import stream_claude_cli_text
+
+            chunks: list[str] = []
+            async for text in stream_claude_cli_text(
+                prompt=user, system=system, model=model, session_id=self.session_id,
+            ):
+                if text:
+                    chunks.append(text)
+            answer = "".join(chunks)
+            await record_qd_call(
+                session_id=self.session_id,
+                provider="claude",
+                model=f"claude-code:{model}",
+                kind=kind,
+                input_tokens=(len(system) + len(user)) // 4,
+                output_tokens=max(1, len(answer) // 4),
+            )
+            return _strip_json_fence(answer)
+
+        if transport is None:
+            raise RuntimeError("no Claude credential for question detection")
+        answer, input_tokens, output_tokens = await complete_claude_api(
+            system=system,
+            user=user,
+            model=model,
+            max_tokens=max_tokens,
+            effort=settings.anthropic_effort,
+        )
+        await record_qd_call(
+            session_id=self.session_id,
+            provider="claude",
+            model=model,
+            kind=kind,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        return _strip_json_fence(answer)
 
     async def _call_gemini_with_usage(
         self, utterances: list[Utterance], model: str
