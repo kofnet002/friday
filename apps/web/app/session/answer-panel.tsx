@@ -270,7 +270,7 @@ export function AnswerPanel({
             <option value="gemini">Gemini 2.5 Flash</option>
             <option value="openai">GPT-4o</option>
             <option value="deepseek">DeepSeek</option>
-            <option value="claude">Claude Opus 5.5</option>
+            <option value="claude">Claude Sonnet 5.5</option>
           </Select>
 
           {/* History pager — chevrons step through every Q&A asked this

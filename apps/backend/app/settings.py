@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # headroom, effort support, refusal fallbacks) live in
     # services/claude_api.py, so swapping this string is safe.
     anthropic_model: str = Field(default="claude-opus-5-5")
+    # Model for LIVE interview answers (Copilot panel + /api/chat). Separate
+    # from ANTHROPIC_MODEL (coding solves, function calling) because live
+    # answers are latency-bound: measured on the real answer prompt, Sonnet
+    # 5.5 started streaming in ~1.0 s median vs ~2.3 s for Opus 5.5, at half
+    # the price, with equivalent answer quality. Coding keeps Opus's depth.
+    anthropic_answer_model: str = Field(default="claude-sonnet-5-5")
     # Which transport non-agent Claude calls use (answers, solves, vision,
     # question detection, function calling):
     #   auto         — API key when set, else the subscription CLI
