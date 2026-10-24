@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
@@ -60,11 +60,14 @@ class DeepgramSession:
         self,
         on_transcript: TranscriptCallback,
         on_error: ErrorCallback,
+        keyterms: Sequence[str] = (),
     ) -> None:
         if not settings.deepgram_api_key:
             raise RuntimeError("DEEPGRAM_API_KEY is not set")
         self._on_transcript = on_transcript
         self._on_error = on_error
+        # nova-3 keyterm prompting — boosts names / stack terms from setup.
+        self._keyterms = list(keyterms)
         self._client = DeepgramClient(settings.deepgram_api_key)
         self._connection: Any | None = None
         self._retries = 0
@@ -88,6 +91,7 @@ class DeepgramSession:
             encoding="linear16",
             sample_rate=settings.deepgram_sample_rate,
             channels=settings.deepgram_channels,
+            keyterm=self._keyterms or None,
         )
 
     async def connect(self) -> None:

@@ -55,6 +55,24 @@ class Settings(BaseSettings):
     deepgram_sample_rate: int = Field(default=16000)
     deepgram_channels: int = Field(default=1)
 
+    # Turn detection engine for live transcription:
+    #   flux — Deepgram Flux (semantic end-of-turn, eager EOT → speculative
+    #          answers, mic-aware). English sessions only; others use nova.
+    #   nova — nova-3 + silence/ceiling timers (QuestionDetector).
+    turn_engine: Literal["flux", "nova"] = Field(default="flux")
+    flux_model: str = Field(default="flux-general-en")
+    # Confirmed end-of-turn confidence. Higher = fewer premature cut-offs,
+    # slightly later confirmation. Range 0.5-1.0.
+    flux_eot_threshold: float = Field(default=0.75)
+    # Eager ("probably done") threshold — speculation starts here. Lower =
+    # earlier answers but more discarded speculative calls. Range 0.3-0.9.
+    flux_eager_eot_threshold: float = Field(default=0.5)
+    # Force EndOfTurn after this much silence even if the model is unsure
+    # (e.g. a long thinking pause mid-question). Range 500-60000.
+    flux_eot_timeout_ms: int = Field(default=3000)
+    # Start answering at EagerEndOfTurn (hidden until the turn confirms).
+    speculative_answers: bool = Field(default=True)
+
     # Question detection — default to flash-lite so it doesn't share
     # gemini-2.5-flash's free-tier daily bucket with vision + answer streams.
     question_detection_model: str = Field(default="gemini-2.5-flash-lite")
@@ -66,10 +84,10 @@ class Settings(BaseSettings):
     question_detection_ceiling_ms: int = Field(default=4500)
     question_detection_transcript_window_s: int = Field(default=30)
     question_detection_min_confidence: float = Field(default=0.7)
-    # Model used when Gemini returns 429/RESOURCE_EXHAUSTED. Defaults to
-    # gpt-4o-mini for cost parity with Flash-Lite (Flash-Lite → gpt-4o is
-    # roughly a 20× jump per call; mini is much closer). Override to
-    # `gpt-4o` for higher quality.
+    # Model used when Gemini returns 429/RESOURCE_EXHAUSTED. Routed by
+    # prefix: a `claude-*` model runs on the Claude credential
+    # (CLAUDE_TRANSPORT), anything else on OpenAI. gpt-4o-mini / Claude Haiku
+    # 5.5 keep cost close to Flash-Lite.
     question_detection_fallback_model: str = Field(default="gpt-4o-mini")
     # Backend-side dedup: a freshly extracted question that byte-equals the
     # one we just fired within this window is dropped. Catches the case

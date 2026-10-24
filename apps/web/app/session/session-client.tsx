@@ -37,6 +37,7 @@ import type {
   QAHistoryRow,
   QdModel,
   QdState,
+  QuestionCandidateEvent,
   TranscriptEvent,
   WsServerMessage,
 } from '@friday/shared-types';
@@ -108,6 +109,34 @@ interface AnswerEntry {
   createdAt: number;
 }
 
+type TranscriptSource = 'interviewer' | 'candidate';
+
+/** One finalized transcript line. `source` is set on the dual-stream path
+ *  (system audio = interviewer, mic = candidate); null on single-stream. */
+interface TranscriptLine {
+  text: string;
+  source: TranscriptSource | null;
+}
+
+type Interims = Record<TranscriptSource, string>;
+const EMPTY_INTERIMS: Interims = { interviewer: '', candidate: '' };
+
+/** A speculative answer: started when the interviewer *probably* finished a
+ *  question (question_candidate), streaming into a hidden entry until the
+ *  backend confirms (question_detected with the same candidate_id) or
+ *  retracts it. `targetId` is set for a follow-up into an existing thread. */
+interface PendingAnswer {
+  candidateId: string;
+  entry: AnswerEntry;
+  targetId: string | null;
+  streaming: boolean;
+}
+
+// Capture the candidate's mic alongside system audio. The backend uses it
+// to tell the interviewer has finished (the candidate started answering)
+// and as context for follow-ups; it's echo-cancelled in the helper.
+const CAPTURE_MIC = true;
+
 const AUTOSCROLL_THRESHOLD_PX = 48;
 
 // The three scratch coding modes. Carved out as a type alias because
@@ -137,8 +166,8 @@ export function SessionClient() {
   >({});
   const answerStartedAtRef = useRef<number | null>(null);
   const answerEffectiveProviderRef = useRef<AnswerProvider | null>(null);
-  const [finals, setFinals] = useState<string[]>([]);
-  const [interim, setInterim] = useState<string>('');
+  const [finals, setFinals] = useState<TranscriptLine[]>([]);
+  const [interims, setInterims] = useState<Interims>(EMPTY_INTERIMS);
 
   // Answer panel state — every ask appends a new AnswerEntry; the panel
   // displays entries[entryIndex] and the chevrons step the index. The
@@ -255,7 +284,11 @@ export function SessionClient() {
   const lastSendAtRef = useRef<number>(0);
   const audioUnsubsRef = useRef<Array<() => void>>([]);
   const codingUnsubsRef = useRef<Array<() => void>>([]);
-  const finalsRef = useRef<string[]>([]);
+  const finalsRef = useRef<TranscriptLine[]>([]);
+  // Hidden speculative answer, if any (see PendingAnswer).
+  const pendingRef = useRef<PendingAnswer | null>(null);
+  // Audio framing negotiated at Start — resume must repeat it.
+  const audioFormatRef = useRef<'tagged' | undefined>(undefined);
   const providerRef = useRef<AnswerProvider>('gemini');
   const codingLanguageRef = useRef<CodingLanguage>('Python');
   const activeFingerprintRef = useRef<string | null>(null);
@@ -451,6 +484,19 @@ export function SessionClient() {
     (msg: AnswerServerMessage) => {
       const id = streamingIdRef.current;
       if (!id) return;
+      // Tokens for a hidden speculative answer accumulate on the pending
+      // entry (no re-render) until the question is confirmed.
+      const pending = pendingRef.current;
+      const apply = (
+        patch: Partial<AnswerEntry> | ((entry: AnswerEntry) => Partial<AnswerEntry>),
+      ) => {
+        if (pending && pending.streaming && pending.entry.id === id) {
+          const delta = typeof patch === 'function' ? patch(pending.entry) : patch;
+          pending.entry = { ...pending.entry, ...delta };
+        } else {
+          apply(patch);
+        }
+      };
       if (msg.type === 'started') {
         // Reset the pending assistant turn — askAnswer/followUp already
         // appended an empty {role:'assistant', content:''} placeholder to
@@ -458,7 +504,7 @@ export function SessionClient() {
         // the entry (thread-level) not the turn.
         answerStartedAtRef.current = performance.now();
         answerEffectiveProviderRef.current = msg.provider;
-        updateEntry(id, (e) => ({
+        apply((e) => ({
           answer: '',
           error: null,
           marked: false,
@@ -470,7 +516,7 @@ export function SessionClient() {
         return;
       }
       if (msg.type === 'token') {
-        updateEntry(id, (e) => {
+        apply((e) => {
           const last = e.messages[e.messages.length - 1];
           const updated =
             last && last.role === 'assistant'
@@ -494,19 +540,19 @@ export function SessionClient() {
           setAnswerLatencyByProvider((prev) => ({ ...prev, [provider]: elapsed }));
         }
         answerStartedAtRef.current = null;
-        updateEntry(id, { status: 'done' });
+        apply({ status: 'done' });
         streamingIdRef.current = null;
         return;
       }
       if (msg.type === 'cancelled') {
         answerStartedAtRef.current = null;
-        updateEntry(id, { status: 'cancelled' });
+        apply({ status: 'cancelled' });
         streamingIdRef.current = null;
         return;
       }
       if (msg.type === 'error') {
         answerStartedAtRef.current = null;
-        updateEntry(id, { status: 'error', error: msg.message });
+        apply({ status: 'error', error: msg.message });
         streamingIdRef.current = null;
       }
       if (msg.type === 'provider_changed') {
@@ -567,31 +613,30 @@ export function SessionClient() {
       setQdDedupAt(Date.now());
       return;
     }
+    if (msg.type === 'question_candidate') {
+      if (suppressAutoQuestion(msg.question)) return;
+      startSpeculative(msg);
+      return;
+    }
+    if (msg.type === 'question_retracted') {
+      if (pendingRef.current?.candidateId === msg.candidate_id) discardPending();
+      return;
+    }
     if (msg.type === 'question_detected') {
-      // Force-ask cooldown: if the user just fired a manual ask, swallow
-      // auto-detected questions for a short window. The user already
-      // started a thread on substantially the same transcript content.
-      const sinceForce = Date.now() - lastForceAskAtRef.current;
-      if (sinceForce < FORCE_ASK_AUTODETECT_COOLDOWN_MS) return;
-      // The backend detector can fire multiple times for the same
-      // question while the speaker keeps talking — the recent transcript
-      // window still contains the question, the model still sees it as
-      // a question. Skip if it matches the latest entry's most recent
-      // user turn (a shallow normalized compare) so we don't create
-      // stuck duplicates.
-      const norm = msg.question.trim().toLowerCase();
-      const last = entriesRef.current[entriesRef.current.length - 1];
-      if (last) {
-        const recentUser = [...last.messages].reverse().find((m) => m.role === 'user')?.content;
-        if (recentUser && recentUser.trim().toLowerCase() === norm) return;
+      // Confirms the speculative answer already streaming for this question:
+      // reveal it (usually with tokens already in) instead of asking again.
+      if (msg.candidate_id && revealPending(msg.candidate_id, msg.question)) {
+        setActiveFeature('listen');
+        return;
       }
+      if (suppressAutoQuestion(msg.question)) return;
       // Backend classifier already decided whether this is a follow-up of
       // the prior thread; route accordingly. Falling back to askAnswer
       // when the flag is missing keeps legacy events working.
       if (msg.is_follow_up && entriesRef.current.length > 0) {
-        followUp(msg.question);
+        followUp(msg.question, { candidateId: msg.candidate_id });
       } else {
-        askAnswer(msg.question, { autoDetected: true });
+        askAnswer(msg.question, { autoDetected: true, candidateId: msg.candidate_id });
       }
       setActiveFeature('listen');
     }
@@ -981,15 +1026,152 @@ export function SessionClient() {
     if (lastSendAtRef.current > 0) {
       setLatencyMs(Math.max(0, performance.now() - lastSendAtRef.current));
     }
+    const source = event.source ?? null;
+    const slot: TranscriptSource = source ?? 'interviewer';
     if (event.is_final) {
-      setFinals((prev) => [...prev, event.text]);
-      setInterim('');
+      setFinals((prev) => [...prev, { text: event.text, source }]);
+      setInterims((prev) => ({ ...prev, [slot]: '' }));
     } else {
-      setInterim(event.text);
+      setInterims((prev) => (prev[slot] === event.text ? prev : { ...prev, [slot]: event.text }));
     }
   };
 
+  /** True when an auto-detected question should be ignored. */
+  const suppressAutoQuestion = (question: string): boolean => {
+    // Force-ask cooldown: if the user just fired a manual ask, swallow
+    // auto-detected questions for a short window. The user already
+    // started a thread on substantially the same transcript content.
+    const sinceForce = Date.now() - lastForceAskAtRef.current;
+    if (sinceForce < FORCE_ASK_AUTODETECT_COOLDOWN_MS) return true;
+    // Skip a question that matches the latest entry's most recent user
+    // turn (a shallow normalized compare) so we don't create duplicates.
+    const norm = question.trim().toLowerCase();
+    const last = entriesRef.current[entriesRef.current.length - 1];
+    if (last) {
+      const recentUser = [...last.messages].reverse().find((m) => m.role === 'user')?.content;
+      if (recentUser && recentUser.trim().toLowerCase() === norm) return true;
+    }
+    return false;
+  };
+
+  // ─── speculative answers (Flux EagerEndOfTurn) ─────────────────────────────
+  const discardPending = () => {
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pendingRef.current = null;
+    if (pending.streaming && streamingIdRef.current === pending.entry.id) {
+      answerRef.current?.cancel?.();
+      streamingIdRef.current = null;
+    }
+  };
+
+  const startSpeculative = (msg: QuestionCandidateEvent) => {
+    const ws = answerRef.current;
+    if (!ws || !ws.isOpen()) return;
+    // Same candidate again = the classifier's cleaned-up wording for the
+    // answer already streaming. Relabel only; don't restart it.
+    const existing = pendingRef.current;
+    if (existing && existing.candidateId === msg.candidate_id) {
+      const relabel = (m: AnswerMessage, i: number, all: AnswerMessage[]) =>
+        i === all.length - 2 && m.role === 'user' ? { ...m, content: msg.question } : m;
+      existing.entry = {
+        ...existing.entry,
+        question: existing.targetId ? existing.entry.question : msg.question,
+        messages: existing.entry.messages.map(relabel),
+      };
+      return;
+    }
+    // Never cancel an answer the user is reading for a maybe-question —
+    // that one waits for confirmation instead.
+    if (streamingIdRef.current && !pendingRef.current) return;
+    discardPending();
+    const idx = entryIndexRef.current >= 0 ? entryIndexRef.current : entriesRef.current.length - 1;
+    const current = entriesRef.current[idx];
+    let entry: AnswerEntry;
+    let wire: AnswerMessage[];
+    let targetId: string | null = null;
+    if (msg.is_follow_up && current) {
+      const prior = current.messages.filter(
+        (m, i) =>
+          !(i === current.messages.length - 1 && m.role === 'assistant' && m.content === ''),
+      );
+      const messages: AnswerMessage[] = [
+        ...prior,
+        { role: 'user', content: msg.question },
+        { role: 'assistant', content: '' },
+      ];
+      entry = { ...current, messages, answer: '', status: 'streaming', error: null };
+      wire = messages.slice(0, -1);
+      targetId = current.id;
+    } else {
+      entry = {
+        id: newId(),
+        messages: [
+          { role: 'user', content: msg.question },
+          { role: 'assistant', content: '' },
+        ],
+        threadId: newId(),
+        question: msg.question,
+        answer: '',
+        status: 'streaming',
+        error: null,
+        marked: false,
+        createdAt: Date.now(),
+      };
+      wire = [{ role: 'user', content: msg.question }];
+    }
+    pendingRef.current = { candidateId: msg.candidate_id, entry, targetId, streaming: true };
+    streamingIdRef.current = entry.id;
+    ws.send({
+      type: 'question',
+      messages: wire,
+      thread_id: entry.threadId,
+      provider: providerRef.current,
+      auto_detected: true,
+      candidate_id: msg.candidate_id,
+      speculative: true,
+    });
+  };
+
+  /** Promote the hidden answer for `candidateId` into the panel. Returns
+   *  false when there's no matching pending answer. */
+  const revealPending = (candidateId: string, question: string): boolean => {
+    const pending = pendingRef.current;
+    if (!pending || pending.candidateId !== candidateId) return false;
+    pendingRef.current = null;
+    pending.streaming = false;
+    answerRef.current?.send({ type: 'commit', candidate_id: candidateId, question });
+    // Show the confirmed wording (the answer may have started from raw text).
+    const relabel = (m: AnswerMessage, i: number, all: AnswerMessage[]) =>
+      i === all.length - 2 && m.role === 'user' ? { ...m, content: question } : m;
+    const entry: AnswerEntry = {
+      ...pending.entry,
+      question: pending.targetId ? pending.entry.question : question,
+      messages: pending.entry.messages.map(relabel),
+    };
+    setPanelError(null);
+    if (pending.targetId) {
+      const targetId = pending.targetId;
+      setEntries((prev) => prev.map((e) => (e.id === targetId ? entry : e)));
+    } else {
+      setEntries((prev) => {
+        const next = [...prev, entry];
+        // Same auto-jump rule as an auto-detected askAnswer.
+        const idx = entryIndexRef.current;
+        if (prev.length === 0 || idx < 0 || idx >= prev.length - 1) {
+          setEntryIndex(next.length - 1);
+        }
+        return next;
+      });
+    }
+    return true;
+  };
+
   const cancelInFlight = () => {
+    if (pendingRef.current) {
+      discardPending();
+      return;
+    }
     const ws = answerRef.current;
     if (!streamingIdRef.current || !ws) return;
     const oldId = streamingIdRef.current;
@@ -1003,7 +1185,7 @@ export function SessionClient() {
       ? crypto.randomUUID()
       : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  const askAnswer = (q: string, opts: { autoDetected?: boolean } = {}) => {
+  const askAnswer = (q: string, opts: { autoDetected?: boolean; candidateId?: string } = {}) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
@@ -1054,10 +1236,11 @@ export function SessionClient() {
       thread_id: threadId,
       provider: providerRef.current,
       auto_detected: opts.autoDetected,
+      candidate_id: opts.candidateId,
     });
   };
 
-  const followUp = (q: string) => {
+  const followUp = (q: string, opts: { candidateId?: string } = {}) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
@@ -1105,6 +1288,7 @@ export function SessionClient() {
       messages: nextMessages.slice(0, -1),
       thread_id: current.threadId,
       provider: providerRef.current,
+      candidate_id: opts.candidateId,
     });
   };
 
@@ -1114,34 +1298,38 @@ export function SessionClient() {
     setStatus('starting');
     setLatencyMs(null);
 
-    const ws = new TranscribeWs({
-      onMessage: onTranscribeMessage,
-      onOpen: () => {
-        // ORDER MATTERS: set_qd_model BEFORE start. The backend's `start`
-        // unblocks the Deepgram audio path; the first transcript final
-        // can arrive within ~100ms of start. Sending the model first
-        // guarantees detection on that very first final uses the user's
-        // pick, not the server-side default.
-        ws.sendControl({ type: 'set_qd_model', model: qdModelRef.current });
-        ws.sendControl({ type: 'start' });
-        // QD signals are per-detector (per-WS) on the backend. A fresh
-        // socket = fresh detector, so clear any stale UI state from the
-        // previous session.
-        setQdFallbackModel(null);
-        setQdState('idle');
-        setQdError(null);
-        setQdDedupAt(0);
-        // The force-ask cooldown was set in the prior session and would
-        // otherwise carry over and suppress legitimate auto-detects in
-        // the new session for a few seconds.
-        lastForceAskAtRef.current = 0;
+    audioFormatRef.current = inElectron ? 'tagged' : undefined;
+    const ws = new TranscribeWs(
+      {
+        onMessage: onTranscribeMessage,
+        onOpen: () => {
+          // ORDER MATTERS: set_qd_model BEFORE start. The backend's `start`
+          // unblocks the Deepgram audio path; the first transcript final
+          // can arrive within ~100ms of start. Sending the model first
+          // guarantees detection on that very first final uses the user's
+          // pick, not the server-side default.
+          ws.sendControl({ type: 'set_qd_model', model: qdModelRef.current });
+          ws.sendControl({ type: 'start', audio_format: audioFormatRef.current });
+          // QD signals are per-detector (per-WS) on the backend. A fresh
+          // socket = fresh detector, so clear any stale UI state from the
+          // previous session.
+          setQdFallbackModel(null);
+          setQdState('idle');
+          setQdError(null);
+          setQdDedupAt(0);
+          // The force-ask cooldown was set in the prior session and would
+          // otherwise carry over and suppress legitimate auto-detects in
+          // the new session for a few seconds.
+          lastForceAskAtRef.current = 0;
+        },
+        onClose: () => setStatus((prev) => (prev === 'error' ? prev : 'idle')),
+        onError: () => {
+          setError('WebSocket error');
+          setStatus('error');
+        },
       },
-      onClose: () => setStatus((prev) => (prev === 'error' ? prev : 'idle')),
-      onError: () => {
-        setError('WebSocket error');
-        setStatus('error');
-      },
-    });
+      getOrCreateSessionId(),
+    );
     ws.connect();
     transcribeRef.current = ws;
 
@@ -1150,16 +1338,16 @@ export function SessionClient() {
       setStatus('error');
       return;
     }
-    const result = await window.friday.audio.start();
+    const result = await window.friday.audio.start({ mic: CAPTURE_MIC });
     if (!result.ok) {
       setError(result.error ?? 'audio start failed');
       setStatus('error');
       return;
     }
 
-    const offFrame = window.friday.audio.onFrame((chunk) => {
-      lastSendAtRef.current = performance.now();
-      transcribeRef.current?.sendAudio(chunk);
+    const offFrame = window.friday.audio.onFrame((chunk, source) => {
+      if (source !== 'mic') lastSendAtRef.current = performance.now();
+      transcribeRef.current?.sendTaggedAudio(chunk, source ?? 'system');
     });
     const offError = window.friday.audio.onError((msg) => {
       setError(msg);
@@ -1204,13 +1392,13 @@ export function SessionClient() {
 
   const resume = async () => {
     if (inElectron && window.friday) await window.friday.audio.resume();
-    transcribeRef.current?.sendControl({ type: 'start' });
+    transcribeRef.current?.sendControl({ type: 'start', audio_format: audioFormatRef.current });
     setStatus('recording');
   };
 
   const clearTranscript = () => {
     setFinals([]);
-    setInterim('');
+    setInterims(EMPTY_INTERIMS);
     setLatencyMs(null);
   };
 
@@ -1297,7 +1485,12 @@ export function SessionClient() {
       if (!e.metaKey || !e.shiftKey) return;
       if (e.code === 'Space' || e.key === ' ') {
         e.preventDefault();
-        const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
+        const recent = finalsRef.current
+          .filter((line) => line.source !== 'candidate')
+          .slice(-RECENT_FINALS_JOIN)
+          .map((line) => line.text)
+          .join(' ')
+          .trim();
         if (recent) {
           lastForceAskAtRef.current = Date.now();
           askAnswer(recent);
@@ -1708,7 +1901,7 @@ export function SessionClient() {
               <Transcript
                 status={status}
                 finals={finals}
-                interim={interim}
+                interims={interims}
                 privacyMode={privacyMode}
                 fill
               />
@@ -1858,7 +2051,8 @@ export function SessionClient() {
                   badges={{
                     listen:
                       entries.some((e) => e.status === 'streaming') ||
-                      (isLive && (finals.length > 0 || Boolean(interim))),
+                      (isLive &&
+                        (finals.length > 0 || Boolean(interims.interviewer || interims.candidate))),
                     coding: codingTabs.some((t) => t.status === 'streaming'),
                   }}
                 />
@@ -2665,14 +2859,14 @@ function OverflowMenu({
 function Transcript({
   status,
   finals,
-  interim,
+  interims,
   privacyMode,
   compact = false,
   fill = false,
 }: {
   status: Status;
-  finals: string[];
-  interim: string;
+  finals: TranscriptLine[];
+  interims: Interims;
   privacyMode: boolean;
   /** Slim layout for embedded use inside the Listen panel. */
   compact?: boolean;
@@ -2687,7 +2881,7 @@ function Transcript({
     const el = scrollRef.current;
     if (!el || !pinned) return;
     el.scrollTop = el.scrollHeight;
-  }, [finals, interim, pinned]);
+  }, [finals, interims, pinned]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -2702,7 +2896,7 @@ function Transcript({
     if (el) el.scrollTop = el.scrollHeight;
   };
 
-  const empty = finals.length === 0 && !interim;
+  const empty = finals.length === 0 && !interims.interviewer && !interims.candidate;
   const emptyHeadline =
     status === 'idle' ? 'Press Start to listen' : status === 'paused' ? 'Paused' : 'Listening…';
   const emptyHint =
@@ -2785,17 +2979,34 @@ function Transcript({
             </div>
           ) : (
             <div className={cn(privacyMode && 'select-none blur-md')}>
-              {finals.map((text, idx) => (
-                <p
-                  key={idx}
-                  className="text-neutral-900 transition-opacity duration-200 dark:text-neutral-100"
-                >
-                  {text}
-                </p>
-              ))}
-              {interim ? (
+              {finals.map((line, idx) =>
+                line.source === 'candidate' ? (
+                  <p
+                    key={idx}
+                    className="text-neutral-400 transition-opacity duration-200 dark:text-neutral-500"
+                  >
+                    <CandidateLabel />
+                    {line.text}
+                  </p>
+                ) : (
+                  <p
+                    key={idx}
+                    className="text-neutral-900 transition-opacity duration-200 dark:text-neutral-100"
+                  >
+                    {line.text}
+                  </p>
+                ),
+              )}
+              {interims.interviewer ? (
                 <p className="italic text-sky-600 dark:text-sky-300">
-                  {interim}
+                  {interims.interviewer}
+                  <span className="ml-1 inline-block animate-pulse">▍</span>
+                </p>
+              ) : null}
+              {interims.candidate ? (
+                <p className="italic text-neutral-400 dark:text-neutral-500">
+                  <CandidateLabel />
+                  {interims.candidate}
                   <span className="ml-1 inline-block animate-pulse">▍</span>
                 </p>
               ) : null}
@@ -2824,5 +3035,14 @@ function Transcript({
         </button>
       ) : null}
     </div>
+  );
+}
+
+/** Marks transcript lines from the candidate's own mic. */
+function CandidateLabel() {
+  return (
+    <span className="mr-1.5 select-none text-[0.7em] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+      You
+    </span>
   );
 }

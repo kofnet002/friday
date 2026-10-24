@@ -36,7 +36,10 @@ export type QdModel =
 
 /** Control messages sent from client → `/ws/transcribe`. */
 export type WsControlMessage =
-  | { type: 'start' }
+  /** `audio_format: 'tagged'` — every binary frame starts with one source
+   *  byte (0 = system audio / interviewer, 1 = mic / candidate). Omitted =
+   *  raw system-audio PCM (legacy). */
+  | { type: 'start'; audio_format?: 'tagged' }
   | { type: 'stop' }
   | { type: 'pause' }
   | { type: 'set_qd_model'; model: QdModel };
@@ -50,6 +53,8 @@ export type WsServerMessage =
   | { type: 'ready'; session_id: string }
   | TranscriptEvent
   | QuestionDetectedEvent
+  | QuestionCandidateEvent
+  | QuestionRetractedEvent
   | { type: 'qd_state'; state: QdState }
   /** Fired once when the detector falls back from Gemini to GPT-4o
    *  (typically due to free-tier quota exhaustion). `model` is the model
@@ -78,17 +83,53 @@ export interface TranscriptEvent {
    *  null when only one speaker has been heard so far or diarization was
    *  unavailable for the segment. */
   speaker?: number | null;
+  /** Which audio source the line came from on the dual-stream (Flux) path:
+   *  system audio = interviewer, mic = candidate. Absent on the single-
+   *  stream path. */
+  source?: 'interviewer' | 'candidate';
 }
+
+/** Classifier verdict for an answerable question. `addendum` = a constraint
+ *  added to the question already being answered (re-answer the thread). */
+export type QuestionKind = 'new_question' | 'follow_up' | 'addendum';
 
 export interface QuestionDetectedEvent {
   type: 'question_detected';
   question: string;
   confidence: number;
-  /** True when the detector + follow-up classifier think this question
-   *  extends the prior thread rather than starting a new one. Frontend
-   *  routes follow-ups through followUp() (append) instead of askAnswer()
-   *  (new thread). Absent on legacy events. */
+  /** True when the classifier thinks this question extends the prior
+   *  thread (follow-up or addendum) rather than starting a new one.
+   *  Frontend routes these through followUp() (append) instead of
+   *  askAnswer() (new thread). Absent on legacy events. */
   is_follow_up?: boolean;
+  kind?: QuestionKind;
+  /** Present on the Flux path. When it matches a pending
+   *  `question_candidate`, this CONFIRMS that candidate — reveal the answer
+   *  already streaming for it instead of asking again. */
+  candidate_id?: string;
+}
+
+/** The interviewer has *probably* finished a question (Flux
+ *  EagerEndOfTurn). Start the answer now, hidden; reveal it on the matching
+ *  `question_detected`, drop it on `question_retracted`. */
+export interface QuestionCandidateEvent {
+  type: 'question_candidate';
+  candidate_id: string;
+  question: string;
+  confidence: number;
+  is_follow_up: boolean;
+  kind: QuestionKind;
+  /** Sent with the raw turn text the moment the turn looks like a question,
+   *  before the classifier has ruled. A later candidate with the SAME id
+   *  carries the reconstructed question (relabel only — keep streaming); a
+   *  retraction drops it. */
+  provisional?: boolean;
+}
+
+/** The interviewer kept talking — discard the speculative answer. */
+export interface QuestionRetractedEvent {
+  type: 'question_retracted';
+  candidate_id: string;
 }
 
 // ─── /ws/answer ──────────────────────────────────────────────────────────────
@@ -130,7 +171,16 @@ export type AnswerClientMessage =
       provider: AnswerProvider;
       session_context?: AnswerSessionContext;
       auto_detected?: boolean;
+      /** Correlates the answer with a detected question (latency timeline). */
+      candidate_id?: string;
+      /** Started before the question was confirmed; the server persists it
+       *  only after a matching `commit`. */
+      speculative?: boolean;
     }
+  /** Confirms a speculative answer so the server saves it. `question` is
+   *  the confirmed wording, saved instead of the raw turn text the answer
+   *  was requested with. */
+  | { type: 'commit'; candidate_id: string; question?: string }
   | { type: 'cancel' }
   | { type: 'ping' };
 

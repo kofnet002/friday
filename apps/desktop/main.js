@@ -319,10 +319,10 @@ function createTray() {
   );
 }
 
-audio.on('frame', (buffer) => {
+audio.on('frame', (buffer, source) => {
   // ArrayBuffer transfers cleanly across IPC. Slice to drop excess capacity.
-  const ab = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-  broadcast('audio:frame', ab);
+  const data = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  broadcast('audio:frame', { source, data });
 });
 audio.on('error', (msg) => broadcast('audio:error', msg));
 audio.on('log', (msg) => broadcast('audio:log', msg));
@@ -333,16 +333,21 @@ coding.on('extraction_result', (payload) => broadcast('coding:extraction_result'
 coding.on('error', (msg) => broadcast('coding:error', msg));
 coding.on('log', (msg) => broadcast('coding:log', msg));
 
+// Returns true when microphone access is granted, prompting if needed.
+async function ensureMicrophoneAccess() {
+  if (process.platform !== 'darwin') return true;
+  if (systemPreferences.getMediaAccessStatus('microphone') === 'granted') return true;
+  try {
+    return await systemPreferences.askForMediaAccess('microphone');
+  } catch (_e) {
+    // ignore — user can grant later in System Settings
+    return systemPreferences.getMediaAccessStatus('microphone') === 'granted';
+  }
+}
+
 async function ensurePermissions() {
   // Microphone (separate TCC bucket from screen recording)
-  const micStatus = systemPreferences.getMediaAccessStatus('microphone');
-  if (micStatus !== 'granted') {
-    try {
-      await systemPreferences.askForMediaAccess('microphone');
-    } catch (_e) {
-      // ignore — user can grant later in System Settings
-    }
-  }
+  await ensureMicrophoneAccess();
   // Screen capture access status (covers system audio via ScreenCaptureKit)
   const screenStatus = systemPreferences.getMediaAccessStatus('screen');
   if (screenStatus !== 'granted') {
@@ -412,7 +417,17 @@ function createWindow() {
   });
 }
 
-ipcMain.handle('audio:start', () => audio.start());
+ipcMain.handle('audio:start', async (_e, opts) => {
+  const startOpts = { mic: Boolean(opts && opts.mic) };
+  if (startOpts.mic && !(await ensureMicrophoneAccess())) {
+    startOpts.mic = false;
+    broadcast(
+      'audio:log',
+      '[friday] microphone access not granted — capturing system audio only. Enable Friday under System Settings → Privacy & Security → Microphone.',
+    );
+  }
+  return audio.start(startOpts);
+});
 ipcMain.handle('audio:stop', () => {
   audio.stop();
   return { ok: true };

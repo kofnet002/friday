@@ -1,0 +1,488 @@
+{
+  "_doc": "Scripted question-detection cases. Each case is a sequence of turns replayed through the real TurnCoordinator + classifier as Flux events (StartOfTurn, Update, EagerEndOfTurn, EndOfTurn). `thread` seeds the question currently being answered. `expect` lists the questions that must fire, in order: `kind` must match and every `contains` keyword must appear (case-insensitive). Any extra fire is a false positive.",
+  "cases": [
+    {
+      "id": "simple-behavioral",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Tell me about a time you had to deal with a difficult stakeholder."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["difficult stakeholder"]
+        }
+      ]
+    },
+    {
+      "id": "list-label-split-turns",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Okay. Question number two."
+        },
+        {
+          "role": "interviewer",
+          "text": "Please describe a situation where you needed to adapt a process, procedure, or technology differently from how you usually did things."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["adapt a process", "usually did things"]
+        }
+      ]
+    },
+    {
+      "id": "pause-mid-question",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "So I saw on your resume that you worked on an ML platform and I'm curious about"
+        },
+        {
+          "role": "interviewer",
+          "text": "how you handled model versioning across teams."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["model versioning"]
+        }
+      ]
+    },
+    {
+      "id": "three-way-split",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "If you had a service that"
+        },
+        {
+          "role": "interviewer",
+          "text": "suddenly started timing out under load,"
+        },
+        {
+          "role": "interviewer",
+          "text": "how would you go about debugging it?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["timing out", "debug"]
+        }
+      ]
+    },
+    {
+      "id": "question-then-instructions",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Tell me about a time you disagreed with your manager. You'll have two minutes to answer, starting now."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["disagreed with your manager"]
+        }
+      ]
+    },
+    {
+      "id": "question-then-reassurance",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "How would you design a rate limiter for a public API? Take your time, there's no single right answer here."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["rate limiter"]
+        }
+      ]
+    },
+    {
+      "id": "multi-part",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "What is a deadlock? And how would you prevent one in a database-backed service?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["deadlock", "prevent"]
+        }
+      ]
+    },
+    {
+      "id": "setup-then-question",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Let's move on to system design. How would you design the home timeline for a Twitter-like product?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["timeline"]
+        }
+      ]
+    },
+    {
+      "id": "setup-only",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Great. Let's move on to the system design portion now."
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "coding-prompt",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Okay, so for the coding part, implement a function that returns the k most frequent elements in an array. You can assume k is always valid."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["k most frequent"]
+        }
+      ]
+    },
+    {
+      "id": "ai-interviewer-preamble",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Welcome to the second part of this assessment. Your responses are recorded and reviewed by the hiring team. Please speak clearly and look at the camera. Here is your next question. Why do you want to work at our company?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["why do you want to work"]
+        }
+      ]
+    },
+    {
+      "id": "any-questions-for-me",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "We're almost out of time. Do you have any questions for me?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["questions for me"]
+        }
+      ]
+    },
+    {
+      "id": "small-talk-hear-me",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Hi there, can you hear me okay?"
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "small-talk-how-are-you",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Hey, thanks for joining. How's your day going so far?"
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "logistics-share-screen",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Could you share your screen so I can see your editor?"
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "feedback-only",
+      "turns": [
+        {
+          "role": "candidate",
+          "text": "So that's how I'd shard it, by user ID with consistent hashing."
+        },
+        {
+          "role": "interviewer",
+          "text": "Great, thanks, that's a really clear explanation."
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "instruction-not-question",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Alright, go ahead and start coding whenever you're ready."
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "rhetorical",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "So why does this matter to us? Because at our scale every millisecond of latency costs real money. That's the context for the team."
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "interviewer-answers-candidate",
+      "turns": [
+        {
+          "role": "candidate",
+          "text": "What does the on-call rotation look like for the team?"
+        },
+        {
+          "role": "interviewer",
+          "text": "We rotate weekly, usually two engineers at a time, with a secondary as backup."
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "follow-up-why",
+      "thread": {
+        "question": "How would you design a URL shortener?",
+        "answer": "Use a key-value store mapping base62 codes to URLs, with a counter-based ID generator."
+      },
+      "turns": [
+        {
+          "role": "candidate",
+          "text": "I'd use a key-value store and generate base62 codes from a counter."
+        },
+        {
+          "role": "interviewer",
+          "text": "Why a counter instead of hashing the URL?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "follow_up",
+          "contains": ["counter"]
+        }
+      ]
+    },
+    {
+      "id": "follow-up-complexity",
+      "thread": {
+        "question": "Find all duplicate numbers in an array.",
+        "answer": "Use a hash set and collect values seen twice."
+      },
+      "turns": [
+        {
+          "role": "candidate",
+          "text": "I'd just keep a set of seen numbers and collect the duplicates."
+        },
+        {
+          "role": "interviewer",
+          "text": "And what's the space complexity of that?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "follow_up",
+          "contains": ["space complexity"]
+        }
+      ]
+    },
+    {
+      "id": "addendum-scale",
+      "thread": {
+        "question": "How would you design a URL shortener?",
+        "answer": "Key-value store, base62 codes."
+      },
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Oh, and assume about a hundred million new URLs a day."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "addendum",
+          "contains": ["hundred million"]
+        }
+      ]
+    },
+    {
+      "id": "addendum-clarification",
+      "thread": {
+        "question": "What's the time complexity of your solution?",
+        "answer": "Average case O(n log n) because of the sort."
+      },
+      "turns": [
+        {
+          "role": "candidate",
+          "text": "On average it's n log n because of the sort."
+        },
+        {
+          "role": "interviewer",
+          "text": "Sorry, I meant the worst case, not the average case."
+        }
+      ],
+      "expect": [
+        {
+          "kind": ["addendum", "follow_up"],
+          "contains": ["worst case"]
+        }
+      ]
+    },
+    {
+      "id": "restatement-not-refired",
+      "thread": {
+        "question": "How would you design a URL shortener?",
+        "answer": ""
+      },
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Yeah, so again, how would you go about designing a URL shortener?"
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "new-topic-after-thread",
+      "thread": {
+        "question": "How would you design a URL shortener?",
+        "answer": "Key-value store, base62 codes."
+      },
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "Okay, switching gears. Tell me about the hardest bug you've ever fixed."
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["hardest bug"]
+        }
+      ]
+    },
+    {
+      "id": "backchannel-only",
+      "turns": [
+        {
+          "role": "candidate",
+          "text": "And then we rolled it out gradually behind a feature flag."
+        },
+        {
+          "role": "interviewer",
+          "text": "Mm-hmm."
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "candidate-starts-answering",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "How do you prioritize when everything is urgent"
+        },
+        {
+          "role": "candidate",
+          "text": "That's a great question, so the first thing I do is"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["prioritize"]
+        }
+      ]
+    },
+    {
+      "id": "short-probe",
+      "thread": {
+        "question": "Tell me about a project you're proud of.",
+        "answer": "Led the migration of payments to an event-driven architecture."
+      },
+      "turns": [
+        {
+          "role": "candidate",
+          "text": "I led the payments migration to an event-driven architecture."
+        },
+        {
+          "role": "interviewer",
+          "text": "How so?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "follow_up",
+          "contains": []
+        }
+      ]
+    },
+    {
+      "id": "statement-with-question-word",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "What we're really looking for in this role is someone who can own a service end to end."
+        }
+      ],
+      "expect": []
+    },
+    {
+      "id": "two-questions-in-sequence",
+      "turns": [
+        {
+          "role": "interviewer",
+          "text": "What's your experience with Kubernetes?"
+        },
+        {
+          "role": "candidate",
+          "text": "I've run production clusters on EKS for about three years, mostly stateless services."
+        },
+        {
+          "role": "interviewer",
+          "text": "Got it. Separately, how do you approach code reviews on your team?"
+        }
+      ],
+      "expect": [
+        {
+          "kind": "new_question",
+          "contains": ["kubernetes"]
+        },
+        {
+          "kind": "new_question",
+          "contains": ["code review"]
+        }
+      ]
+    }
+  ]
+}

@@ -87,3 +87,25 @@ def test_request_kwargs_older_models() -> None:
 )
 def test_image_media_type(head: bytes, mime: str) -> None:
     assert image_media_type(head) == mime
+
+
+def test_request_kwargs_thinking_off() -> None:
+    kw = _request_kwargs(
+        system="",
+        messages=[],
+        model="claude-haiku-5-5",
+        max_tokens=320,
+        effort="low",
+        thinking=False,
+    )
+    assert kw["thinking"] == {"type": "disabled"} and kw["max_tokens"] == 320
+    # Opus 5.5 rejects disabled thinking — keep it on, with headroom.
+    kw = _request_kwargs(
+        system="",
+        messages=[],
+        model="claude-opus-5-5",
+        max_tokens=320,
+        effort="low",
+        thinking=False,
+    )
+    assert "thinking" not in kw and kw["max_tokens"] == 320 + _THINKING_HEADROOM

@@ -19,8 +19,12 @@ const windowListeners = {
   toast: new Set(),
 };
 
-ipcRenderer.on('audio:frame', (_evt, arrayBuffer) => {
-  for (const cb of audioListeners.frame) cb(arrayBuffer);
+// Payload: { source: 'system' | 'mic', data: ArrayBuffer }. Listeners get
+// (arrayBuffer, source) so single-argument callers keep working unchanged.
+ipcRenderer.on('audio:frame', (_evt, payload) => {
+  const source = payload && payload.source === 'mic' ? 'mic' : 'system';
+  const data = payload && payload.data instanceof ArrayBuffer ? payload.data : payload;
+  for (const cb of audioListeners.frame) cb(data, source);
 });
 ipcRenderer.on('audio:error', (_evt, msg) => {
   for (const cb of audioListeners.error) cb(msg);
@@ -55,7 +59,7 @@ contextBridge.exposeInMainWorld('friday', {
   platform: process.platform,
   versions: process.versions,
   audio: {
-    start: () => ipcRenderer.invoke('audio:start'),
+    start: (opts) => ipcRenderer.invoke('audio:start', opts || {}),
     stop: () => ipcRenderer.invoke('audio:stop'),
     pause: () => ipcRenderer.invoke('audio:pause'),
     resume: () => ipcRenderer.invoke('audio:resume'),
