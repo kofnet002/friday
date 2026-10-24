@@ -173,6 +173,8 @@ export type AnswerClientMessage =
       auto_detected?: boolean;
       /** Correlates the answer with a detected question (latency timeline). */
       candidate_id?: string;
+      /** Unique per request; echoed on every server event of this stream. */
+      request_id?: string;
       /** Started before the question was confirmed; the server persists it
        *  only after a matching `commit`. */
       speculative?: boolean;
@@ -187,7 +189,7 @@ export type AnswerClientMessage =
 /** Server → client. `started.question` is the latest user turn (for legacy
  *  rendering); `started.thread_id` echoes the client's thread_id when one is
  *  provided so the client can correlate `saved` rows. */
-export type AnswerServerMessage =
+export type AnswerServerMessage = (
   | {
       type: 'started';
       question: string;
@@ -215,7 +217,13 @@ export type AnswerServerMessage =
       to: AnswerProvider;
       reason: string;
     }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+) & {
+  /** Echo of the request's `request_id` on every event of its stream. A
+   *  superseded stream's trailing events (its `cancelled`, late tokens)
+   *  carry the old id — drop them. Absent on pong / legacy servers. */
+  request_id?: string;
+};
 
 // ─── /setup / context API ────────────────────────────────────────────────────
 

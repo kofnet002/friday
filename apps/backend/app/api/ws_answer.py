@@ -74,6 +74,19 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 log.warning("ws_answer.send_failed", error=str(exc))
 
     async def run_stream(request: dict[str, Any]) -> None:
+        # Echo the client's request_id on every event of this stream. One
+        # socket serves one stream at a time, but a superseded stream's
+        # trailing `cancelled` / tokens can still arrive after the client has
+        # moved on — the id lets it drop them instead of corrupting the new
+        # answer.
+        rid = request.get("request_id")
+        request_id = rid if isinstance(rid, str) and rid else None
+
+        async def send(payload: dict[str, Any]) -> None:
+            if request_id is not None:
+                payload["request_id"] = request_id
+            await send_json(payload)
+
         provider: Provider = request.get("provider", "gemini")
         thread_id = request.get("thread_id") or None
 
@@ -88,7 +101,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             # cancel) are dropped — we only want completed turns as context.
             tail_idx = _last_user_index(raw_messages)
             if tail_idx is None:
-                await send_json({"type": "error", "message": "no user turn in thread"})
+                await send({"type": "error", "message": "no user turn in thread"})
                 return
             question = str(raw_messages[tail_idx].get("content") or "").strip()
             prior_turns = tuple(
@@ -102,7 +115,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             prior_turns = ()
 
         if not question:
-            await send_json({"type": "error", "message": "empty question"})
+            await send({"type": "error", "message": "empty question"})
             return
 
         # Pre-flight budget check.
@@ -115,7 +128,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 used=budget.used,
                 limit=budget.limit,
             )
-            await send_json(
+            await send(
                 {
                     "type": "limit_exceeded",
                     "kind": "tokens",
@@ -169,7 +182,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         else:
             model = settings.openai_model
 
-        await send_json(
+        await send(
             {
                 "type": "started",
                 "question": question,
@@ -194,7 +207,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 effective_model = claude_answer_model()
             else:
                 effective_model = settings.openai_model
-            await send_json(
+            await send(
                 {
                     "type": "provider_changed",
                     "from": prev,
@@ -212,14 +225,14 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 if not collected:
                     latency.mark(candidate_id, "first_token")
                 collected.append(token)
-                await send_json({"type": "token", "text": token})
-            await send_json({"type": "done"})
+                await send({"type": "token", "text": token})
+            await send({"type": "done"})
         except asyncio.CancelledError:
-            await send_json({"type": "cancelled"})
+            await send({"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001
             log.error("ws_answer.stream_error", error=str(exc))
-            await send_json({"type": "error", "message": str(exc)})
+            await send({"type": "error", "message": str(exc)})
             return
 
         if commit_event is not None and candidate_id is not None:
@@ -244,7 +257,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                     auto_detected=auto_detected,
                     thread_id=thread_id,
                 )
-                await send_json({"type": "saved", "id": row_id, "thread_id": thread_id})
+                await send({"type": "saved", "id": row_id, "thread_id": thread_id})
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws_answer.save_failed", error=str(exc))
             # Cache the latest Q+A so the follow-up classifier gets real

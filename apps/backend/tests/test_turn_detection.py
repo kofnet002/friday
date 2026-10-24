@@ -100,6 +100,11 @@ class Harness:
 Q = "Tell me about a time you led a project."
 
 
+def _interviewer_paused(h: "Harness") -> None:
+    """Pretend the interviewer's last new word was a second ago."""
+    h.coord._last_word_at = time.time() - 1.0
+
+
 async def _settle() -> None:
     for _ in range(5):
         await asyncio.sleep(0)
@@ -221,6 +226,7 @@ async def test_candidate_speech_forces_end_once() -> None:
     h = Harness(FakeDetector({}))
     await h.coord.on_interviewer(_ev("StartOfTurn"))
     await h.coord.on_interviewer(_ev("Update", "Design a rate limiter for an API gateway."))
+    _interviewer_paused(h)
     await h.coord.on_candidate(_ev("Update", "Sure, so I would start"))
     await h.coord.on_candidate(_ev("Update", "Sure, so I would start with a token bucket"))
     assert h.forced == 1
@@ -238,6 +244,7 @@ async def test_candidate_noise_does_not_force_end(candidate_text: str) -> None:
     h = Harness(FakeDetector({}))
     await h.coord.on_interviewer(_ev("StartOfTurn"))
     await h.coord.on_interviewer(_ev("Update", "Design a rate limiter for an API gateway."))
+    _interviewer_paused(h)
     await h.coord.on_candidate(_ev("Update", candidate_text))
     assert h.forced == 0
 
@@ -453,3 +460,48 @@ def test_guess_follow_up() -> None:
         "Okay, switching gears. Tell me about the hardest bug you have ever fixed in production.",
         True,
     )
+
+
+async def test_stale_candidate_transcript_does_not_chop_interviewer() -> None:
+    """Flux resends the candidate's cumulative turn transcript until that
+    turn closes. Words already said before the interviewer cut in must not
+    count as "the candidate took the floor" (they chopped the interviewer's
+    question into fragments in a live run)."""
+    h = Harness(FakeDetector({}))
+    answer = "Sure, at my last company we shipped without load testing"
+    await h.coord.on_candidate(_ev("StartOfTurn", "Sure,"))
+    await h.coord.on_candidate(_ev("Update", answer))
+    # Interviewer cuts in while the candidate's turn is still open.
+    await h.coord.on_interviewer(_ev("StartOfTurn", "", turn=1))
+    await h.coord.on_interviewer(_ev("Update", "Great, thanks. Next, how would", turn=1))
+    _interviewer_paused(h)
+    await h.coord.on_candidate(_ev("Update", answer))  # stale resend
+    await h.coord.on_candidate(_ev("Update", answer + " so"))  # 1 new word
+    assert h.forced == 0
+    # The candidate genuinely starts talking again → that does count.
+    await h.coord.on_candidate(_ev("Update", answer + " so what I would do is"))
+    assert h.forced == 1
+
+
+async def test_new_candidate_turn_counts_from_zero() -> None:
+    h = Harness(FakeDetector({}))
+    await h.coord.on_candidate(_ev("EndOfTurn", "That's my answer for that one."))
+    await h.coord.on_interviewer(_ev("StartOfTurn", "", turn=1))
+    await h.coord.on_interviewer(_ev("Update", "How would you scale it", turn=1))
+    _interviewer_paused(h)
+    await h.coord.on_candidate(_ev("StartOfTurn", "So"))
+    await h.coord.on_candidate(_ev("Update", "So I would shard by user"))
+    assert h.forced == 1
+
+
+async def test_candidate_side_speech_ignored_while_interviewer_talking() -> None:
+    """Room audio on the mic (TV, another person) overlaps the interviewer
+    mid-sentence; it must not end their turn."""
+    h = Harness(FakeDetector({}))
+    await h.coord.on_interviewer(_ev("StartOfTurn"))
+    await h.coord.on_interviewer(_ev("Update", "So for this next part I want you to"))
+    await h.coord.on_candidate(_ev("Update", "honey did you see the news about the game"))
+    assert h.forced == 0
+    _interviewer_paused(h)
+    await h.coord.on_candidate(_ev("Update", "honey did you see the news about the game tonight"))
+    assert h.forced == 1

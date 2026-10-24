@@ -67,6 +67,11 @@ CANDIDATE_FLOOR_MIN_WORDS = 3
 # seconds above which the mic line is treated as echo leaking past AEC.
 ECHO_OVERLAP_THRESHOLD = 0.6
 ECHO_LOOKBACK_S = 12.0
+# The interviewer must have produced no new words for this long before
+# candidate-side speech may end their turn. A real candidate answers after
+# the interviewer pauses; other voices the mic picks up (a TV, someone in the
+# room — seen in a live run) talk OVER the interviewer.
+INTERVIEWER_PAUSE_FOR_FORCE_S = 0.6
 
 # A turn ending in one of these is mid-phrase even if Flux thinks it's done.
 _DANGLING_TAIL = frozenset(
@@ -217,6 +222,11 @@ class TurnCoordinator:
         # to the classifier: "the candidate started answering" is strong
         # evidence the question was complete.
         self._candidate_live = ""
+        # Words of `_candidate_live` already spoken when the current
+        # interviewer turn began. Flux resends the candidate's cumulative
+        # transcript until their turn closes, so only words past this mark
+        # are new speech.
+        self._candidate_baseline = 0
         self._state = "idle"
         self._closed = False
 
@@ -249,6 +259,7 @@ class TurnCoordinator:
             await self._on_end_of_turn(ev)
 
     def _begin_turn(self, ev: FluxTurnEvent) -> None:
+        self._candidate_baseline = len(_words(self._candidate_live))
         self._turn_active = True
         self._turn_index = ev.turn_index
         self._turn_transcript = ""
@@ -352,6 +363,14 @@ class TurnCoordinator:
         spec.emitted = spec.raw = False
 
     async def _on_end_of_turn(self, ev: FluxTurnEvent) -> None:
+        # trigger: model (Flux decided) | manual (ForceEndTurn) | timeout.
+        log.info(
+            "turn.end",
+            session_id=self.session_id,
+            turn=ev.turn_index,
+            trigger=ev.trigger,
+            eot_confidence=round(ev.end_of_turn_confidence, 2),
+        )
         self._turn_active = False
         self._cancel_checkpoint()
         text = ev.transcript or self._turn_transcript
@@ -397,12 +416,19 @@ class TurnCoordinator:
     async def on_candidate(self, ev: FluxTurnEvent) -> None:
         if self._closed:
             return
+        if ev.event == "StartOfTurn":
+            # A fresh candidate turn: its transcript restarts from zero.
+            self._candidate_live = ""
+            self._candidate_baseline = 0
         if ev.event in ("StartOfTurn", "Update", "EagerEndOfTurn") and ev.transcript:
             self._candidate_live = ev.transcript
             await self._emit(self._transcript_row(ev.transcript, "candidate", final=False))
             await self._maybe_force_end(ev.transcript)
-        elif ev.event == "EndOfTurn" and ev.transcript:
+        elif ev.event == "EndOfTurn":
             self._candidate_live = ""
+            self._candidate_baseline = 0
+            if not ev.transcript:
+                return
             row = self._transcript_row(ev.transcript, "candidate", final=True)
             await self._append_final(row)
             await self._emit(row)
@@ -410,11 +436,19 @@ class TurnCoordinator:
     async def _maybe_force_end(self, candidate_text: str) -> None:
         if not self._turn_active or self._forced_turn == self._turn_index:
             return
-        if len(_words(candidate_text)) < CANDIDATE_FLOOR_MIN_WORDS:
+        if (
+            self._last_word_at is not None
+            and time.time() - self._last_word_at < INTERVIEWER_PAUSE_FOR_FORCE_S
+        ):
+            return  # interviewer still mid-sentence
+        # Judge only what the candidate said after the interviewer started.
+        new_words = _words(candidate_text)[self._candidate_baseline :]
+        if len(new_words) < CANDIDATE_FLOOR_MIN_WORDS:
             return
-        if _looks_backchannel(candidate_text):
+        new_text = " ".join(new_words)
+        if _looks_backchannel(new_text):
             return
-        if is_echo(candidate_text, self._recent_interviewer_text()):
+        if is_echo(new_text, self._recent_interviewer_text()):
             log.info("turn.candidate_echo_ignored", session_id=self.session_id)
             return
         self._forced_turn = self._turn_index
