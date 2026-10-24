@@ -116,6 +116,8 @@ type TranscriptSource = 'interviewer' | 'candidate';
 interface TranscriptLine {
   text: string;
   source: TranscriptSource | null;
+  /** This interviewer line produced a detected question. */
+  asked?: boolean;
 }
 
 type Interims = Record<TranscriptSource, string>;
@@ -180,6 +182,10 @@ export function SessionClient() {
   const [panelError, setPanelError] = useState<string | null>(null);
   const [answerConnected, setAnswerConnected] = useState(false);
   const streamingIdRef = useRef<string | null>(null);
+  // request_id of the answer stream we currently expect events from. The
+  // server echoes it on every event; anything else is a superseded stream's
+  // trailing `cancelled` / tokens and must not touch the current entry.
+  const activeRequestRef = useRef<string | null>(null);
 
   // Question-detection model + lifecycle state. The model is a user
   // preference; the state reflects the per-session detector's current
@@ -285,10 +291,14 @@ export function SessionClient() {
   const audioUnsubsRef = useRef<Array<() => void>>([]);
   const codingUnsubsRef = useRef<Array<() => void>>([]);
   const finalsRef = useRef<TranscriptLine[]>([]);
+  const interimsRef = useRef<Interims>(EMPTY_INTERIMS);
   // Hidden speculative answer, if any (see PendingAnswer).
   const pendingRef = useRef<PendingAnswer | null>(null);
   // Audio framing negotiated at Start — resume must repeat it.
   const audioFormatRef = useRef<'tagged' | undefined>(undefined);
+  // A question was detected while the interviewer's line was still a live
+  // partial (they asked, then kept talking) — mark the line once it's final.
+  const markNextInterviewerFinalRef = useRef(false);
   const providerRef = useRef<AnswerProvider>('gemini');
   const codingLanguageRef = useRef<CodingLanguage>('Python');
   const activeFingerprintRef = useRef<string | null>(null);
@@ -315,6 +325,7 @@ export function SessionClient() {
   const FORCE_ASK_AUTODETECT_COOLDOWN_MS = 7000;
 
   finalsRef.current = finals;
+  interimsRef.current = interims;
   providerRef.current = provider;
   codingLanguageRef.current = codingLanguage;
   activeFingerprintRef.current = activeFingerprint;
@@ -482,6 +493,7 @@ export function SessionClient() {
 
   const onAnswerMessage = useCallback(
     (msg: AnswerServerMessage) => {
+      if (msg.request_id && msg.request_id !== activeRequestRef.current) return;
       const id = streamingIdRef.current;
       if (!id) return;
       // Tokens for a hidden speculative answer accumulate on the pending
@@ -494,7 +506,7 @@ export function SessionClient() {
           const delta = typeof patch === 'function' ? patch(pending.entry) : patch;
           pending.entry = { ...pending.entry, ...delta };
         } else {
-          apply(patch);
+          updateEntry(id, patch);
         }
       };
       if (msg.type === 'started') {
@@ -626,10 +638,12 @@ export function SessionClient() {
       // Confirms the speculative answer already streaming for this question:
       // reveal it (usually with tokens already in) instead of asking again.
       if (msg.candidate_id && revealPending(msg.candidate_id, msg.question)) {
+        markAskedLine();
         setActiveFeature('listen');
         return;
       }
       if (suppressAutoQuestion(msg.question)) return;
+      markAskedLine();
       // Backend classifier already decided whether this is a follow-up of
       // the prior thread; route accordingly. Falling back to askAnswer
       // when the flag is missing keeps legacy events working.
@@ -1029,11 +1043,34 @@ export function SessionClient() {
     const source = event.source ?? null;
     const slot: TranscriptSource = source ?? 'interviewer';
     if (event.is_final) {
-      setFinals((prev) => [...prev, { text: event.text, source }]);
+      const asked = source !== 'candidate' && markNextInterviewerFinalRef.current;
+      if (asked) markNextInterviewerFinalRef.current = false;
+      setFinals((prev) => [...prev, { text: event.text, source, asked }]);
       setInterims((prev) => ({ ...prev, [slot]: '' }));
     } else {
       setInterims((prev) => (prev[slot] === event.text ? prev : { ...prev, [slot]: event.text }));
     }
+  };
+
+  /** Highlight the interviewer line a detected question came from: the
+   *  latest final one, or — if the interviewer is still mid-line — the
+   *  line once it finalizes. */
+  const markAskedLine = () => {
+    if (interimsRef.current.interviewer) {
+      markNextInterviewerFinalRef.current = true;
+      return;
+    }
+    setFinals((prev) => {
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const line = prev[i];
+        if (!line || line.source === 'candidate') continue;
+        if (line.asked) return prev;
+        const next = [...prev];
+        next[i] = { ...line, asked: true };
+        return next;
+      }
+      return prev;
+    });
   };
 
   /** True when an auto-detected question should be ignored. */
@@ -1124,6 +1161,7 @@ export function SessionClient() {
     streamingIdRef.current = entry.id;
     ws.send({
       type: 'question',
+      request_id: beginRequest(),
       messages: wire,
       thread_id: entry.threadId,
       provider: providerRef.current,
@@ -1165,6 +1203,13 @@ export function SessionClient() {
       });
     }
     return true;
+  };
+
+  /** New answer request: becomes the only stream whose events we accept. */
+  const beginRequest = (): string => {
+    const rid = newId();
+    activeRequestRef.current = rid;
+    return rid;
   };
 
   const cancelInFlight = () => {
@@ -1232,6 +1277,7 @@ export function SessionClient() {
     streamingIdRef.current = id;
     ws.send({
       type: 'question',
+      request_id: beginRequest(),
       messages: [{ role: 'user', content: q }],
       thread_id: threadId,
       provider: providerRef.current,
@@ -1283,6 +1329,7 @@ export function SessionClient() {
     streamingIdRef.current = current.id;
     ws.send({
       type: 'question',
+      request_id: beginRequest(),
       // Send the full thread minus the trailing empty assistant placeholder
       // so the backend sees user/assistant/user… with the new turn last.
       messages: nextMessages.slice(0, -1),
@@ -2935,11 +2982,7 @@ function Transcript({
         onScroll={onScroll}
         className={cn(
           'relative z-10 overflow-y-auto scroll-smooth',
-          fill
-            ? 'min-h-0 flex-1 px-4 pb-4 pt-8'
-            : compact
-              ? 'h-[22vh] px-5 py-4'
-              : 'h-[60vh] px-8 py-8',
+          fill ? 'min-h-0 flex-1 px-3 py-3' : compact ? 'h-[22vh] px-5 py-4' : 'h-[60vh] px-8 py-8',
         )}
       >
         <div
@@ -2978,38 +3021,14 @@ function Transcript({
               </p>
             </div>
           ) : (
-            <div className={cn(privacyMode && 'select-none blur-md')}>
-              {finals.map((line, idx) =>
-                line.source === 'candidate' ? (
-                  <p
-                    key={idx}
-                    className="text-neutral-400 transition-opacity duration-200 dark:text-neutral-500"
-                  >
-                    <CandidateLabel />
-                    {line.text}
-                  </p>
-                ) : (
-                  <p
-                    key={idx}
-                    className="text-neutral-900 transition-opacity duration-200 dark:text-neutral-100"
-                  >
-                    {line.text}
-                  </p>
-                ),
-              )}
-              {interims.interviewer ? (
-                <p className="italic text-sky-600 dark:text-sky-300">
-                  {interims.interviewer}
-                  <span className="ml-1 inline-block animate-pulse">▍</span>
-                </p>
-              ) : null}
-              {interims.candidate ? (
-                <p className="italic text-neutral-400 dark:text-neutral-500">
-                  <CandidateLabel />
-                  {interims.candidate}
-                  <span className="ml-1 inline-block animate-pulse">▍</span>
-                </p>
-              ) : null}
+            <div
+              role="log"
+              aria-live="polite"
+              className={cn('flex flex-col gap-3.5', privacyMode && 'select-none blur-md')}
+            >
+              {groupTurns(finals, interims).map((turn, i) => (
+                <TranscriptTurn key={i} turn={turn} />
+              ))}
             </div>
           )}
         </div>
@@ -3038,11 +3057,77 @@ function Transcript({
   );
 }
 
-/** Marks transcript lines from the candidate's own mic. */
-function CandidateLabel() {
+/** Consecutive lines from one speaker, plus that speaker's live partial. */
+interface Turn {
+  speaker: TranscriptSource;
+  lines: TranscriptLine[];
+  partial: string;
+}
+
+/** Group finals into speaker turns and attach each live partial to the
+ *  speaker's trailing turn (or a new one if someone else spoke last). Lines
+ *  without a source (single-stream sessions) count as the interviewer. */
+function groupTurns(finals: TranscriptLine[], interims: Interims): Turn[] {
+  const turns: Turn[] = [];
+  for (const line of finals) {
+    const speaker: TranscriptSource = line.source ?? 'interviewer';
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === speaker) last.lines.push(line);
+    else turns.push({ speaker, lines: [line], partial: '' });
+  }
+  for (const speaker of ['interviewer', 'candidate'] as const) {
+    const partial = interims[speaker];
+    if (!partial) continue;
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === speaker) last.partial = partial;
+    else turns.push({ speaker, lines: [], partial });
+  }
+  return turns;
+}
+
+function TranscriptTurn({ turn }: { turn: Turn }) {
+  const isCandidate = turn.speaker === 'candidate';
+  const asked = turn.lines.some((l) => l.asked);
   return (
-    <span className="mr-1.5 select-none text-[0.7em] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
-      You
-    </span>
+    <section className={cn(isCandidate && 'pl-4')}>
+      <header className="mb-1 flex items-baseline justify-between gap-2 text-[11px] font-medium">
+        <span className="text-neutral-500 dark:text-neutral-400">
+          {isCandidate ? 'You' : 'Interviewer'}
+        </span>
+        {asked ? <span className="text-sky-600 dark:text-sky-400">Question</span> : null}
+      </header>
+      <div className="flex flex-col gap-1.5">
+        {turn.lines.map((line, i) => (
+          <p
+            key={i}
+            className={cn(
+              isCandidate
+                ? 'text-[0.92em] text-neutral-500 dark:text-neutral-400'
+                : cn(
+                    'border-l-2 pl-2.5',
+                    line.asked
+                      ? 'border-sky-500 text-neutral-950 dark:border-sky-400 dark:text-white'
+                      : 'border-neutral-300 text-neutral-800 dark:border-neutral-700 dark:text-neutral-200',
+                  ),
+            )}
+          >
+            {line.text}
+          </p>
+        ))}
+        {turn.partial ? (
+          <p
+            className={cn(
+              'italic',
+              isCandidate
+                ? 'text-[0.92em] text-neutral-400 dark:text-neutral-500'
+                : 'border-l-2 border-sky-300/60 pl-2.5 text-sky-700 dark:border-sky-400/40 dark:text-sky-300',
+            )}
+          >
+            {turn.partial}
+            <span className="ml-1 inline-block animate-pulse motion-reduce:animate-none">▍</span>
+          </p>
+        ) : null}
+      </div>
+    </section>
   );
 }

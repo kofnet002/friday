@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import type { AnswerMessage, AnswerProvider, QdModel, QdState } from '@friday/shared-types';
 
@@ -347,11 +347,13 @@ export function AnswerPanel({
         // toward the transcript's min-width, which is fine on the very
         // narrow widths the user can resize down to.
         <div className="flex min-h-0 flex-1 flex-row gap-4">
-          <div className="relative min-h-0 w-[30%] min-w-[13rem] max-w-[22rem] shrink-0 overflow-hidden rounded-xl border border-neutral-200/70 bg-white/40 dark:border-neutral-800/70 dark:bg-neutral-900/30">
-            <div className="pointer-events-none absolute left-3 top-2 z-10 inline-flex items-center gap-1 rounded-md bg-white/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500 shadow-sm backdrop-blur dark:bg-neutral-900/90 dark:text-neutral-400">
+          <div className="flex min-h-0 w-[30%] min-w-[13rem] max-w-[22rem] shrink-0 flex-col overflow-hidden rounded-xl border border-neutral-200/70 bg-white/40 dark:border-neutral-800/70 dark:bg-neutral-900/30">
+            {/* In-flow header — the old floating pill sat on top of the
+                first transcript line. */}
+            <div className="shrink-0 border-b border-neutral-200/60 px-3 py-2 text-[11px] font-medium text-neutral-500 dark:border-neutral-800/60 dark:text-neutral-400">
               Transcript
             </div>
-            <div className="h-full overflow-hidden">{transcriptSlot}</div>
+            <div className="min-h-0 flex-1 overflow-hidden">{transcriptSlot}</div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
             <AnswerBody
@@ -521,6 +523,9 @@ export function AnswerPanel({
   );
 }
 
+// Within this many px of the bottom counts as "following the stream".
+const ANSWER_PIN_THRESHOLD_PX = 48;
+
 function AnswerBody({
   answer,
   question,
@@ -544,8 +549,33 @@ function AnswerBody({
   // Anything in between is real conversation history that should be visible.
   const priorTurns = messages.slice(1, -1);
 
+  // Keep the newest streamed text in view. Follows the bottom while
+  // "pinned"; scrolling up to re-read unpins (so tokens don't yank the view
+  // away), scrolling back near the bottom re-pins, and every new question or
+  // follow-up re-pins.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+  const turnKey = `${question ?? ''}|${messages.length}`;
+
+  useLayoutEffect(() => {
+    pinnedRef.current = true;
+  }, [turnKey]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+  }, [answer, turnKey, isStreaming]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= ANSWER_PIN_THRESHOLD_PX;
+  };
+
   return (
     <div
+      ref={scrollRef}
+      onScroll={onScroll}
       className={cn(
         // Transparent answer body — no nested card chrome. Vertical
         // padding only; the popover's frame handles the rest.
