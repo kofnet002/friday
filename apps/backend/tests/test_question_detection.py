@@ -9,7 +9,9 @@ import pytest
 from app.prompts.question_detection import Utterance
 from app.services import question_detection as qd_mod
 from app.services.question_detection import (
+    ALLOWED_QD_MODELS,
     QuestionDetector,
+    _is_claude_qd_model,
     _is_openai_qd_model,
     _is_quota_error,
     _looks_backchannel,
@@ -104,6 +106,28 @@ def test_openai_model_detection() -> None:
     assert _is_openai_qd_model("gpt-4o-mini") is True
     assert _is_openai_qd_model("gemini-2.5-flash-lite") is False
     assert _is_openai_qd_model("gemini-2.5-pro") is False
+
+
+def test_claude_model_detection() -> None:
+    assert _is_claude_qd_model("claude-haiku-4-5") is True
+    assert _is_claude_qd_model("claude-opus-5-5") is True
+    assert _is_claude_qd_model("gpt-4o") is False
+    assert _is_claude_qd_model("gemini-2.5-flash-lite") is False
+
+
+def test_claude_models_are_selectable() -> None:
+    """The QD dropdown mirrors this set — a model missing here is rejected
+    by set_model and the user's pick silently does nothing."""
+    assert {"claude-haiku-4-5", "claude-opus-5-5"} <= ALLOWED_QD_MODELS
+
+
+def test_json_fence_stripped() -> None:
+    """Gemini/OpenAI are pinned to a JSON response mode; Claude is not, so a
+    stray ```json fence must not blow up the parse."""
+    assert qd_mod._strip_json_fence('```json\n{"is_question": true}\n```') == (
+        '{"is_question": true}'
+    )
+    assert qd_mod._strip_json_fence('{"is_question": true}') == '{"is_question": true}'
 
 
 # ─── QuestionDetector integration ───────────────────────────────────────────
@@ -713,3 +737,54 @@ async def test_close_does_not_hang_on_slow_callback(
     await det.close()
     elapsed = time.time() - start
     assert elapsed < 1.0, f"close() took {elapsed:.2f}s, should be < CLOSE_TIMEOUT_S"
+
+
+async def test_claude_pick_routes_to_claude(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Claude QD pick must reach the Claude transport, not Gemini/OpenAI."""
+    det, _rec = _make_detector(monkeypatch)
+    assert det.set_model("claude-haiku-4-5") is True
+
+    seen: list[str] = []
+
+    async def fake_claude(utterances: list[Utterance], model: str) -> dict[str, Any]:
+        seen.append(model)
+        return {"is_question": True, "confidence": 0.9, "extracted_question": "q?"}
+
+    monkeypatch.setattr(det, "_call_claude_qd_with_usage", fake_claude)
+    result = await det._call_qd_llm([Utterance(text="hi", speaker=None)], det._effective_qd_model())
+    assert seen == ["claude-haiku-4-5"]
+    assert result["is_question"] is True
+
+
+async def test_explicit_gpt4o_pick_is_not_downgraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Picking gpt-4o must run gpt-4o. The quota fallback exists for a Gemini
+    pick that 429'd; letting it rewrite an explicit OpenAI pick to the cheaper
+    gpt-4o-mini silently downgrades what the user chose."""
+    det, _rec = _make_detector(monkeypatch)
+    det.set_model("gpt-4o")
+    det._fallback_active = True
+    assert det._effective_qd_model() == "gpt-4o"
+    assert det._should_probe_gemini() is False
+
+
+async def test_gemini_pick_still_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flip side: a Gemini pick in fallback DOES route to the fallback
+    model — that path must keep working."""
+    det, _rec = _make_detector(monkeypatch)
+    det.set_model("gemini-2.5-flash-lite")
+    det._fallback_active = True
+    assert det._effective_qd_model() == settings.question_detection_fallback_model
+
+
+async def test_claude_pick_survives_gemini_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale Gemini-quota fallback must not hijack an explicit Claude pick —
+    Claude has its own credential and its own quota."""
+    det, _rec = _make_detector(monkeypatch)
+    det.set_model("claude-opus-5-5")
+    # Simulate a fallback that was armed before the user switched to Claude.
+    det._fallback_active = True
+    assert det._effective_qd_model() == "claude-opus-5-5"
+    # ...and it never wastes a probe on Gemini.
+    assert det._should_probe_gemini() is False

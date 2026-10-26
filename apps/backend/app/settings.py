@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,13 +26,27 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4o")
     deepseek_model: str = Field(default="deepseek-chat")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
-    # Claude / Anthropic. Opus 4.8 is the most capable tier; override via
-    # ANTHROPIC_MODEL (e.g. claude-sonnet-4-6 / claude-haiku-4-5) to trade
-    # quality for latency/cost. Note: the Opus 4.x family rejects
-    # temperature/top_p/top_k and budget_tokens — the streamers below omit
-    # them deliberately, so swapping in an older model that needs them would
-    # require changing the call, not just this string.
-    anthropic_model: str = Field(default="claude-opus-4-8")
+    # Claude / Anthropic. Opus 5.5 is the default; override via
+    # ANTHROPIC_MODEL (e.g. claude-sonnet-5-5 / claude-haiku-5-5) to trade
+    # quality for latency/cost. Per-model request differences (thinking
+    # headroom, effort support, refusal fallbacks) live in
+    # services/claude_api.py, so swapping this string is safe.
+    anthropic_model: str = Field(default="claude-opus-5-5")
+    # Which transport non-agent Claude calls use (answers, solves, vision,
+    # question detection, function calling):
+    #   auto         — API key when set, else the subscription CLI
+    #   api          — ANTHROPIC_API_KEY only (metered)
+    #   subscription — CLAUDE_CODE_OAUTH_TOKEN via the local CLI only
+    # The agent tool loop always runs on the CLI regardless (see below).
+    claude_transport: Literal["auto", "api", "subscription"] = Field(default="auto")
+    # Opus 5.5 always thinks; effort is the only depth/latency control.
+    # Latency-sensitive calls (answers, QD, vision, chat) use
+    # ANTHROPIC_EFFORT; coding solves use ANTHROPIC_SOLVE_EFFORT, and deep
+    # refines / hard problems step up to "high".
+    anthropic_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(default="low")
+    anthropic_solve_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
+        default="medium"
+    )
 
     # Deepgram streaming config
     deepgram_model: str = Field(default="nova-3")
@@ -77,6 +92,12 @@ class Settings(BaseSettings):
     # A NEW problem appearing is still caught within this window's tail; hit
     # Re-extract to bypass immediately. Set 0 to disable the cooldown.
     vision_cooldown_s: int = Field(default=25)
+    # Also try to detect function-calling assessments ("pick the tool + build
+    # the payload") from the same frames. Runs a SECOND vision call ONLY on
+    # frames the coding detector rejected (never adds cost to coding frames),
+    # and only while a panel is listening. Its own dedup cache + cooldown bound
+    # the churn on idle screens. Set false to disable this entirely.
+    function_call_detection_enabled: bool = Field(default=True)
 
     # ─── Agentic coding ("Claude Code" in-app) ─────────────────────────────
     # Drives the local `claude` CLI headlessly to solve hard problems with a
@@ -117,16 +138,15 @@ class Settings(BaseSettings):
     # Safe here because each run executes in a throwaway scratch dir; do NOT
     # enable for untrusted remote users.
     agent_skip_permissions: bool = Field(default=True)
-    # Model for the agent's tool loop. Defaults to Sonnet (fast) rather than
-    # Opus: the loop's speed of iteration matters more than depth of a single
-    # thought, and Opus's per-turn reasoning latency blows the timeout. Set to
-    # "opus"/"claude-opus-4-8" if you'd rather trade speed for raw capability.
-    agent_model: str = Field(default="sonnet")
+    # Model for the agent's tool loop. Opus 5.5 for raw capability; at
+    # AGENT_EFFORT=low it starts acting quickly, but its per-turn reasoning is
+    # still slower than Sonnet's — if runs hit AGENT_TIMEOUT_S, set "sonnet".
+    agent_model: str = Field(default="claude-opus-5-5")
     # Model used when Claude is the selected provider for VISION extraction
-    # (screen → problem) via the subscription CLI. Opus does the best OCR but
-    # is the slowest/most quota-heavy per frame — override to a faster Claude
-    # (e.g. claude-haiku-4-5) if the watch loop feels sluggish.
-    claude_vision_model: str = Field(default="claude-opus-4-8")
+    # (screen → problem), on either transport. Opus does the best OCR but is
+    # the slowest/most quota-heavy per frame — override to a faster Claude
+    # (e.g. claude-haiku-5-5) if the watch loop feels sluggish.
+    claude_vision_model: str = Field(default="claude-opus-5-5")
 
     # Persistence (SQLite for session context + resume)
     sqlite_path: str = Field(default="data/friday.db")

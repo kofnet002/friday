@@ -18,6 +18,8 @@ const QD_MODELS: readonly QdModel[] = [
   'gemini-2.5-pro',
   'gpt-4o-mini',
   'gpt-4o',
+  'claude-haiku-4-5',
+  'claude-opus-5-5',
 ];
 const CODING_LANGUAGES: readonly CodingLanguage[] = [
   'Python',

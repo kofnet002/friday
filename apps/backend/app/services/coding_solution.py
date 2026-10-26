@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
 
-from anthropic import AsyncAnthropic
 from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
@@ -19,7 +18,6 @@ from app.prompts.coding_modes import (
     tests_user_prompt,
 )
 from app.prompts.coding_solution import (
-    CodingSolutionContext,
     REFINE_ANTHROPIC_MODEL,
     REFINE_DEEPSEEK_MODEL,
     REFINE_GEMINI_MODEL,
@@ -31,12 +29,14 @@ from app.prompts.coding_solution import (
     SOLUTION_MAX_OUTPUT_TOKENS,
     SOLUTION_OPENAI_MODEL,
     SOLUTION_TEMPERATURE,
+    CodingSolutionContext,
     coding_solution_system_prompt,
     coding_solution_user_prompt,
 )
 from app.services import _breaker
 from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
+from app.services.claude_api import claude_transport, claude_uses_api, stream_claude_api
 from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek", "claude"]
@@ -58,13 +58,13 @@ def _coding_provider_chain(primary: Provider) -> list[Provider]:
         available.add("openai")
     if settings.deepseek_api_key:
         available.add("deepseek")
-    # Claude is in the INSTANT-solve chain only with an API key (fast SDK
-    # path). The subscription CLI is NOT — it does extended reasoning that
+    # Claude is in the INSTANT-solve chain only on the API transport (fast
+    # SDK path). The subscription CLI is NOT — it does extended reasoning that
     # takes minutes on hard problems, unusable for a live auto-solve (it would
     # just burn the timeout then fall back). Subscription Claude is reached via
     # the Agent instead (manual button, or auto-escalation when a fast solve
     # fails self-verify). See docs/agentic-coding.md.
-    if settings.anthropic_api_key:
+    if claude_uses_api():
         available.add("claude")
     chain = [p for p in _CODING_FALLBACK_ORDER[primary] if p in available]
     # Skip providers whose quota breaker is open (e.g. Gemini free tier
@@ -364,34 +364,28 @@ async def _stream_deepseek(system: str, user: str, *, deep: bool = False) -> Asy
 
 async def _stream_anthropic(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
     model = REFINE_ANTHROPIC_MODEL if deep else SOLUTION_ANTHROPIC_MODEL
-    # Subscription path: no API key but a Claude Code OAuth token is set. Drive
-    # the local `claude` CLI (single-shot, no tools) so the user's Claude
-    # selection runs on their subscription instead of silently falling back to
-    # gemini/openai. See services/claude_cli.py.
-    if not settings.anthropic_api_key and settings.claude_code_oauth_token:
+    # Subscription transport: drive the local `claude` CLI (single-shot, no
+    # tools) so the user's Claude selection runs on their subscription instead
+    # of silently falling back to gemini/openai. See services/claude_cli.py.
+    transport = claude_transport()
+    if transport == "cli":
         from app.services.claude_cli import stream_claude_cli_text
 
         async for text in stream_claude_cli_text(prompt=user, system=system, model=model):
             if text:
                 yield text
         return
+    if transport is None:
+        raise RuntimeError("no Claude credential for CLAUDE_TRANSPORT")
 
-    if not settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    # Opus 4.8 is used for both solve and refine — the deep flag only bumps
-    # the output budget so a refine has room for the diagnosis + rewritten
-    # code. No temperature/top_p (the Opus 4.x family rejects them) and no
-    # explicit thinking config: omitting `thinking` keeps first-token latency
-    # low while still getting Opus-tier code quality. `stream.text_stream`
-    # yields only the response text, never internal reasoning.
-    max_tokens = REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS
-    async with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
+    # Same model for solve and refine — `deep` raises effort and the output
+    # budget so a refine has room for the diagnosis + rewritten code.
+    # `text_stream` yields only the response text, never internal reasoning.
+    async for text in stream_claude_api(
         system=system,
-        messages=[{"role": "user", "content": user}],
-    ) as stream:
-        async for text in stream.text_stream:
-            if text:
-                yield text
+        user=user,
+        model=model,
+        max_tokens=REFINE_MAX_OUTPUT_TOKENS if deep else SOLUTION_MAX_OUTPUT_TOKENS,
+        effort="high" if deep else settings.anthropic_solve_effort,
+    ):
+        yield text

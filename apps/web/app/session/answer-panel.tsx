@@ -20,6 +20,7 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  Play,
   RotateCcw,
   Send,
   Sparkles,
@@ -75,6 +76,15 @@ export interface AnswerPanelProps {
   onFollowUp: (question: string) => void;
   connected: boolean;
   privacyMode: boolean;
+  /** True while the capture session is live (recording or paused). When
+   *  false the panel shows a Start CTA instead of silently doing nothing —
+   *  opening AI Help no longer starts listening on its own. */
+  listening: boolean;
+  /** True during the WS / Deepgram handshake, so the CTA can show progress
+   *  instead of inviting a second click. */
+  starting: boolean;
+  /** Begins the capture session. Wired to the Start button. */
+  onStart: () => void;
   /** 1-based position of the displayed entry; 0 when there are no entries. */
   entryIndex: number;
   /** Total number of in-memory Q&A entries this session. */
@@ -113,6 +123,9 @@ export function AnswerPanel({
   onFollowUp,
   connected,
   privacyMode,
+  listening,
+  starting,
+  onStart,
   entryIndex,
   entryCount,
   onPrev,
@@ -237,7 +250,7 @@ export function AnswerPanel({
               value={qdModel}
               onChange={(e) => onQdModelChange(e.target.value as QdModel)}
               className="h-7 text-xs"
-              title="Model used to detect questions in the live transcript"
+              title="Model used to detect questions in the live transcript. Claude options use your Anthropic API key when set; otherwise they run on your Claude Code subscription, which adds a few seconds per detection."
               aria-label="Question detection model"
             >
               {ALL_QD_MODELS.map((m) => (
@@ -257,7 +270,7 @@ export function AnswerPanel({
             <option value="gemini">Gemini 2.5 Flash</option>
             <option value="openai">GPT-4o</option>
             <option value="deepseek">DeepSeek</option>
-            <option value="claude">Claude Opus 4.8</option>
+            <option value="claude">Claude Opus 5.5</option>
           </Select>
 
           {/* History pager — chevrons step through every Q&A asked this
@@ -302,6 +315,12 @@ export function AnswerPanel({
           (see ANSWER_GENERATION_VERSION 1.1+), so the previous "Detected
           question" pill is suppressed to avoid showing the question twice.
           The `question` prop is still kept for accessibility / data flow. */}
+
+      {/* Start CTA. Opening this panel used to call start() as a side effect,
+          which meant the mic went live the moment the user peeked at the
+          panel. Now starting is an explicit act. Hidden once live so the
+          panel reads the same as before mid-session. */}
+      {!listening ? <StartListeningCta starting={starting} onStart={onStart} /> : null}
 
       {/* Error banner hidden in privacyMode — error text could itself leak
           context (provider names, model names, quota details) to a viewer. */}
@@ -638,6 +657,31 @@ function MenuItem({
   );
 }
 
+function StartListeningCta({ starting, onStart }: { starting: boolean; onStart: () => void }) {
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-neutral-200/80 bg-white/50 px-3 py-2.5 dark:border-neutral-800 dark:bg-neutral-900/40">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-neutral-800 dark:text-neutral-100">
+          {starting ? 'Starting…' : 'Not listening yet'}
+        </p>
+        <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+          {starting
+            ? 'Connecting the transcription stream.'
+            : 'Start to transcribe the conversation and auto-detect questions.'}
+        </p>
+      </div>
+      <Button type="button" onClick={onStart} disabled={starting} aria-label="Start listening">
+        {starting ? (
+          <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" aria-hidden />
+        ) : (
+          <Play className="mr-1 h-3.5 w-3.5" aria-hidden />
+        )}
+        {starting ? 'Starting' : 'Start'}
+      </Button>
+    </div>
+  );
+}
+
 function qdModelLabel(model: QdModel): string {
   switch (model) {
     case 'gemini-2.5-flash-lite':
@@ -650,6 +694,10 @@ function qdModelLabel(model: QdModel): string {
       return '4o-mini';
     case 'gpt-4o':
       return '4o';
+    case 'claude-haiku-4-5':
+      return 'Haiku 4.5';
+    case 'claude-opus-5-5':
+      return 'Opus 5.5';
   }
 }
 

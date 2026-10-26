@@ -32,6 +32,7 @@ import type {
   CodingLanguage,
   CodingMode,
   CodingSolutionServerMessage,
+  ExtractedFunctionCall,
   ExtractedProblem,
   QAHistoryRow,
   QdModel,
@@ -42,6 +43,7 @@ import type {
 
 import { Button } from '@/components/ui/button';
 import { PanelErrorBoundary } from '@/components/error-boundary';
+import { FunctionCallView } from './function-call-view';
 import { AnswerWs } from '@/lib/answer-ws';
 import { CodingWs } from '@/lib/coding-ws';
 import {
@@ -217,6 +219,12 @@ export function SessionClient() {
   // spend is visible the way the cost pill shows API spend.
   const [agentStats, setAgentStats] = useState<AgentSessionStats>({ runs: 0, totalMs: 0 });
   const agentRunStartRef = useRef<number>(0);
+  // Latest function-calling assessment detected on-screen (or null). Rendered
+  // at the top of the coding panel; the view owns its own solve+verify fetch.
+  const [functionCall, setFunctionCall] = useState<{
+    assessment: ExtractedFunctionCall;
+    fingerprint: string;
+  } | null>(null);
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
@@ -600,6 +608,19 @@ export function SessionClient() {
     // is mounted, unlike /ws/transcribe which requires Start).
     if (msg.type === 'coding_problem_detected') {
       onCodingProblemDetected(msg.problem, msg.fingerprint);
+      return;
+    }
+    // Function-calling assessment detected on-screen (a frame the coding
+    // detector rejected). Surface it at the top of the coding panel; the
+    // FunctionCallView auto-solves + self-verifies. Dedup by fingerprint so a
+    // re-detect of the same screen doesn't re-trigger the solve.
+    if (msg.type === 'function_call_detected') {
+      setFunctionCall((prev) =>
+        prev?.fingerprint === msg.fingerprint
+          ? prev
+          : { assessment: msg.assessment, fingerprint: msg.fingerprint },
+      );
+      setActiveFeature('coding');
       return;
     }
     // `saved` only fires for solve mode (other modes are ephemeral on the
@@ -1680,6 +1701,9 @@ export function SessionClient() {
             onFollowUp={followUp}
             connected={answerConnected}
             privacyMode={privacyMode}
+            listening={isLive}
+            starting={status === 'starting'}
+            onStart={start}
             transcriptSlot={
               <Transcript
                 status={status}
@@ -1696,6 +1720,17 @@ export function SessionClient() {
     if (key === 'coding') {
       return (
         <PanelErrorBoundary label="Coding mode">
+          {functionCall ? (
+            <div className="mb-3">
+              <FunctionCallView
+                assessment={functionCall.assessment}
+                fingerprint={functionCall.fingerprint}
+                provider={provider}
+                sessionId={sessionId}
+                onDismiss={() => setFunctionCall(null)}
+              />
+            </div>
+          ) : null}
           <CodingPanel
             active={codingActive}
             onToggle={toggleCodingMode}
@@ -1816,14 +1851,10 @@ export function SessionClient() {
                 <ClusterDivider />
                 <FeatureBar
                   active={activeFeature}
-                  onChange={(next) => {
-                    // AI Help doubles as the start-listening CTA when idle —
-                    // there's no separate Listen button on the bar anymore.
-                    if (next === 'listen' && status === 'idle') {
-                      start();
-                    }
-                    setActiveFeature(next);
-                  }}
+                  // Opening AI Help only opens the panel. Starting the
+                  // capture session is an explicit act on the panel's Start
+                  // button — peeking at the panel must never hot-mic the user.
+                  onChange={setActiveFeature}
                   badges={{
                     listen:
                       entries.some((e) => e.status === 'streaming') ||
@@ -1835,8 +1866,9 @@ export function SessionClient() {
             ) : null}
 
             {/* Capture cluster — appears only while live (timer + pause + stop)
-                or briefly during the starting handshake. AI Help is the start
-                CTA when idle, so this slot is empty in the resting state. */}
+                or briefly during the starting handshake. Starting happens
+                from the AI Help panel's Start button, so this slot is empty
+                in the resting state. */}
             {status !== 'idle' ? (
               <>
                 <ClusterDivider />
@@ -2061,8 +2093,8 @@ function CaptureCluster({
   const isStarting = status === 'starting';
 
   if (!isLive) {
-    // Idle: nothing here — AI Help is the entry point and starts the session
-    // when clicked. We still surface a small "Starting…" indicator so the user
+    // Idle: nothing here — the session is started from the AI Help panel's
+    // Start button. We still surface a small "Starting…" indicator so the user
     // gets feedback while the WS handshake / Deepgram connection comes up.
     if (!isStarting) return null;
     return (

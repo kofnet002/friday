@@ -20,6 +20,8 @@ from app.prompts.coding_extraction import (
     EXTRACTION_TEMPERATURE,
 )
 from app.redis_client import get_redis
+from app.services.claude_agent_auth import claude_available
+from app.services.claude_api import claude_vision
 from app.services.usage import record_vision_call
 from app.settings import settings
 
@@ -29,10 +31,9 @@ VISION_DEDUP_TTL_S = 60
 
 
 def _claude_vision_available() -> bool:
-    """Claude vision runs through the subscription CLI (or the API key if one
-    is set). Only route to it when a credential exists — otherwise a 'claude'
-    selection should fall back to gemini rather than hard-fail."""
-    return bool(settings.claude_code_oauth_token or settings.anthropic_api_key)
+    """Only route vision to Claude when a credential matches CLAUDE_TRANSPORT —
+    otherwise a 'claude' pick falls back to Gemini."""
+    return claude_available()
 
 
 def image_content_hash(image_bytes: bytes) -> str:
@@ -170,8 +171,8 @@ async def extract_problem(
     # Fallback chain — same idea as the solve path's stream_with_fallback. A
     # transient provider failure (timeout, 429, 503) shouldn't lose the
     # detection: fall through to the other vision-capable providers instead of
-    # 502-ing the frame. Claude (subscription CLI) is last — slowest, but a
-    # working OCR beats none when the API providers are down.
+    # 502-ing the frame. Claude is last — on the subscription CLI it's the
+    # slowest, but a working OCR beats none when the other providers are down.
     chain: list[Provider] = [chosen]
     if settings.openai_api_key and "openai" not in chain:
         chain.append("openai")
@@ -293,12 +294,9 @@ def _strip_json_fence(text: str) -> str:
 async def _extract_claude(
     image_bytes: bytes, session_id: str
 ) -> tuple[ExtractedProblem, int | None, str]:
-    """Vision extraction via the Claude subscription CLI (no API key needed).
-    Claude Code reads the screenshot and returns the extraction JSON."""
-    from app.services.claude_cli import run_claude_cli_vision
-
-    model = settings.claude_vision_model
-    raw = await run_claude_cli_vision(
+    """Vision extraction via Claude — the API (image block) or the
+    subscription CLI (Claude Code reads the screenshot), per CLAUDE_TRANSPORT."""
+    raw, output_tokens, model_used = await claude_vision(
         image_bytes=image_bytes,
         system=CODING_EXTRACTION_SYSTEM_PROMPT,
         prompt=(
@@ -306,12 +304,11 @@ async def _extract_claude(
             " a single JSON object matching the schema — no markdown fences, no"
             " commentary."
         ),
-        model=model,
+        model=settings.claude_vision_model,
+        max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
         session_id=session_id,
     )
-    problem = _parse_extraction_json(_strip_json_fence(raw))
-    # Token usage isn't reported by the CLI path (subscription, not metered).
-    return problem, None, f"claude-code:{model}"
+    return _parse_extraction_json(_strip_json_fence(raw)), output_tokens, model_used
 
 
 # Constraint-free mirror of ExtractedProblem for OpenAI STRICT structured

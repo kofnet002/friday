@@ -1,9 +1,9 @@
 """Single-shot Claude via the local CLI (subscription-backed, no tools).
 
-The normal coding "solve" path streams Claude through the Anthropic SDK, which
-needs ANTHROPIC_API_KEY. When the user has only a Claude SUBSCRIPTION (a
-CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`) and no API key, this drives
-the `claude` CLI in print mode instead — so selecting "Claude" actually runs
+With an API key, Claude calls go through the Anthropic SDK (services/claude_api).
+When the transport resolves to the Claude SUBSCRIPTION (a CLAUDE_CODE_OAUTH_TOKEN
+from `claude setup-token` and no API key, or CLAUDE_TRANSPORT=subscription), this
+drives the `claude` CLI in print mode instead — so selecting "Claude" actually runs
 Claude, billed against the subscription rather than the metered API.
 
 Unlike coding_agent (a full tool loop that writes + runs code), this is a plain
@@ -21,6 +21,7 @@ from pathlib import Path
 
 from app.logging import log
 from app.services.claude_agent_auth import claude_cli_ready, resolve_agent_env
+from app.services.claude_api import image_media_type
 from app.services.coding_agent import _STREAM_READ_LIMIT, _drain, _kill
 from app.settings import settings
 
@@ -70,16 +71,9 @@ class ClaudeCliUnavailableError(RuntimeError):
 
 def _image_ext(image_bytes: bytes) -> str:
     """Sniff a sensible extension so Claude Code's Read tool treats the file
-    as an image. Defaults to jpg (what the desktop capture emits)."""
-    if image_bytes[:8].startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if image_bytes[:3] == b"\xff\xd8\xff":
-        return "jpg"
-    if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
-        return "gif"
-    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
-        return "webp"
-    return "jpg"
+    as an image."""
+    subtype = image_media_type(image_bytes).split("/", 1)[1]
+    return "jpg" if subtype == "jpeg" else subtype
 
 
 async def run_claude_cli_vision(
@@ -93,8 +87,8 @@ async def run_claude_cli_vision(
     """One-shot vision call: write the screenshot to a scratch dir, let the CLI
     read it (Read tool), and return the final answer text.
 
-    Used for coding-problem extraction when Claude is the selected provider but
-    there's no ANTHROPIC_API_KEY — the subscription CLI does the OCR. `system`
+    Used for screenshot extraction when Claude is the selected provider on the
+    subscription transport — the CLI does the OCR (see claude_api.claude_vision). `system`
     is APPENDED to Claude Code's default prompt (so its image-reading behavior
     stays intact); `prompt` must tell it to read the file we wrote and reply
     with JSON only. Returns the raw result text (caller parses/validates).

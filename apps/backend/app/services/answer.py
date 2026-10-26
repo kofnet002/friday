@@ -3,8 +3,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
-from anthropic import AsyncAnthropic
-from anthropic.types import MessageParam
 from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
@@ -19,6 +17,8 @@ from app.prompts.answer_generation import (
 from app.services import _breaker
 from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
+from app.services.claude_agent_auth import claude_available
+from app.services.claude_api import claude_transport, claude_usage_model, stream_claude_api
 from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek", "claude"]
@@ -45,7 +45,10 @@ def _provider_chain(primary: Provider) -> list[Provider]:
         available.add("openai")
     if settings.deepseek_api_key:
         available.add("deepseek")
-    if settings.anthropic_api_key:
+    # Claude is the odd one out: it needs no API key when a Claude Code
+    # subscription token is configured (the CLI transport bills the
+    # subscription instead). See _stream_anthropic.
+    if claude_available():
         available.add("claude")
     chain = [p for p in _FALLBACK_ORDER[primary] if p in available]
     # Skip providers whose quota breaker is open (e.g. Gemini free tier
@@ -55,6 +58,12 @@ def _provider_chain(primary: Provider) -> list[Provider]:
     # fallback. If even the primary is missing, return [primary] so the
     # caller hits the existing "API_KEY not set" RuntimeError cleanly.
     return chain or [primary]
+
+
+def claude_answer_model() -> str:
+    """Model label to bill answer usage against (``claude-code:<model>`` on
+    the subscription transport, which deliberately has no PRICING row)."""
+    return claude_usage_model(settings.anthropic_model)
 
 
 async def stream_answer(
@@ -99,7 +108,16 @@ async def stream_answer(
             if p == "deepseek":
                 base = lambda: _stream_deepseek(system, user, context.prior_turns)  # noqa: E731
             elif p == "claude":
-                base = lambda: _stream_anthropic(system, user, context.prior_turns)  # noqa: E731
+                # The subscription CLI transport takes ONE prompt string (no
+                # messages array), so it needs the thread embedded the way the
+                # Gemini path does. Build both and let _stream_anthropic pick
+                # the one matching the transport it resolves to.
+                threaded = answer_user_prompt(
+                    question, context.recent_transcript, context.prior_turns
+                )
+                base = lambda: _stream_anthropic(  # noqa: E731
+                    system, user, threaded, context.prior_turns
+                )
             else:
                 base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
         return retry_stream(base, label=f"answer.{p}")
@@ -185,40 +203,48 @@ async def _stream_openai(
             yield delta.content
 
 
-def _anthropic_messages(user: str, prior: tuple[PriorTurn, ...]) -> list[MessageParam]:
-    """Build the Anthropic `messages` array. The system prompt is passed
-    separately (top-level `system=`), so this only carries the conversation:
-    prior assistant/user turns followed by the current user turn. Anthropic
-    requires the first turn to be `user` and merges consecutive same-role
-    turns, so the prior thread (which starts user, ends assistant) slots in
-    cleanly ahead of the final user question."""
-    msgs: list[MessageParam] = [
-        {"role": turn.role, "content": turn.content} for turn in prior
-    ]
-    msgs.append({"role": "user", "content": user})
-    return msgs
-
-
 async def _stream_anthropic(
     system: str,
     user: str,
+    threaded_user: str,
     prior: tuple[PriorTurn, ...],
 ) -> AsyncIterator[str]:
-    if not settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    # No temperature/top_p — the Opus 4.x family rejects them. Thinking is
-    # omitted for the lowest first-token latency; the answer system prompt
-    # already pins the output format tightly.
-    async with client.messages.stream(
-        model=settings.anthropic_model,
-        max_tokens=1500,
-        system=system,
-        messages=_anthropic_messages(user, prior),
-    ) as stream:
-        async for text in stream.text_stream:
+    """Stream an answer from Claude on the transport claude_transport() picks.
+
+    - **api** → the Anthropic SDK, with `prior` sent as a real multi-turn
+      `messages` array (best fidelity). Anthropic requires the first turn to
+      be `user` and merges consecutive same-role turns, so the prior thread
+      (starts user, ends assistant) slots in ahead of the final question.
+    - **cli** → the local `claude` CLI in print mode, billed against the
+      subscription. It accepts a single prompt, so we send `threaded_user`
+      (history embedded in the prompt) instead.
+    """
+    transport = claude_transport()
+    if transport == "cli":
+        from app.services.claude_cli import stream_claude_cli_text
+
+        async for text in stream_claude_cli_text(
+            prompt=threaded_user,
+            system=system,
+            model=settings.anthropic_model,
+        ):
             if text:
                 yield text
+        return
+    if transport is None:
+        raise RuntimeError("no Claude credential for CLAUDE_TRANSPORT")
+
+    # Low effort by default: thinking can't be turned off on Opus 5.5, and
+    # the answer system prompt already pins the output format tightly.
+    async for text in stream_claude_api(
+        system=system,
+        user=user,
+        model=settings.anthropic_model,
+        max_tokens=1500,
+        effort=settings.anthropic_effort,
+        prior=((turn.role, turn.content) for turn in prior),
+    ):
+        yield text
 
 
 async def _stream_deepseek(

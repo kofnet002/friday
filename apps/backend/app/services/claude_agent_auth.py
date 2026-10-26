@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 
+from app.services.claude_api import claude_transport
 from app.settings import settings
 
 
@@ -31,6 +32,16 @@ def _token_for_session(session_id: str | None) -> str:
     session_id (each user pastes their own `claude setup-token` output). For
     now every session resolves to the single configured token."""
     return settings.claude_code_oauth_token
+
+
+def claude_available() -> bool:
+    """True when a Claude credential matching CLAUDE_TRANSPORT is configured.
+
+    Either a subscription OAuth token (CLI path) or a metered API key (SDK
+    path). Used by provider chains to decide whether "claude" is a real
+    option — which of the two runs is decided by claude_api.claude_transport.
+    """
+    return claude_transport() is not None
 
 
 def claude_cli_ready(session_id: str | None = None) -> str | None:

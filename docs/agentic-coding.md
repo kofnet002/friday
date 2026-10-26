@@ -84,20 +84,42 @@ every time, Claude's (slower, verified) power only when the fast answer is
 actually wrong. The manual **Agent** button does the same on demand.
 
 Note: because the subscription CLI can't do a snappy solve, selecting "Claude"
-in the dropdown does not run Claude for the _instant_ solve (it needs an
-`ANTHROPIC_API_KEY` for the fast SDK path to enter the solve chain). Subscription
+in the dropdown does not run Claude for the _instant_ solve unless the transport
+resolves to the API (an `ANTHROPIC_API_KEY` with `CLAUDE_TRANSPORT=auto|api` —
+see "Claude transport" below). Subscription
 Claude reaches you through the Agent — automatically on verify-failure, or via
 the button.
 
 ### Vision extraction with Claude
 
-Picking **Claude** still routes _vision_ (screen → problem) through the
-subscription CLI when there's no `ANTHROPIC_API_KEY`: Claude Code reads the
+With an API key, picking **Claude** sends the screenshot straight to the
+Messages API as an image block (fast, real token counts). On the subscription
+transport, _vision_ (screen → problem) goes through the CLI instead: Claude Code reads the
 screenshot (`services/claude_cli.py: run_claude_cli_vision`) and returns the
 `ExtractedProblem` (incl. the `function_signature` boilerplate that feeds the
 solver's `Starter code`). But it's slow (~10-20s) and weaker models (haiku)
 produce sub-threshold confidence — prefer **`VISION_PROVIDER=openai`** (gpt-4o,
 ~2s, reliable) for detection while the Agent handles Claude-quality solving.
+
+### Claude transport (`CLAUDE_TRANSPORT`)
+
+Every non-agent Claude call — answers, instant solves, vision, question
+detection, function calling, `/api/chat` — picks its transport in one place,
+`services/claude_api.py: claude_transport()`:
+
+| `CLAUDE_TRANSPORT` | API key set      | Only subscription token |
+| ------------------ | ---------------- | ----------------------- |
+| `auto` (default)   | API (metered)    | subscription CLI        |
+| `api`              | API (metered)    | Claude unavailable      |
+| `subscription`     | subscription CLI | subscription CLI        |
+
+The Agent is unaffected: it always drives the CLI and, when a subscription
+token exists, strips `ANTHROPIC_API_KEY` from its env so it can't fall back to
+metered billing. On the API path, `ANTHROPIC_EFFORT` (default `low`) controls
+latency-sensitive calls and `ANTHROPIC_SOLVE_EFFORT` (default `medium`) coding
+solves; deep refines use `high`. Opus 5.5 always thinks, so `claude_api` adds
+thinking headroom to `max_tokens` and opts into server-side refusal fallbacks
+(`fallbacks: "default"`).
 
 ### Cutting vision quota churn (`VISION_COOLDOWN_S`)
 
@@ -124,9 +146,10 @@ deduping a new problem away.)
 | `AGENT_ALLOWED_TOOLS`     | `Read,Write,Edit,Bash` | Tools the agent may use                                                                               |
 | `AGENT_DISALLOWED_TOOLS`  | `WebSearch,WebFetch`   | Blocked tools — keeps the agent solving, not googling                                                 |
 | `AGENT_SKIP_PERMISSIONS`  | `true`                 | Run tools without prompts (needed headless)                                                           |
-| `AGENT_MODEL`             | `sonnet`               | Agent model — Sonnet (fast loop) beats Opus (slow thinking)                                           |
+| `AGENT_MODEL`             | `claude-opus-5-5`      | Agent model — set `sonnet` if Opus turns hit `AGENT_TIMEOUT_S`                                        |
 | `AGENT_EFFORT`            | `low`                  | Reasoning effort — low = fast turns; the loop compensates                                             |
-| `CLAUDE_VISION_MODEL`     | `claude-opus-4-8`      | Model for Claude vision extraction (screen→problem); set a faster Claude if the watch loop feels slow |
+| `CLAUDE_VISION_MODEL`     | `claude-opus-5-5`      | Model for Claude vision extraction (screen→problem); set a faster Claude if the watch loop feels slow |
+| `CLAUDE_TRANSPORT`        | `auto`                 | `auto` \| `api` \| `subscription` — credential for non-agent Claude calls (see above)                 |
 
 ## Status / caveats
 

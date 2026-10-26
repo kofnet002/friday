@@ -26,8 +26,11 @@ PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o-mini": (0.15, 0.60),
     "deepseek-chat": (0.14, 0.28),
     "deepseek-reasoner": (0.55, 2.19),
-    # Claude (Anthropic). Opus 4.8 list price; add sonnet/haiku rows here if
-    # you point ANTHROPIC_MODEL at a cheaper tier.
+    # Claude (Anthropic) list prices. Output includes thinking tokens, which
+    # the API transport reports in usage.output_tokens.
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-haiku-5-5": (0.10, 0.50),
     "claude-opus-4-8": (5.00, 25.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
