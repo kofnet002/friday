@@ -173,6 +173,9 @@ def _make_detector(monkeypatch: pytest.MonkeyPatch) -> tuple[QuestionDetector, _
     monkeypatch.setattr(qd_mod, "AsyncOpenAI", lambda **_: _FakeOpenAI())
     monkeypatch.setattr(settings, "gemini_api_key", "fake-gemini-key")
     monkeypatch.setattr(settings, "openai_api_key", "fake-openai-key")
+    # These tests exercise the OpenAI fallback path; pin it so a local .env
+    # pointing the fallback at Claude doesn't change what they test.
+    monkeypatch.setattr(settings, "question_detection_fallback_model", "gpt-4o-mini")
     det = QuestionDetector(
         session_id="t",
         on_question=rec.on_question,

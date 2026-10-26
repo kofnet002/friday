@@ -10,12 +10,18 @@ from app.db import append_qa, get_session
 from app.logging import log
 from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import recent_transcript_text, set_last_answer
+from app.services import latency
 from app.services.answer import Provider, claude_answer_model, stream_answer
 from app.services.limits import check_token_budget
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
 
 router = APIRouter()
+
+# A speculative answer (started at the interviewer's EagerEndOfTurn) is only
+# persisted once the client confirms the question with {"type": "commit"}.
+# If the confirmation never comes the answer is dropped, not saved.
+SPECULATIVE_COMMIT_TIMEOUT_S = 30.0
 
 # Window of transcript automatically included as `recent_conversation` if the
 # client doesn't pass one explicitly. Roomier than question-detection's 30s so
@@ -53,6 +59,12 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
 
     in_flight: asyncio.Task[None] | None = None
     send_lock = asyncio.Lock()
+    # candidate_id → set when the client commits that speculative question.
+    commits: dict[str, asyncio.Event] = {}
+    # candidate_id → the confirmed question wording sent with the commit. A
+    # speculative answer is requested with the RAW turn text; history and
+    # the follow-up context must record what was actually asked.
+    committed_questions: dict[str, str] = {}
 
     async def send_json(payload: dict[str, Any]) -> None:
         async with send_lock:
@@ -62,6 +74,19 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 log.warning("ws_answer.send_failed", error=str(exc))
 
     async def run_stream(request: dict[str, Any]) -> None:
+        # Echo the client's request_id on every event of this stream. One
+        # socket serves one stream at a time, but a superseded stream's
+        # trailing `cancelled` / tokens can still arrive after the client has
+        # moved on — the id lets it drop them instead of corrupting the new
+        # answer.
+        rid = request.get("request_id")
+        request_id = rid if isinstance(rid, str) and rid else None
+
+        async def send(payload: dict[str, Any]) -> None:
+            if request_id is not None:
+                payload["request_id"] = request_id
+            await send_json(payload)
+
         provider: Provider = request.get("provider", "gemini")
         thread_id = request.get("thread_id") or None
 
@@ -76,7 +101,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             # cancel) are dropped — we only want completed turns as context.
             tail_idx = _last_user_index(raw_messages)
             if tail_idx is None:
-                await send_json({"type": "error", "message": "no user turn in thread"})
+                await send({"type": "error", "message": "no user turn in thread"})
                 return
             question = str(raw_messages[tail_idx].get("content") or "").strip()
             prior_turns = tuple(
@@ -90,7 +115,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             prior_turns = ()
 
         if not question:
-            await send_json({"type": "error", "message": "empty question"})
+            await send({"type": "error", "message": "empty question"})
             return
 
         # Pre-flight budget check.
@@ -103,7 +128,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 used=budget.used,
                 limit=budget.limit,
             )
-            await send_json(
+            await send(
                 {
                     "type": "limit_exceeded",
                     "kind": "tokens",
@@ -141,6 +166,13 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         )
 
         auto_detected = bool(request.get("auto_detected", False))
+        cid_raw = request.get("candidate_id")
+        candidate_id = cid_raw if isinstance(cid_raw, str) and cid_raw else None
+        commit_event = (
+            commits.setdefault(candidate_id, asyncio.Event())
+            if candidate_id is not None and request.get("speculative")
+            else None
+        )
         if provider == "gemini":
             model = settings.gemini_model
         elif provider == "deepseek":
@@ -150,7 +182,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         else:
             model = settings.openai_model
 
-        await send_json(
+        await send(
             {
                 "type": "started",
                 "question": question,
@@ -175,7 +207,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 effective_model = claude_answer_model()
             else:
                 effective_model = settings.openai_model
-            await send_json(
+            await send(
                 {
                     "type": "provider_changed",
                     "from": prev,
@@ -190,16 +222,28 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             async for token in stream_answer(
                 provider, question, context, on_fallback=_on_fallback
             ):
+                if not collected:
+                    latency.mark(candidate_id, "first_token")
                 collected.append(token)
-                await send_json({"type": "token", "text": token})
-            await send_json({"type": "done"})
+                await send({"type": "token", "text": token})
+            await send({"type": "done"})
         except asyncio.CancelledError:
-            await send_json({"type": "cancelled"})
+            await send({"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001
             log.error("ws_answer.stream_error", error=str(exc))
-            await send_json({"type": "error", "message": str(exc)})
+            await send({"type": "error", "message": str(exc)})
             return
+
+        if commit_event is not None and candidate_id is not None:
+            try:
+                await asyncio.wait_for(commit_event.wait(), SPECULATIVE_COMMIT_TIMEOUT_S)
+            except TimeoutError:
+                log.info("ws_answer.speculative_dropped", candidate_id=candidate_id)
+                return
+            finally:
+                commits.pop(candidate_id, None)
+            question = committed_questions.pop(candidate_id, "") or question
 
         answer_text = "".join(collected).strip()
         if answer_text and session_id:
@@ -213,7 +257,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                     auto_detected=auto_detected,
                     thread_id=thread_id,
                 )
-                await send_json({"type": "saved", "id": row_id, "thread_id": thread_id})
+                await send({"type": "saved", "id": row_id, "thread_id": thread_id})
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws_answer.save_failed", error=str(exc))
             # Cache the latest Q+A so the follow-up classifier gets real
@@ -265,6 +309,13 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                     except (asyncio.CancelledError, Exception):  # noqa: BLE001
                         pass
                 in_flight = asyncio.create_task(run_stream(message))
+            elif kind == "commit":
+                cid = message.get("candidate_id")
+                if isinstance(cid, str) and cid:
+                    final_q = message.get("question")
+                    if isinstance(final_q, str) and final_q.strip():
+                        committed_questions[cid] = final_q.strip()
+                    commits.setdefault(cid, asyncio.Event()).set()
             elif kind == "cancel":
                 if in_flight and not in_flight.done():
                     in_flight.cancel()

@@ -40,6 +40,10 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 _THINKING_HEADROOM = 16_000
 # Pre-5 families: omitting `thinking` means no thinking, so no headroom.
 _NO_DEFAULT_THINKING_PREFIXES = ("claude-opus-4", "claude-sonnet-4", "claude-haiku-4", "claude-3")
+# Default-thinking models that accept `thinking: {type: "disabled"}` (at
+# effort high or below). Opus 5.5 / Sonnet 5.5 / Fable reject it with a 400,
+# so a `thinking=False` request on those keeps thinking at the given effort.
+_THINKING_DISABLE_OK = frozenset({"claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5"})
 # `output_config.effort` errors on these (Sonnet 4.5 / Haiku 4.5 and older).
 _NO_EFFORT_PREFIXES = ("claude-sonnet-4-5", "claude-haiku-4", "claude-3")
 # Models that accept `fallbacks: "default"` (server-side re-run of a
@@ -103,13 +107,20 @@ def _request_kwargs(
     model: str,
     max_tokens: int,
     effort: Effort | None,
+    thinking: bool = True,
 ) -> dict[str, Any]:
     """Per-model request shape. Never sends temperature/top_p/top_k — every
-    current Claude model rejects them."""
+    current Claude model rejects them.
+
+    `thinking=False` turns thinking off where the model allows it — for tiny
+    latency-critical classifiers (question detection) where reasoning only
+    adds time."""
     kwargs: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": messages}
     if system:
         kwargs["system"] = system
-    if not model.startswith(_NO_DEFAULT_THINKING_PREFIXES):
+    if not thinking and model in _THINKING_DISABLE_OK:
+        kwargs["thinking"] = {"type": "disabled"}
+    elif not model.startswith(_NO_DEFAULT_THINKING_PREFIXES):
         kwargs["max_tokens"] = max_tokens + _THINKING_HEADROOM
     if effort and not model.startswith(_NO_EFFORT_PREFIXES):
         kwargs["output_config"] = {"effort": effort}
@@ -204,6 +215,7 @@ async def complete_claude_api(
     max_tokens: int,
     effort: Effort | None,
     image: tuple[bytes, str] | None = None,
+    thinking: bool = True,
 ) -> tuple[str, int, int]:
     """One-shot completion → (text, input_tokens, output_tokens).
 
@@ -215,7 +227,12 @@ async def complete_claude_api(
     ]
     async with anthropic_client().beta.messages.stream(
         **_request_kwargs(
-            system=system, messages=messages, model=model, max_tokens=max_tokens, effort=effort
+            system=system,
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            effort=effort,
+            thinking=thinking,
         )
     ) as stream:
         final = await stream.get_final_message()

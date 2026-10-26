@@ -63,7 +63,7 @@ def _provider_chain(primary: Provider) -> list[Provider]:
 def claude_answer_model() -> str:
     """Model label to bill answer usage against (``claude-code:<model>`` on
     the subscription transport, which deliberately has no PRICING row)."""
-    return claude_usage_model(settings.anthropic_model)
+    return claude_usage_model(settings.anthropic_answer_model)
 
 
 async def stream_answer(
@@ -226,7 +226,7 @@ async def _stream_anthropic(
         async for text in stream_claude_cli_text(
             prompt=threaded_user,
             system=system,
-            model=settings.anthropic_model,
+            model=settings.anthropic_answer_model,
         ):
             if text:
                 yield text
@@ -239,7 +239,7 @@ async def _stream_anthropic(
     async for text in stream_claude_api(
         system=system,
         user=user,
-        model=settings.anthropic_model,
+        model=settings.anthropic_answer_model,
         max_tokens=1500,
         effort=settings.anthropic_effort,
         prior=((turn.role, turn.content) for turn in prior),

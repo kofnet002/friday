@@ -14,7 +14,7 @@ async def stream_claude(message: str) -> AsyncIterator[str]:
     async for text in stream_claude_api(
         system="",
         user=message,
-        model=settings.anthropic_model,
+        model=settings.anthropic_answer_model,
         max_tokens=_CHAT_MAX_TOKENS,
         effort=settings.anthropic_effort,
     ):

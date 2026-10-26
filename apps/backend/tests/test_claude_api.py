@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
 
 from app.services.claude_api import (
@@ -87,3 +89,45 @@ def test_request_kwargs_older_models() -> None:
 )
 def test_image_media_type(head: bytes, mime: str) -> None:
     assert image_media_type(head) == mime
+
+
+def test_request_kwargs_thinking_off() -> None:
+    kw = _request_kwargs(
+        system="",
+        messages=[],
+        model="claude-haiku-5-5",
+        max_tokens=320,
+        effort="low",
+        thinking=False,
+    )
+    assert kw["thinking"] == {"type": "disabled"} and kw["max_tokens"] == 320
+    # Opus 5.5 rejects disabled thinking — keep it on, with headroom.
+    kw = _request_kwargs(
+        system="",
+        messages=[],
+        model="claude-opus-5-5",
+        max_tokens=320,
+        effort="low",
+        thinking=False,
+    )
+    assert "thinking" not in kw and kw["max_tokens"] == 320 + _THINKING_HEADROOM
+
+
+async def test_live_answers_use_answer_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live answers run on ANTHROPIC_ANSWER_MODEL, not ANTHROPIC_MODEL (which
+    stays on coding solves)."""
+    from app.services import answer as answer_mod
+
+    seen: list[str] = []
+
+    async def fake_stream(**kw: object) -> AsyncIterator[str]:
+        seen.append(str(kw["model"]))
+        yield "ok"
+
+    _creds(monkeypatch, key="sk", token="", mode="auto")
+    monkeypatch.setattr(settings, "anthropic_model", "claude-opus-5-5")
+    monkeypatch.setattr(settings, "anthropic_answer_model", "claude-sonnet-5-5")
+    monkeypatch.setattr(answer_mod, "stream_claude_api", fake_stream)
+    out = [t async for t in answer_mod._stream_anthropic("sys", "q", "q", ())]
+    assert out == ["ok"] and seen == ["claude-sonnet-5-5"]
+    assert answer_mod.claude_answer_model() == "claude-sonnet-5-5"

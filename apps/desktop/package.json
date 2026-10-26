@@ -5,7 +5,8 @@
   "main": "main.js",
   "build": {
     "extendInfo": {
-      "LSUIElement": true
+      "LSUIElement": true,
+      "NSMicrophoneUsageDescription": "Friday listens to your microphone so it can tell when you are speaking during an interview."
     }
   },
   "scripts": {

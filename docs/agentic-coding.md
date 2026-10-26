@@ -113,6 +113,11 @@ detection, function calling, `/api/chat` — picks its transport in one place,
 | `api`              | API (metered)    | Claude unavailable      |
 | `subscription`     | subscription CLI | subscription CLI        |
 
+Live Copilot answers use their own model, `ANTHROPIC_ANSWER_MODEL` (default
+`claude-sonnet-5-5`): measured on the real answer prompt it starts streaming in
+~1.0 s median versus ~2.3 s for Opus 5.5, at half the price, with equivalent
+answers. `ANTHROPIC_MODEL` (Opus 5.5) keeps coding solves and function calling.
+
 The Agent is unaffected: it always drives the CLI and, when a subscription
 token exists, strips `ANTHROPIC_API_KEY` from its env so it can't fall back to
 metered billing. On the API path, `ANTHROPIC_EFFORT` (default `low`) controls

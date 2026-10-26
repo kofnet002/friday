@@ -75,9 +75,20 @@ async def recent_transcript_entries(
 
 
 async def recent_transcript_text(session_id: str, window_seconds: float) -> str:
-    """Concatenate the text of finals from the last `window_seconds`."""
+    """Concatenate the text of finals from the last `window_seconds`.
+
+    With mic capture the window holds both voices, so lines are prefixed
+    with who spoke (`Interviewer:` / `Candidate:`); rows without a source
+    (single-stream sessions) stay plain."""
     entries = await recent_transcript_entries(session_id, window_seconds)
-    return " ".join(str(e["text"]) for e in entries).strip()
+    if not any(e.get("source") for e in entries):
+        return " ".join(str(e["text"]) for e in entries).strip()
+    labels = {"interviewer": "Interviewer", "candidate": "Candidate"}
+    lines = [
+        f"{labels[str(e['source'])]}: {e['text']}" if e.get("source") in labels else str(e["text"])
+        for e in entries
+    ]
+    return "\n".join(lines).strip()
 
 
 # ─── question-detection cross-WS state ──────────────────────────────────────
