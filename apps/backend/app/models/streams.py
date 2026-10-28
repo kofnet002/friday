@@ -75,6 +75,41 @@ async def openai_text(
         on_usage(input_tokens, output_tokens)
 
 
+async def openai_responses_text(
+    stream: Any, on_usage: UsageCallback | None = None
+) -> AsyncGenerator[str, None]:
+    """Yield output-text deltas from a Responses API stream. Web-search
+    calls arrive as their own events and are skipped; usage rides on the
+    final response.completed/incomplete event (output_tokens includes
+    reasoning). A failed response, or one cut short before any text (a
+    reasoning model that spent its whole cap thinking), raises so the
+    provider chain can fall back instead of showing a blank answer."""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    emitted = False
+    async for event in stream:
+        if event.type == "response.output_text.delta":
+            if event.delta:
+                emitted = True
+                yield event.delta
+        elif event.type in ("response.completed", "response.incomplete"):
+            usage = getattr(event.response, "usage", None)
+            if usage is not None:
+                input_tokens = _int_or_none(usage.input_tokens)
+                output_tokens = _int_or_none(usage.output_tokens)
+            if event.type == "response.incomplete" and not emitted:
+                details = getattr(event.response, "incomplete_details", None)
+                reason = getattr(details, "reason", None)
+                raise RuntimeError(f"OpenAI response incomplete: {reason}")
+        elif event.type == "response.failed":
+            error = getattr(event.response, "error", None)
+            raise RuntimeError(f"OpenAI response failed: {error}")
+        elif event.type == "error":
+            raise RuntimeError(f"OpenAI stream error: {getattr(event, 'message', None)}")
+    if on_usage is not None:
+        on_usage(input_tokens, output_tokens)
+
+
 async def gemini_text(
     stream: Any, on_usage: UsageCallback | None = None
 ) -> AsyncGenerator[str, None]:

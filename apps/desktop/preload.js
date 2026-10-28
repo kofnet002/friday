@@ -17,6 +17,7 @@ const codingListeners = {
 const windowListeners = {
   status: new Set(),
   toast: new Set(),
+  answerLatest: new Set(),
 };
 
 ipcRenderer.on('audio:frame', (_evt, arrayBuffer) => {
@@ -49,6 +50,9 @@ ipcRenderer.on('window:status', (_evt, payload) => {
 });
 ipcRenderer.on('window:toast', (_evt, payload) => {
   for (const cb of windowListeners.toast) cb(payload);
+});
+ipcRenderer.on('window:answer_latest', () => {
+  for (const cb of windowListeners.answerLatest) cb();
 });
 
 contextBridge.exposeInMainWorld('friday', {
@@ -115,6 +119,10 @@ contextBridge.exposeInMainWorld('friday', {
     onToast: (cb) => {
       windowListeners.toast.add(cb);
       return () => windowListeners.toast.delete(cb);
+    },
+    onAnswerLatest: (cb) => {
+      windowListeners.answerLatest.add(cb);
+      return () => windowListeners.answerLatest.delete(cb);
     },
   },
   stealth: {

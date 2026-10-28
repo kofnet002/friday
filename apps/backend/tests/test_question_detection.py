@@ -6,7 +6,10 @@ from typing import Any
 
 import pytest
 
-from app.prompts.question_detection import Utterance
+from app.prompts.question_detection import (
+    QUESTION_DETECTION_SYSTEM_PROMPT,
+    question_detection_user_prompt,
+)
 from app.services import question_detection as qd_mod
 from app.services.question_detection import (
     QuestionDetector,
@@ -14,6 +17,7 @@ from app.services.question_detection import (
     _is_quota_error,
     _looks_backchannel,
     _looks_mid_thought,
+    _same_question,
 )
 from app.settings import settings
 
@@ -124,6 +128,7 @@ class _RecordingDetector:
         self.fallbacks: list[str] = []
         self.errors: list[str] = []
         self.dedups: list[str] = []
+        self.manual: list[str | None] = []
         self.qd_calls: int = 0
 
     async def on_question(self, q: str, c: float, is_follow_up: bool) -> None:
@@ -141,6 +146,9 @@ class _RecordingDetector:
     async def on_dedup(self, q: str) -> None:
         self.dedups.append(q)
 
+    async def on_manual(self, q: str | None) -> None:
+        self.manual.append(q)
+
 
 def _make_detector(monkeypatch: pytest.MonkeyPatch) -> tuple[QuestionDetector, _RecordingDetector]:
     rec = _RecordingDetector()
@@ -156,6 +164,7 @@ def _make_detector(monkeypatch: pytest.MonkeyPatch) -> tuple[QuestionDetector, _
         on_fallback=rec.on_fallback,
         on_error=rec.on_error,
         on_dedup=rec.on_dedup,
+        on_manual=rec.on_manual,
     )
     return det, rec
 
@@ -287,6 +296,7 @@ async def test_backend_dedup_expires_after_cooldown(
     det._last_question = "What is your favorite color?"
     det._last_question_at = time.time() - 10.0
     monkeypatch.setattr(settings, "question_detection_dedup_cooldown_s", 4.0)
+    monkeypatch.setattr(settings, "question_detection_repeat_window_s", 4.0)
     assert not det._is_recent_duplicate("What is your favorite color?")
 
 
@@ -296,10 +306,10 @@ async def test_fallback_activates_on_429(monkeypatch: pytest.MonkeyPatch) -> Non
         settings, "question_detection_fallback_model", "gpt-4o-mini"
     )
 
-    async def gemini_quota_error(_u: list[Utterance], _m: str) -> dict[str, Any]:
+    async def gemini_quota_error(_u: str, _m: str) -> dict[str, Any]:
         raise RuntimeError("429 RESOURCE_EXHAUSTED: free-tier quota")
 
-    async def openai_qd(_u: list[Utterance], model: str) -> dict[str, Any]:
+    async def openai_qd(_u: str, model: str) -> dict[str, Any]:
         return {
             "is_question": True,
             "extracted_question": "What's your favorite language?",
@@ -317,7 +327,7 @@ async def test_fallback_activates_on_429(monkeypatch: pytest.MonkeyPatch) -> Non
     # Subsequent call must route straight through OpenAI (no Gemini retry).
     gemini_calls = {"n": 0}
 
-    async def gemini_explode(_u: list[Utterance], _m: str) -> dict[str, Any]:
+    async def gemini_explode(_u: str, _m: str) -> dict[str, Any]:
         gemini_calls["n"] += 1
         raise RuntimeError("should not be called")
 
@@ -342,11 +352,11 @@ async def test_user_pick_openai_routes_directly(
     det.set_model("gpt-4o-mini")
     gemini_calls = {"n": 0}
 
-    async def gemini_explode(_u: list[Utterance], _m: str) -> dict[str, Any]:
+    async def gemini_explode(_u: str, _m: str) -> dict[str, Any]:
         gemini_calls["n"] += 1
         raise RuntimeError("should not be called")
 
-    async def openai_qd(_u: list[Utterance], model: str) -> dict[str, Any]:
+    async def openai_qd(_u: str, model: str) -> dict[str, Any]:
         assert model == "gpt-4o-mini"
         return {
             "is_question": True,
@@ -429,7 +439,7 @@ async def test_probe_re_arms_gemini_after_recovery(
 
     gemini_calls = {"n": 0}
 
-    async def gemini_ok(_u: list[Utterance], _m: str) -> dict[str, Any]:
+    async def gemini_ok(_u: str, _m: str) -> dict[str, Any]:
         gemini_calls["n"] += 1
         return {
             "is_question": True,
@@ -462,10 +472,10 @@ async def test_probe_still_429_keeps_fallback(
     det._fallback_call_count = 999
     monkeypatch.setattr(settings, "question_detection_probe_interval", 10)
 
-    async def gemini_429(_u: list[Utterance], _m: str) -> dict[str, Any]:
+    async def gemini_429(_u: str, _m: str) -> dict[str, Any]:
         raise RuntimeError("429 RESOURCE_EXHAUSTED")
 
-    async def openai_ok(_u: list[Utterance], _m: str) -> dict[str, Any]:
+    async def openai_ok(_u: str, _m: str) -> dict[str, Any]:
         return {
             "is_question": True,
             "extracted_question": "From OpenAI",
@@ -491,7 +501,7 @@ async def test_openai_429_emits_qd_error(monkeypatch: pytest.MonkeyPatch) -> Non
         settings, "question_detection_fallback_model", "gpt-4o-mini"
     )
 
-    async def gemini_429(_u: list[Utterance], _m: str) -> dict[str, Any]:
+    async def gemini_429(_u: str, _m: str) -> dict[str, Any]:
         raise RuntimeError("429 RESOURCE_EXHAUSTED on Gemini")
 
     class _FakeOpenAIClient:
@@ -525,7 +535,7 @@ async def test_model_snapshot_immune_to_concurrent_set_model(
 
     seen_models: list[str] = []
 
-    async def slow_gemini(_u: list[Utterance], m: str) -> dict[str, Any]:
+    async def slow_gemini(_u: str, m: str) -> dict[str, Any]:
         seen_models.append(m)
         await asyncio.sleep(0.05)
         return {"is_question": False, "confidence": 0.1, "extracted_question": None}
@@ -590,7 +600,7 @@ async def test_probe_uses_snapshotted_model_under_concurrent_set_model(
 
     probed_with: list[str] = []
 
-    async def slow_gemini(_u: list[Utterance], m: str) -> dict[str, Any]:
+    async def slow_gemini(_u: str, m: str) -> dict[str, Any]:
         probed_with.append(m)
         await asyncio.sleep(0.05)
         return {
@@ -770,3 +780,234 @@ def test_openai_detection_model_helper_uses_prefix_inference() -> None:
     assert _is_openai_qd_model("o3-mini") is True
     assert _is_openai_qd_model("openai:my-ft") is True
     assert _is_openai_qd_model("claude-haiku-5-5") is False
+
+
+# ─── repeated questions ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("prior", "new"),
+    [
+        # Oct 26 session: one form question answered four times as the
+        # interviewer re-read it with extra instructions.
+        (
+            "Have you worked in a customer-facing role (support, sales, pre-sales, solutions)?",
+            "Have you worked in a customer-facing role (support, sales, pre-sales, "
+            "solutions)? Tell us briefly about it. 1 to 2 sentences.",
+        ),
+        (
+            "Have you worked in a customer-facing role (support, sales, pre-sales, "
+            "solutions)? Yes — Tell us briefly about it. 1 to 2 sentences.",
+            "Have you worked in a customer-facing role (support, sales, pre-sales, solutions)?",
+        ),
+        (
+            "What is your favorite programming language?",
+            "  what is your favorite programming language  ",
+        ),
+    ],
+)
+def test_same_question_matches_rewordings(prior: str, new: str) -> None:
+    assert _same_question(prior, new) is True
+
+
+@pytest.mark.parametrize(
+    ("prior", "new"),
+    [
+        (
+            "Tell me about a time you disagreed with your manager.",
+            "Tell me about a time you led a project.",
+        ),
+        ("Why?", "Why did you leave your last job?"),
+        # A narrower follow-up reuses every word of the original question.
+        (
+            "Explain the difference between TCP and UDP.",
+            "Explain the difference between TCP and UDP in terms of head-of-line blocking.",
+        ),
+        (
+            "When would you choose unknown over any?",
+            "How does type narrowing work with union types?",
+        ),
+    ],
+)
+def test_same_question_keeps_distinct_questions(prior: str, new: str) -> None:
+    assert _same_question(prior, new) is False
+
+
+async def test_reworded_repeat_is_dup_within_repeat_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    det, _rec = _make_detector(monkeypatch)
+    monkeypatch.setattr(settings, "question_detection_dedup_cooldown_s", 4.0)
+    monkeypatch.setattr(settings, "question_detection_repeat_window_s", 120.0)
+    det._last_question = (
+        "Have you worked in a customer-facing role (support, sales, pre-sales, solutions)?"
+    )
+    reworded = "Have you worked in a customer-facing role? Tell us briefly about it."
+
+    det._last_question_at = time.time() - 25.0
+    assert det._is_recent_duplicate(reworded)
+
+    det._last_question_at = time.time() - 200.0
+    assert not det._is_recent_duplicate(reworded)
+
+
+# ─── prompt rules ───────────────────────────────────────────────────────────
+
+
+def test_prompt_skips_logistics_and_keeps_trailing_courtesy() -> None:
+    prompt = QUESTION_DETECTION_SYSTEM_PROMPT.lower()
+    # "Are you ready to begin?" was answered as an interview question.
+    assert "are you ready to begin?" in prompt
+    # "Tell me about X… take your time" was rejected as not-a-question.
+    assert "take your time" in prompt
+
+
+def test_manual_user_prompt_asks_for_latest_question() -> None:
+    auto = question_detection_user_prompt(["Tell me about yourself."])
+    manual = question_detection_user_prompt(["Tell me about yourself."], manual=True)
+    assert "pressed" not in auto
+    assert "pressed" in manual
+    assert "most recent" in manual
+
+
+# ─── manual "answer latest question" ────────────────────────────────────────
+
+
+def _stub_manual_run(
+    monkeypatch: pytest.MonkeyPatch,
+    det: QuestionDetector,
+    result: dict[str, Any] | Exception,
+    newest: str = "So tell me about your last project and",
+) -> list[bool]:
+    async def entries(_sid: str, _window: float) -> list[dict[str, Any]]:
+        return [{"text": "Thanks for joining today."}, {"text": newest}]
+
+    manual_flags: list[bool] = []
+
+    async def fake_llm(_u: Any, _m: str, *, manual: bool = False) -> dict[str, Any]:
+        manual_flags.append(manual)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def no_follow_up(_q: str, _m: str) -> bool:
+        return False
+
+    monkeypatch.setattr(qd_mod, "recent_transcript_entries", entries)
+    monkeypatch.setattr(det, "_call_qd_llm", fake_llm)
+    monkeypatch.setattr(det, "_classify_follow_up", no_follow_up)
+    return manual_flags
+
+
+async def test_detect_now_reports_question_despite_low_confidence_and_mid_thought(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    det, rec = _make_detector(monkeypatch)
+    flags = _stub_manual_run(
+        monkeypatch,
+        det,
+        {
+            "is_question": True,
+            "extracted_question": "Tell me about your last project.",
+            "confidence": 0.4,
+        },
+    )
+
+    det.detect_now()
+    assert det._manual_task is not None
+    await det._manual_task
+
+    assert flags == [True]
+    assert rec.manual == ["Tell me about your last project."]
+    # Manual results go to their own callback, not the auto-detect path.
+    assert rec.questions == []
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"is_question": False, "extracted_question": None, "confidence": 0.9},
+        RuntimeError("provider down"),
+    ],
+)
+async def test_detect_now_reports_none_when_no_question(
+    monkeypatch: pytest.MonkeyPatch, result: dict[str, Any] | Exception
+) -> None:
+    det, rec = _make_detector(monkeypatch)
+    _stub_manual_run(monkeypatch, det, result)
+
+    det.detect_now()
+    assert det._manual_task is not None
+    await det._manual_task
+
+    assert rec.manual == [None]
+
+
+async def test_detect_now_ignores_dedup_but_arms_it_for_auto_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    det, rec = _make_detector(monkeypatch)
+    question = "Walk me through how you would design a rate limiter."
+    det._last_question = question
+    det._last_question_at = time.time()
+    _stub_manual_run(
+        monkeypatch,
+        det,
+        {"is_question": True, "extracted_question": question, "confidence": 0.95},
+        newest=question,
+    )
+
+    det.detect_now()
+    assert det._manual_task is not None
+    await det._manual_task
+    assert rec.manual == [question]
+
+    # The interviewer is still on the same question: the next auto run
+    # must not answer it a second time.
+    await det._run_inner("idle")
+    assert rec.questions == []
+    assert rec.dedups == [question]
+
+
+async def test_qd_token_cap_leaves_room_for_hidden_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Oct 20: four real questions were dropped as bad_json — Haiku's
+    # internal reasoning used up the 256-token cap mid-JSON.
+    det, _rec = _make_detector(monkeypatch)
+    monkeypatch.setattr(settings, "anthropic_api_key", "fake-anthropic-key")
+    caps: list[int] = []
+
+    async def fake_direct(
+        _kind: str, _system: str, _user: str, _model: str, *, max_tokens: int
+    ) -> dict[str, Any]:
+        caps.append(max_tokens)
+        return {}
+
+    monkeypatch.setattr(det, "_call_direct_json", fake_direct)
+
+    await det._call_qd_llm([], "claude-haiku-5-5")
+
+    assert caps and caps[0] >= 1024
+
+
+async def test_detect_now_gives_up_before_the_client_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    det, rec = _make_detector(monkeypatch)
+    monkeypatch.setattr(qd_mod, "MANUAL_DETECT_TIMEOUT_S", 0.05)
+    _stub_manual_run(monkeypatch, det, {})
+
+    async def slow_llm(_u: Any, _m: str, *, manual: bool = False) -> dict[str, Any]:
+        await asyncio.sleep(1)
+        return {"is_question": True, "extracted_question": "late", "confidence": 1.0}
+
+    monkeypatch.setattr(det, "_call_qd_llm", slow_llm)
+
+    det.detect_now()
+    assert det._manual_task is not None
+    await det._manual_task
+
+    assert rec.manual == [None]
+    # A discarded late reply must not arm dedup for the auto path.
+    assert det._last_question is None

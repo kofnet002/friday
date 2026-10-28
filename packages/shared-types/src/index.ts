@@ -28,7 +28,10 @@ export type WsControlMessage =
   | { type: 'start' }
   | { type: 'stop' }
   | { type: 'pause' }
-  | { type: 'set_qd_model'; model: QdModel };
+  | { type: 'set_qd_model'; model: QdModel }
+  /** Candidate asked to answer the newest question now (⌘⇧Space). The
+   *  backend replies with `manual_question`. */
+  | { type: 'detect_now' };
 
 /** Lifecycle state of the per-session question detector. Used to show a
  *  "Listening / Analyzing" indicator in the Listen panel. */
@@ -54,6 +57,9 @@ export type WsServerMessage =
    *  duplicate of the most recent fire (within the cooldown). Lets the
    *  UI show a subtle "heard it" pulse without spawning a new entry. */
   | { type: 'qd_dedup'; question: string }
+  /** Reply to `detect_now`: the newest question reconstructed from the
+   *  transcript, or null when none was heard. */
+  | { type: 'manual_question'; question: string | null }
   | { type: 'error'; message: string };
 
 export interface TranscriptEvent {

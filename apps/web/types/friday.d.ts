@@ -82,6 +82,9 @@ declare global {
     quitApp: () => Promise<void>;
     onStatus: (cb: (status: FridayWindowStatus) => void) => () => void;
     onToast: (cb: (toast: FridayWindowToast) => void) => () => void;
+    /** Global ⌘⇧Space — answer the newest question. Absent on desktop
+     *  builds that predate the shortcut. */
+    onAnswerLatest?: (cb: () => void) => () => void;
   }
 
   interface FridayStealthStatus {

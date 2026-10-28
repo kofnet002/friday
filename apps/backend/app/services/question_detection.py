@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, Literal
@@ -138,6 +139,22 @@ ErrorCallback = Callable[[str], Coroutine[Any, Any, None]]
 # spamming the answer panel.
 DedupCallback = Callable[[str], Coroutine[Any, Any, None]]
 
+# Result of a candidate-triggered "answer latest question" run: the
+# reconstructed question, or None when the transcript holds no question.
+ManualCallback = Callable[[str | None], Coroutine[Any, Any, None]]
+
+# Output caps for the classifier calls. The JSON reply is ~60 tokens, but
+# current small models (Haiku 5.5, Gemini 3.x Flash-Lite, gpt-5-mini) reason
+# before answering and that reasoning counts against the cap — at 256 the
+# reply was cut off mid-JSON and real questions were dropped as bad_json.
+QD_MAX_TOKENS = 1024
+FOLLOW_UP_MAX_TOKENS = 512
+# A manual run reports "no question" after this long so the client falls
+# back to the raw transcript. Must stay below the client's own timeout
+# (MANUAL_ASK_TIMEOUT_MS in session-client.tsx), or a late reply would be
+# thrown away after already arming dedup.
+MANUAL_DETECT_TIMEOUT_S = 8.0
+
 # Maximum time we'll wait for in-flight tasks to settle during close()
 # before forcibly moving on. Keeps WS teardown from hanging on a slow
 # _on_question callback.
@@ -201,6 +218,54 @@ def _strip_json_fence(text: str) -> str:
         text = body.rsplit("```", 1)[0].strip()
     return text
 
+# Words that carry no topic. Two phrasings of one question share their
+# content words even when the framing ("tell us briefly…") differs.
+_FRAMING_WORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "the", "and", "or", "but", "so", "if", "to", "of", "in",
+        "on", "at", "for", "with", "about", "from", "by", "as", "is", "are",
+        "was", "were", "be", "been", "do", "does", "did", "have", "has", "had",
+        "you", "your", "i", "me", "my", "we", "us", "our", "it", "its", "this",
+        "that", "what", "which", "who", "how", "why", "when", "where", "can",
+        "could", "would", "should", "will", "tell", "describe", "explain",
+        "please", "briefly", "yes", "no", "there", "any", "some",
+    }
+)
+# `new` restates `prior` when it adds little: most of its content words were
+# already asked, or the two share most of their combined words (re-reads
+# with a short instruction tacked on). A narrower follow-up ("…TCP and UDP
+# in terms of head-of-line blocking") fails both — its new words are a new
+# topic — so it still gets answered.
+SAME_QUESTION_COVERAGE = 0.8
+SAME_QUESTION_OVERLAP = 0.7
+# Below this many content words a phrasing is too generic ("Why?") to match
+# on overlap, so only an exact repeat counts.
+SAME_QUESTION_MIN_WORDS = 3
+
+
+def _normalize_question(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in _normalize_question(text).split() if w not in _FRAMING_WORDS}
+
+
+def _same_question(prior: str, new: str) -> bool:
+    """True when `new` restates `prior` — verbatim, or reworded with extra
+    framing such as "Tell us briefly about it. 1 to 2 sentences."."""
+    if _normalize_question(prior) == _normalize_question(new):
+        return True
+    a, b = _content_words(prior), _content_words(new)
+    if min(len(a), len(b)) < SAME_QUESTION_MIN_WORDS:
+        return False
+    shared = len(a & b)
+    return (
+        shared / len(b) >= SAME_QUESTION_COVERAGE
+        or shared / len(a | b) >= SAME_QUESTION_OVERLAP
+    )
+
+
 # How recent the prior question must be for follow-up classification to fire.
 # Interviewers don't usually wait minutes between a question and its
 # follow-up; beyond this window the new question is overwhelmingly a topic
@@ -258,6 +323,18 @@ MID_THOUGHT_TAIL_WORDS = frozenset(
 TERMINAL_PUNCT = {".", "?", "!"}
 
 
+def _to_wire(entries: list[dict[str, Any]]) -> list[Utterance]:
+    """Typed Utterance rows so the prompt builder can emit `[N, Speaker M]`
+    prefixes when diarization is available. Speaker falls back to None when
+    the Redis row pre-dates the speaker field."""
+    wire: list[Utterance] = []
+    for u in entries:
+        sp_raw = u.get("speaker")
+        speaker = sp_raw if isinstance(sp_raw, int) else None
+        wire.append(Utterance(text=str(u.get("text") or ""), speaker=speaker))
+    return wire
+
+
 def _looks_mid_thought(text: str) -> bool:
     """True if the utterance looks incomplete — no terminal punctuation, or
     it ends with a conjunction / preposition / auxiliary."""
@@ -304,6 +381,7 @@ class QuestionDetector:
         on_fallback: FallbackCallback | None = None,
         on_error: ErrorCallback | None = None,
         on_dedup: DedupCallback | None = None,
+        on_manual: ManualCallback | None = None,
     ) -> None:
         self.session_id = session_id
         self._on_question = on_question
@@ -311,6 +389,7 @@ class QuestionDetector:
         self._on_fallback = on_fallback
         self._on_error = on_error
         self._on_dedup = on_dedup
+        self._on_manual = on_manual
         # Single lock guarding _run_task creation. Speaker-turn and timer
         # paths both create the task; without serialization a two-tick
         # race could spawn two concurrent _run coroutines.
@@ -321,6 +400,9 @@ class QuestionDetector:
         # Holds the most recent _start_run spawner so it can't be GC'd
         # mid-await (RUF006). Spawners are short-lived (one lock acquire).
         self._spawn_task: asyncio.Task[None] | None = None
+        # Candidate-triggered run. Kept apart from _run_task so an in-flight
+        # auto run can't swallow the request.
+        self._manual_task: asyncio.Task[None] | None = None
         self._client = (
             genai.Client(api_key=settings.gemini_api_key)
             if settings.gemini_api_key
@@ -518,8 +600,9 @@ class QuestionDetector:
 
     async def close(self) -> None:
         self._cancel_timers()
-        if self._run_task and not self._run_task.done():
-            self._run_task.cancel()
+        for running in (self._run_task, self._manual_task):
+            if running and not running.done():
+                running.cancel()
         # Bounded await so a slow _on_question callback can't deadlock the
         # WS teardown. We cancel first, then give each task up to
         # CLOSE_TIMEOUT_S to acknowledge.
@@ -527,6 +610,7 @@ class QuestionDetector:
             self._idle_task,
             self._ceiling_task,
             self._run_task,
+            self._manual_task,
             self._spawn_task,
             self._state_notify_task,
             self._fallback_notify_task,
@@ -592,19 +676,85 @@ class QuestionDetector:
         self._cancel_timers()
         self._start_run(triggered_by)
 
-    async def _run(self, triggered_by: TriggeredBy = "idle") -> None:
+    def _ready_for_qd(self) -> bool:
+        """True when some client can serve the next QD call."""
         # Need at least one LLM client to do anything useful. We accept
         # OpenAI-only mode (someone running entirely on GPT-4o) — the
         # fallback path treats absent-Gemini as permanently in fallback.
         direct = _is_direct_qd_model(self._model)
         if self._client is None and self._openai_client is None and not direct:
             log.warning("question_detection.skip_no_key")
-            return
+            return False
         if self._client is None and not self._fallback_active and not direct:
             # OpenAI-only deployments don't have a Gemini key to start
             # from; pretend the fallback is already armed so _call_qd_llm
             # routes straight to GPT-4o.
             self._fallback_active = True
+        return True
+
+    def detect_now(self) -> None:
+        """The candidate pressed "answer latest question". Reconstructs the
+        newest question in the transcript window and reports it through
+        on_manual (None when there isn't one). Pending auto timers are
+        cancelled — this run supersedes them."""
+        self._cancel_timers()
+        if self._manual_task is not None and not self._manual_task.done():
+            return
+        self._manual_task = asyncio.create_task(self._run_manual())
+
+    async def _run_manual(self) -> None:
+        question: str | None = None
+        self._set_state("detecting")
+        try:
+            question = await self._detect_latest()
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "question_detection.manual_error",
+                session_id=self.session_id,
+                error=str(exc),
+            )
+        finally:
+            # Leave the pill on "detecting" while an auto run is in flight.
+            if self._run_task is None or self._run_task.done():
+                self._set_state("idle")
+        if self._on_manual is not None:
+            await self._on_manual(question)
+
+    async def _detect_latest(self) -> str | None:
+        """Manual-run counterpart of _run_inner: no mid-thought guard, no
+        confidence floor and no dedup — the candidate already decided a
+        question was asked. Still records the question so auto runs on the
+        same transcript dedup against it."""
+        if not self._ready_for_qd():
+            return None
+        model_snapshot = self._effective_qd_model()
+        utterances = await recent_transcript_entries(
+            self.session_id, float(settings.question_detection_transcript_window_s)
+        )
+        if not utterances:
+            return None
+        result = await asyncio.wait_for(
+            self._call_qd_llm(_to_wire(utterances), model_snapshot, manual=True),
+            timeout=MANUAL_DETECT_TIMEOUT_S,
+        )
+        extracted = result.get("extracted_question")
+        log.info(
+            "question_detection.manual_result",
+            session_id=self.session_id,
+            is_question=bool(result.get("is_question")),
+            model=model_snapshot,
+            reasoning=result.get("reasoning"),
+        )
+        if not result.get("is_question") or not extracted:
+            return None
+        question = str(extracted)
+        self._last_question = question
+        self._last_question_at = time.time()
+        return question
+
+    async def _run(self, triggered_by: TriggeredBy = "idle") -> None:
+        if not self._ready_for_qd():
+            return
         self._set_state("detecting")
         try:
             await self._run_inner(triggered_by)
@@ -649,16 +799,8 @@ class QuestionDetector:
                 tail=newest[-40:],
             )
 
-        # Build typed Utterance entries so the prompt builder can emit
-        # `[N, Speaker M]` prefixes when diarization is available. Falls
-        # back to None when the Redis row pre-dates the speaker field.
-        wire: list[Utterance] = []
-        for u in utterances:
-            sp_raw = u.get("speaker")
-            speaker = sp_raw if isinstance(sp_raw, int) else None
-            wire.append(Utterance(text=str(u.get("text") or ""), speaker=speaker))
         try:
-            result = await self._call_qd_llm(wire, model_snapshot)
+            result = await self._call_qd_llm(_to_wire(utterances), model_snapshot)
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "question_detection.error",
@@ -710,13 +852,18 @@ class QuestionDetector:
             await self._on_question(extracted_str, confidence, is_follow_up)
 
     def _is_recent_duplicate(self, extracted: str) -> bool:
+        """The same question — verbatim or restated — fired again inside the
+        repeat window. Interviewers re-read a question, often with extra
+        instructions; the answer on screen already covers it."""
         prior = self._last_question
         if not prior:
             return False
-        if prior.strip().lower() != extracted.strip().lower():
-            return False
         age = time.time() - self._last_question_at
-        return age < settings.question_detection_dedup_cooldown_s
+        window = max(
+            settings.question_detection_dedup_cooldown_s,
+            settings.question_detection_repeat_window_s,
+        )
+        return age < window and _same_question(prior, extracted)
 
     async def _classify_follow_up(
         self, new_question: str, model_snapshot: str
@@ -859,7 +1006,7 @@ class QuestionDetector:
         return self._fallback_call_count >= interval
 
     async def _call_qd_llm(
-        self, utterances: list[Utterance], model_snapshot: str
+        self, utterances: list[Utterance], model_snapshot: str, *, manual: bool = False
     ) -> dict[str, Any]:
         """Run QD against the snapshotted model.
 
@@ -870,13 +1017,14 @@ class QuestionDetector:
           probes try Gemini again when in fallback (quota may have reset).
         - Claude / DeepSeek model → that provider directly, no fallback.
         """
+        user_prompt = question_detection_user_prompt(utterances, manual=manual)
         if _is_direct_qd_model(model_snapshot):
             return await self._call_direct_json(
                 "question_detection",
                 QUESTION_DETECTION_SYSTEM_PROMPT,
-                question_detection_user_prompt(utterances),
+                user_prompt,
                 model_snapshot,
-                max_tokens=256,
+                max_tokens=QD_MAX_TOKENS,
             )
         # Probe path: in fallback, but enough calls have succeeded that
         # we should try Gemini again. If it works, lift fallback. Note
@@ -889,7 +1037,7 @@ class QuestionDetector:
             probe_model = self._model
             try:
                 result = await self._call_gemini_with_usage(
-                    utterances, probe_model,
+                    user_prompt, probe_model,
                 )
                 self._clear_fallback("probe_recovered")
                 return result
@@ -912,22 +1060,22 @@ class QuestionDetector:
                     )
 
         if _is_openai_qd_model(model_snapshot):
-            return await self._call_openai_qd_with_usage(utterances, model_snapshot)
+            return await self._call_openai_qd_with_usage(user_prompt, model_snapshot)
         if self._client is None:
             # No Gemini configured. _run guarantees at least one client
             # exists, so this means OpenAI-only mode — route through it
             # and ensure fallback is active so future calls skip Gemini.
             self._activate_fallback("no_gemini_key")
             return await self._call_openai_qd_with_usage(
-                utterances, settings.question_detection_fallback_model,
+                user_prompt, settings.question_detection_fallback_model,
             )
         try:
-            return await self._call_gemini_with_usage(utterances, model_snapshot)
+            return await self._call_gemini_with_usage(user_prompt, model_snapshot)
         except Exception as exc:  # noqa: BLE001
             if _is_quota_error(exc) and self._openai_client is not None:
                 self._activate_fallback("quota")
                 return await self._call_openai_qd_with_usage(
-                    utterances, settings.question_detection_fallback_model,
+                    user_prompt, settings.question_detection_fallback_model,
                 )
             raise
 
@@ -942,7 +1090,11 @@ class QuestionDetector:
         user = follow_up_user_prompt(prior_question, prior_answer, new_question)
         if _is_direct_qd_model(model_snapshot):
             return await self._call_direct_json(
-                "follow_up", FOLLOW_UP_SYSTEM_PROMPT, user, model_snapshot, max_tokens=128
+                "follow_up",
+                FOLLOW_UP_SYSTEM_PROMPT,
+                user,
+                model_snapshot,
+                max_tokens=FOLLOW_UP_MAX_TOKENS,
             )
         if _is_openai_qd_model(model_snapshot):
             return await self._call_openai_follow_up_with_usage(
@@ -968,18 +1120,17 @@ class QuestionDetector:
     # ─── transport implementations (with usage tracking) ────────────────────
 
     async def _call_gemini_with_usage(
-        self, utterances: list[Utterance], model: str
+        self, user_prompt: str, model: str
     ) -> dict[str, Any]:
         """Question-detection on Gemini. Records cost. May raise on quota."""
         assert self._client is not None
-        user_prompt = question_detection_user_prompt(utterances)
         response = await self._client.aio.models.generate_content(
             model=_qd_model_id(model),
             contents=user_prompt,
             config=genai_types.GenerateContentConfig(
                 system_instruction=QUESTION_DETECTION_SYSTEM_PROMPT,
                 temperature=0.1,
-                max_output_tokens=256,
+                max_output_tokens=QD_MAX_TOKENS,
                 response_mime_type="application/json",
             ),
         )
@@ -997,7 +1148,7 @@ class QuestionDetector:
             config=genai_types.GenerateContentConfig(
                 system_instruction=FOLLOW_UP_SYSTEM_PROMPT,
                 temperature=0.1,
-                max_output_tokens=128,
+                max_output_tokens=FOLLOW_UP_MAX_TOKENS,
                 response_mime_type="application/json",
             ),
         )
@@ -1006,13 +1157,12 @@ class QuestionDetector:
         return _safe_json_dict(text, log_key="follow_up.bad_json")
 
     async def _call_openai_qd_with_usage(
-        self, utterances: list[Utterance], model: str
+        self, user_prompt: str, model: str
     ) -> dict[str, Any]:
         """OpenAI path for QD. Handles OpenAI-side 429 by emitting an
         on_error signal — there's no further fallback available."""
         if self._openai_client is None:
             return {}
-        user_prompt = question_detection_user_prompt(utterances)
         try:
             response = await self._openai_client.chat.completions.create(
                 model=_qd_model_id(model),
@@ -1021,7 +1171,7 @@ class QuestionDetector:
                     {"role": "user", "content": user_prompt},
                 ],
                 response_format={"type": "json_object"},
-                **_openai_qd_options(model, 256),
+                **_openai_qd_options(model, QD_MAX_TOKENS),
             )
         except Exception as exc:  # noqa: BLE001
             if _is_quota_error(exc):
@@ -1054,7 +1204,7 @@ class QuestionDetector:
                     {"role": "user", "content": user},
                 ],
                 response_format={"type": "json_object"},
-                **_openai_qd_options(model, 128),
+                **_openai_qd_options(model, FOLLOW_UP_MAX_TOKENS),
             )
         except Exception as exc:  # noqa: BLE001
             if _is_quota_error(exc):

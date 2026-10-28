@@ -181,21 +181,177 @@ async def test_coding_claude_retries_without_effort_when_rejected(
     assert "thinking" not in rec.requests[1]
 
 
-async def test_answer_openai_reasoning_model_sends_reasoning_effort(
+def _responses_events(*deltas: str) -> bytes:
+    events: list[tuple[str | None, dict[str, Any]]] = [
+        (
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "item_id": "msg_1",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": delta,
+                "logprobs": [],
+                "sequence_number": i,
+            },
+        )
+        for i, delta in enumerate(deltas)
+    ]
+    events.append(
+        (
+            "response.completed",
+            {
+                "type": "response.completed",
+                "sequence_number": len(deltas),
+                "response": {
+                    "id": "resp_1",
+                    "object": "response",
+                    "created_at": 0,
+                    "model": "gpt-5.5",
+                    "status": "completed",
+                    "output": [],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "usage": {
+                        "input_tokens": 40,
+                        "input_tokens_details": {"cached_tokens": 0},
+                        "output_tokens": 900,
+                        "output_tokens_details": {"reasoning_tokens": 800},
+                        "total_tokens": 940,
+                    },
+                },
+            },
+        )
+    )
+    return _sse(events)
+
+
+async def test_answer_openai_uses_responses_api_with_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = _sse([(None, _openai_chunk("Hi")), (None, _openai_chunk("!"))]) + b"data: [DONE]\n\n"
-    rec = _Recorder(body=body)
+    rec = _Recorder(body=_responses_events("Hi", "!"))
     _patch_openai(monkeypatch, answer, rec)
+    seen: list[tuple[int | None, int | None]] = []
 
-    text = await _collect(answer._stream_openai("sys", "q", (), model="gpt-5.5", effort="high"))
+    text = await _collect(
+        answer._stream_openai(
+            "sys",
+            "q",
+            (),
+            model="gpt-5.5",
+            effort="high",
+            on_usage=lambda i, o: seen.append((i, o)),
+        )
+    )
 
     assert text == "Hi!"
     sent = rec.requests[0]
     assert sent["model"] == "gpt-5.5"
-    assert sent["reasoning_effort"] == "high"
+    assert sent["instructions"] == "sys"
+    assert sent["input"] == [{"role": "user", "content": "q"}]
+    assert sent["reasoning"] == {"effort": "high"}
     assert "temperature" not in sent
-    assert sent["max_completion_tokens"] > answer.ANSWER_MAX_TOKENS
+    assert sent["max_output_tokens"] > answer.ANSWER_MAX_TOKENS
+    assert sent["store"] is False
+    assert seen == [(40, 900)]
+
+
+# ─── web search ─────────────────────────────────────────────────────────────
+
+
+async def test_answer_claude_offers_web_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "answer_web_search", True)
+    monkeypatch.setattr(settings, "answer_web_search_max_uses", 2)
+    rec = _Recorder(body=_sse(_ANTHROPIC_EVENTS))
+    _patch_anthropic(monkeypatch, answer, rec)
+
+    await _collect(answer._stream_anthropic("sys", "q", (), model="claude-opus-5-5"))
+
+    assert rec.requests[0]["tools"] == [
+        {"type": "web_search_20250305", "name": "web_search", "max_uses": 2}
+    ]
+
+
+async def test_answer_claude_skips_web_search_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "answer_web_search", False)
+    rec = _Recorder(body=_sse(_ANTHROPIC_EVENTS))
+    _patch_anthropic(monkeypatch, answer, rec)
+
+    await _collect(answer._stream_anthropic("sys", "q", (), model="claude-opus-5-5"))
+
+    assert "tools" not in rec.requests[0]
+
+
+async def test_answer_claude_answers_offline_when_web_search_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "answer_web_search", True)
+    rec = _Recorder(reject_when="tools", body=_sse(_ANTHROPIC_EVENTS))
+    _patch_anthropic(monkeypatch, answer, rec)
+
+    text = await _collect(answer._stream_anthropic("sys", "q", (), model="claude-old-model"))
+
+    assert text == "Hello world"
+    assert len(rec.requests) == 2
+    assert "tools" not in rec.requests[1]
+
+
+async def test_answer_openai_offers_web_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "answer_web_search", True)
+    rec = _Recorder(body=_responses_events("x"))
+    _patch_openai(monkeypatch, answer, rec)
+
+    await _collect(answer._stream_openai("sys", "q", (), model="gpt-4o"))
+
+    sent = rec.requests[0]
+    assert sent["tools"] == [{"type": "web_search"}]
+    assert sent["temperature"] == answer.ANSWER_TEMPERATURE
+
+
+async def test_answer_openai_answers_offline_when_web_search_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "answer_web_search", True)
+    rec = _Recorder(reject_when="tools", body=_responses_events("x"))
+    _patch_openai(monkeypatch, answer, rec)
+
+    text = await _collect(answer._stream_openai("sys", "q", (), model="gpt-4o-mini"))
+
+    assert text == "x"
+    assert "tools" not in rec.requests[1]
+
+
+async def test_answer_gemini_offers_google_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "answer_web_search", True)
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    configs: list[Any] = []
+
+    async def fake_stream(**kwargs: Any) -> Any:
+        configs.append(kwargs["config"])
+
+        async def gen() -> Any:
+            yield _FakeGeminiChunk("a")
+
+        return gen()
+
+    class _Models:
+        generate_content_stream = staticmethod(fake_stream)
+
+    class _Aio:
+        models = _Models()
+
+    class _Client:
+        aio = _Aio()
+
+    monkeypatch.setattr(answer.genai, "Client", lambda **_: _Client())
+
+    await _collect(answer._stream_gemini("sys", "u"))
+
+    tools = configs[0].tools
+    assert tools is not None and tools[0].google_search is not None
 
 
 async def test_coding_openai_uses_selected_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -363,3 +519,42 @@ async def test_stream_answer_surfaces_usage_from_selected_provider(
     )
 
     assert seen == [(1, 5)]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "status"),
+    [("response.incomplete", "incomplete"), ("response.failed", "failed")],
+)
+async def test_answer_openai_raises_when_response_ends_without_answer(
+    monkeypatch: pytest.MonkeyPatch, event_type: str, status: str
+) -> None:
+    # e.g. a reasoning model spends the whole output cap thinking: the
+    # stream must fail so the provider chain falls back, not show a blank.
+    body = _sse(
+        [
+            (
+                event_type,
+                {
+                    "type": event_type,
+                    "sequence_number": 0,
+                    "response": {
+                        "id": "resp_1",
+                        "object": "response",
+                        "created_at": 0,
+                        "model": "gpt-5.5",
+                        "status": status,
+                        "output": [],
+                        "parallel_tool_calls": True,
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "incomplete_details": {"reason": "max_output_tokens"},
+                    },
+                },
+            )
+        ]
+    )
+    rec = _Recorder(body=body)
+    _patch_openai(monkeypatch, answer, rec)
+
+    with pytest.raises(RuntimeError, match=status):
+        await _collect(answer._stream_openai("sys", "q", (), model="gpt-5.5"))

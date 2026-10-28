@@ -70,6 +70,19 @@ class Settings(BaseSettings):
     # where ceiling + idle both fire on the same transcript window before
     # any client-side entry exists (so client dedup can't help).
     question_detection_dedup_cooldown_s: float = Field(default=4.0)
+    # A restatement of the question just answered ("…? Tell us briefly about
+    # it.") is dropped for this long. Matching is by shared content words,
+    # see question_detection._same_question.
+    question_detection_repeat_window_s: float = Field(default=120.0)
+
+    # Live answers can search the web when the model decides it needs to
+    # (a company's products, recent releases, niche tools). Uses each
+    # provider's built-in search: Claude web_search, OpenAI web_search,
+    # Gemini Google Search grounding. DeepSeek has none and answers offline.
+    answer_web_search: bool = Field(default=True)
+    # Claude only — the others expose no per-request cap. Each search adds
+    # seconds to a live answer.
+    answer_web_search_max_uses: int = Field(default=2)
 
     # Vision extraction (coding mode). Must be a model with image input.
     vision_extraction_model: str = Field(default="gemini-2.5-flash")

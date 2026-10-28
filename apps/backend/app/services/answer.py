@@ -10,6 +10,7 @@ from google import genai
 from google.genai import types as genai_types
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
+from openai.types.responses import EasyInputMessageParam, ResponseInputParam
 
 from app.models.catalog import Effort, Provider
 from app.models.params import (
@@ -17,13 +18,14 @@ from app.models.params import (
     effort_max_tokens,
     gemini_thinking_config,
     open_with_param_fallback,
-    openai_options,
+    openai_responses_options,
 )
 from app.models.streams import (
     OPENAI_STREAM_OPTIONS,
     UsageCallback,
     anthropic_text,
     gemini_text,
+    openai_responses_text,
     openai_text,
 )
 from app.prompts.answer_generation import (
@@ -39,6 +41,30 @@ from app.settings import settings
 
 ANSWER_MAX_TOKENS = 1500
 ANSWER_TEMPERATURE = 0.4
+
+
+def _anthropic_web_search() -> dict[str, Any]:
+    if not settings.answer_web_search:
+        return {}
+    return {
+        "tools": [
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": settings.answer_web_search_max_uses,
+            }
+        ]
+    }
+
+
+def _openai_web_search() -> dict[str, Any]:
+    return {"tools": [{"type": "web_search"}]} if settings.answer_web_search else {}
+
+
+def _gemini_web_search() -> list[genai_types.Tool] | None:
+    if not settings.answer_web_search:
+        return None
+    return [genai_types.Tool(google_search=genai_types.GoogleSearch())]
 
 
 def _gemini_thinking_config(model: str) -> genai_types.ThinkingConfig:
@@ -175,7 +201,7 @@ def _openai_messages(
     user: str,
     prior: tuple[PriorTurn, ...],
 ) -> list[ChatCompletionMessageParam]:
-    """Build the OpenAI/DeepSeek `messages` array. Prior assistant turns are
+    """Build the DeepSeek (Chat Completions) `messages` array. Prior assistant turns are
     included as actual `assistant` messages so the API treats this as a real
     multi-turn conversation (cleaner than re-embedding history in the user
     prompt). The current user turn (`user`) wraps the question with the
@@ -204,13 +230,17 @@ async def _stream_gemini(
     client = genai.Client(api_key=settings.gemini_api_key)
     effective_model = model or settings.gemini_model
 
-    def config(thinking: genai_types.ThinkingConfig | None) -> genai_types.GenerateContentConfig:
+    def config(
+        thinking: genai_types.ThinkingConfig | None,
+        tools: list[genai_types.Tool] | None = None,
+    ) -> genai_types.GenerateContentConfig:
         return genai_types.GenerateContentConfig(
             system_instruction=system,
             temperature=ANSWER_TEMPERATURE,
             max_output_tokens=effort_max_tokens(effort, ANSWER_MAX_TOKENS),
             top_p=0.9,
             thinking_config=thinking,
+            tools=tools,
         )
 
     async def open_stream(opts: dict[str, Any]) -> AsyncIterator[Any]:
@@ -220,9 +250,14 @@ async def _stream_gemini(
 
     stream = await open_with_param_fallback(
         open_stream,
-        {"config": config(gemini_thinking_config(effective_model, effort))},
+        {
+            "config": config(
+                gemini_thinking_config(effective_model, effort), _gemini_web_search()
+            )
+        },
         # Fallback keeps the legacy thinking config (budget 0 on Flash) —
         # dropping it would re-enable dynamic thinking and truncate answers.
+        # It also drops search, so a model without grounding answers offline.
         {"config": config(gemini_thinking_config(effective_model, None))},
         label="answer.gemini",
     )
@@ -243,31 +278,40 @@ async def _stream_openai(
         raise RuntimeError("OPENAI_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     effective_model = model or settings.openai_model
-    messages = _openai_messages(system, user, prior)
+    # Responses API rather than Chat Completions: only it offers the
+    # web_search tool on regular (non "-search") models.
+    prior_input: list[EasyInputMessageParam] = [
+        {"role": turn.role, "content": turn.content} for turn in prior
+    ]
+    request_input: ResponseInputParam = [*prior_input, {"role": "user", "content": user}]
 
     async def open_stream(opts: dict[str, Any]) -> Any:
-        return await client.chat.completions.create(
+        return await client.responses.create(
             model=effective_model,
-            messages=messages,
+            instructions=system,
+            input=request_input,
             stream=True,
-            stream_options=OPENAI_STREAM_OPTIONS,
+            store=False,
             **opts,
         )
 
     stream = await open_with_param_fallback(
         open_stream,
-        openai_options(
-            effective_model,
-            effort=effort,
-            max_tokens=ANSWER_MAX_TOKENS,
-            temperature=ANSWER_TEMPERATURE,
-        ),
-        openai_options(
+        {
+            **openai_responses_options(
+                effective_model,
+                effort=effort,
+                max_tokens=ANSWER_MAX_TOKENS,
+                temperature=ANSWER_TEMPERATURE,
+            ),
+            **_openai_web_search(),
+        },
+        openai_responses_options(
             effective_model, effort=None, max_tokens=ANSWER_MAX_TOKENS, temperature=None
         ),
         label="answer.openai",
     )
-    async for text in openai_text(stream, on_usage):
+    async for text in openai_responses_text(stream, on_usage):
         yield text
 
 
@@ -310,7 +354,10 @@ async def _stream_anthropic(
 
     stream = await open_with_param_fallback(
         open_stream,
-        anthropic_options(effort=effort, max_tokens=ANSWER_MAX_TOKENS),
+        {
+            **anthropic_options(effort=effort, max_tokens=ANSWER_MAX_TOKENS),
+            **_anthropic_web_search(),
+        },
         anthropic_options(effort=None, max_tokens=ANSWER_MAX_TOKENS),
         label="answer.claude",
     )

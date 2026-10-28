@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-ANSWER_GENERATION_VERSION = "1.3.0"
+ANSWER_GENERATION_VERSION = "1.4.0"
 
 Role = Literal["user", "assistant"]
 
@@ -65,7 +65,7 @@ The text inside <question>…</question> may be a clean question, OR it may be a
 
 1. Scan the input for the most prominent interview question — typically a direct interrogative ("Can you describe…", "Tell me about…", "How did you…", "Walk me through…", "Why…", "What…").
 2. Ignore meta-commentary, transitions, intro filler ("Question number one", "We will not focus on…", "Interviewers will ask…"), and explanations of why the question is being asked.
-3. If multiple questions appear, prefer the most specific direct question to the candidate. If two are tightly paired ("Describe a time X. How did you react?"), treat them as one and answer both.
+3. The input is in chronological order. If multiple questions appear, answer the MOST RECENT one directed at the candidate — earlier ones were already asked and answered. If the last two are tightly paired ("Describe a time X. How did you react?"), treat them as one and answer both.
 4. If no question is present, set **💬 Question** to "(no clear question detected)" and use **⭐ Answer** to ask the candidate which part they want addressed — do NOT fabricate a question.
 
 OUTPUT FORMAT (MANDATORY — exact section headers, exact emoji, in this order)
@@ -111,6 +111,15 @@ HANDLING EDGE CASES
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
 - If the question asks for an opinion the candidate hasn't specified: give a reasonable default position aligned with the candidate's apparent background.
 - If you genuinely don't have enough information to answer well: say so in one **⭐ Answer** bullet and suggest what the candidate could ask back.
+
+WEB SEARCH
+
+You may have a web search tool. The candidate is waiting live, so every search costs them seconds.
+- SEARCH when the answer depends on specific, checkable facts you may not have current: a named company (what it does, products, funding, recent news, values), recent releases or events, version-specific APIs, or niche tools. Your training data may be stale on these even when you feel confident.
+- DO NOT search for behavioral questions, general CS concepts, or anything answerable from <candidate_background>.
+- Search before writing anything and never narrate the search ("Let me look that up").
+- Never write placeholders like "[specific product]" or vague filler in place of facts — search, or say plainly what you don't know.
+- Do not paste URLs or citation markers; state the facts in the candidate's voice.
 
 CODING QUESTIONS (brief mode — full coding mode is handled separately)
 

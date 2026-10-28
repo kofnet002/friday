@@ -64,6 +64,9 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
     async def on_qd_dedup(question: str) -> None:
         await send_json_safe({"type": "qd_dedup", "question": question})
 
+    async def on_manual_question(question: str | None) -> None:
+        await send_json_safe({"type": "manual_question", "question": question})
+
     detector = QuestionDetector(
         effective_session_id,
         on_question,
@@ -71,6 +74,7 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
         on_fallback=on_qd_fallback,
         on_error=on_qd_error,
         on_dedup=on_qd_dedup,
+        on_manual=on_manual_question,
     )
     # Restore the fallback flag if a prior WS connection persisted one.
     # Survives transient reconnects so we don't pay another wasted Gemini
@@ -168,6 +172,8 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
                                     "message": f"invalid qd model: {model}",
                                 }
                             )
+                elif kind == "detect_now":
+                    detector.detect_now()
                 elif kind == "stop":
                     log.info("ws.stop", session_id=effective_session_id)
                     break

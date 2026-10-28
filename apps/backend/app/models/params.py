@@ -115,6 +115,25 @@ def openai_options(
     }
 
 
+def openai_responses_options(
+    model: str,
+    *,
+    effort: Effort | None,
+    max_tokens: int,
+    temperature: float | None,
+) -> dict[str, Any]:
+    """openai_options translated to the Responses API's parameter names."""
+    opts = openai_options(model, effort=effort, max_tokens=max_tokens, temperature=temperature)
+    out: dict[str, Any] = {
+        "max_output_tokens": opts.get("max_completion_tokens", opts.get("max_tokens")),
+    }
+    if "temperature" in opts:
+        out["temperature"] = opts["temperature"]
+    if "reasoning_effort" in opts:
+        out["reasoning"] = {"effort": opts["reasoning_effort"]}
+    return out
+
+
 def _is_gemini_2(model: str) -> bool:
     return model.lower().startswith(("gemini-1", "gemini-2"))
 

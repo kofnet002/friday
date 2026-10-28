@@ -287,6 +287,15 @@ export function SessionClient() {
   // margin without making the suppression window so wide that genuinely
   // separate questions get dropped.
   const FORCE_ASK_AUTODETECT_COOLDOWN_MS = 7000;
+  // Pending "answer latest question" request (⌘⇧Space / button): the
+  // timeout that falls back to raw transcript if the backend never replies.
+  // While set, auto-detected questions are held back — the manual reply
+  // covers the same transcript.
+  const manualAskTimerRef = useRef<number | null>(null);
+  const [answeringLatest, setAnsweringLatest] = useState(false);
+  // Safety net only: the backend gives up first (MANUAL_DETECT_TIMEOUT_S,
+  // 8s) and replies with null, which triggers the same fallback.
+  const MANUAL_ASK_TIMEOUT_MS = 10000;
 
   finalsRef.current = finals;
   providerRef.current = provider;
@@ -574,7 +583,20 @@ export function SessionClient() {
       setQdDedupAt(Date.now());
       return;
     }
+    if (msg.type === 'manual_question') {
+      // Timed out already — the raw-transcript fallback has answered.
+      if (!finishManualAsk()) return;
+      if (msg.question) {
+        lastForceAskAtRef.current = Date.now();
+        askAnswer(msg.question);
+        setActiveFeature('listen');
+      } else {
+        forceAskRecentTranscript();
+      }
+      return;
+    }
     if (msg.type === 'question_detected') {
+      if (manualAskTimerRef.current !== null) return;
       // Force-ask cooldown: if the user just fired a manual ask, swallow
       // auto-detected questions for a short window. The user already
       // started a thread on substantially the same transcript content.
@@ -1332,20 +1354,62 @@ export function SessionClient() {
 
   const submitCustom = (q: string) => askAnswer(q);
 
-  // ─── hotkeys: ⌘⇧␣ (force-ask), ⌘⇧C (coding), ⌘⇧. (panic blur) ─────────────
+  // Answer the raw tail of the transcript. The answer prompt picks out the
+  // most recent question in it.
+  const forceAskRecentTranscript = () => {
+    const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
+    if (!recent) {
+      setPanelError('no transcript yet');
+      return;
+    }
+    lastForceAskAtRef.current = Date.now();
+    askAnswer(recent);
+    setActiveFeature('listen');
+  };
+
+  // Returns false when no manual ask was pending (already finished).
+  const finishManualAsk = () => {
+    if (manualAskTimerRef.current === null) return false;
+    window.clearTimeout(manualAskTimerRef.current);
+    manualAskTimerRef.current = null;
+    setAnsweringLatest(false);
+    return true;
+  };
+
+  // ⌘⇧Space / "Answer latest" button: the backend detector reconstructs
+  // the newest question; without a live transcribe socket, fall back to
+  // the raw transcript.
+  const answerLatest = () => {
+    if (manualAskTimerRef.current !== null) return;
+    const ws = transcribeRef.current;
+    if (!ws || !ws.isOpen()) {
+      forceAskRecentTranscript();
+      return;
+    }
+    ws.sendControl({ type: 'detect_now' });
+    setAnsweringLatest(true);
+    manualAskTimerRef.current = window.setTimeout(() => {
+      if (finishManualAsk()) forceAskRecentTranscript();
+    }, MANUAL_ASK_TIMEOUT_MS);
+  };
+  // Stable handle for the desktop hotkey subscription below.
+  const answerLatestRef = useRef(answerLatest);
+  answerLatestRef.current = answerLatest;
+
+  useEffect(() => {
+    const off = window.friday?.appWindow?.onAnswerLatest?.(() => answerLatestRef.current());
+    return () => off?.();
+  }, []);
+
+  // ─── hotkeys: ⌘⇧␣ (answer latest), ⌘⇧C (coding), ⌘⇧. (panic blur) ─────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.metaKey || !e.shiftKey) return;
+      // In the desktop app ⌘⇧Space is a global shortcut and arrives via
+      // onAnswerLatest instead; this covers the plain browser.
       if (e.code === 'Space' || e.key === ' ') {
         e.preventDefault();
-        const recent = finalsRef.current.slice(-RECENT_FINALS_JOIN).join(' ').trim();
-        if (recent) {
-          lastForceAskAtRef.current = Date.now();
-          askAnswer(recent);
-          setActiveFeature('listen');
-        } else {
-          setPanelError('no transcript yet');
-        }
+        answerLatestRef.current();
         return;
       }
       if (e.code === 'KeyC' || e.key?.toLowerCase() === 'c') {
@@ -1756,6 +1820,8 @@ export function SessionClient() {
             onPrev={goPrev}
             onNext={goNext}
             onSubmitCustom={submitCustom}
+            onAnswerLatest={answerLatest}
+            answeringLatest={answeringLatest}
             onFollowUp={followUp}
             connected={answerConnected}
             privacyMode={privacyMode}

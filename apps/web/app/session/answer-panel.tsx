@@ -32,6 +32,7 @@ import {
   Send,
   Sparkles,
   Square,
+  Zap,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -81,6 +82,10 @@ export interface AnswerPanelProps {
   onClear: () => void;
   onReask: () => void;
   onSubmitCustom: (question: string) => void;
+  /** Answer the newest question in the transcript now (same as ⌘⇧Space). */
+  onAnswerLatest: () => void;
+  /** True while the detector is reconstructing the newest question. */
+  answeringLatest: boolean;
   /** Append a user turn to the current thread and stream the next answer.
    *  Different from onSubmitCustom which always starts a new thread. */
   onFollowUp: (question: string) => void;
@@ -123,6 +128,8 @@ export function AnswerPanel({
   onClear,
   onReask,
   onSubmitCustom,
+  onAnswerLatest,
+  answeringLatest,
   onFollowUp,
   connected,
   privacyMode,
@@ -245,6 +252,21 @@ export function AnswerPanel({
             {connected ? 'live' : 'offline'}
           </span>
           <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
+          <button
+            type="button"
+            onClick={onAnswerLatest}
+            disabled={answeringLatest || !connected}
+            aria-label="Answer the most recent question"
+            title="Answer the most recent question (⌘⇧Space)"
+            className="flex h-6 items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 active:bg-amber-500/30 disabled:opacity-50 dark:text-amber-300"
+          >
+            {answeringLatest ? (
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+            ) : (
+              <Zap className="h-3 w-3" aria-hidden />
+            )}
+            Answer latest
+          </button>
           <div className="ml-auto flex items-center gap-1.5">
             <ModelPicker
               density="compact"

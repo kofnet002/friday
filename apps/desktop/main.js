@@ -297,6 +297,9 @@ function registerGlobalHotkeys() {
     ['CommandOrControl+Shift+-', () => adjustOpacity(-OPACITY_STEP)],
     ['CommandOrControl+Shift+=', () => adjustOpacity(OPACITY_STEP)],
     ['CommandOrControl+Shift+0', resetWindowState],
+    // Global so it works while the interview app has focus; the renderer
+    // asks the backend for the newest question and answers it.
+    ['CommandOrControl+Shift+Space', () => broadcast('window:answer_latest')],
     // ⌘Q only reaches a focused app; the overlay usually isn't. ⌘⇧Q and
     // ⌘⌥⇧Q are macOS Log Out, so quit lives on ⌘⌥Q.
     ['CommandOrControl+Alt+Q', () => app.quit()],

@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-QUESTION_DETECTION_VERSION = "1.2.0"
+QUESTION_DETECTION_VERSION = "1.3.0"
 
 QUESTION_DETECTION_SYSTEM_PROMPT = """\
 You classify whether an interviewer has just finished asking the candidate a question that requires a response, and — when they have — reconstruct it.
@@ -30,11 +30,14 @@ A question IS complete (is_question: true) when the final utterance ends with:
 - Clear terminal punctuation ("?", ".", "!") after an interrogative phrase
 - A well-formed request: "tell me about...", "walk me through...", "describe...", "explain...", "can you share...", "how would you...", "what would happen if...", "design a...", "implement...", "walk me through...", etc.
 
+A complete question may be FOLLOWED by courtesy remarks that hand the floor to the candidate: "take your time", "whenever you're ready", "you have two minutes", "feel free to think out loud", "go ahead". These do NOT cancel the question — it is still complete. Reconstruct the question itself and leave the courtesy remark out.
+
 A question IS NOT complete (is_question: false) when:
 - The final utterance trails off with no terminal punctuation, a conjunction/preposition ("and", "or", "but", "with", "for", "to"), or a dangling modifier — the interviewer is mid-sentence
 - The interviewer is explaining, giving context, or making small talk
 - It's acknowledgment / filler: "okay", "right", "got it", "makes sense"
 - The utterance is a statement with no implicit ask
+- It is call logistics or small talk that needs no prepared answer: "Can you hear me?", "Are you ready to begin?", "Shall we get started?", "Is now still a good time?", "How are you today?", "Can you see my screen?", "Any questions before we start?". The candidate answers these in a word; is_question: false.
 
 RECONSTRUCTION
 
@@ -130,7 +133,23 @@ class Utterance:
     speaker: int | None = None
 
 
-def question_detection_user_prompt(utterances: Sequence[Utterance | str]) -> str:
+# Appended when the candidate pressed "answer latest question". The
+# candidate has already decided a question was asked, so the classifier's
+# job narrows to finding the newest one rather than judging completeness.
+MANUAL_REQUEST_NOTE = (
+    "The candidate pressed the answer-now key: they need the most recent "
+    "question or request directed at them. The COMPLETENESS rules do not "
+    "apply to this request: if the interviewer trailed off mid-sentence, set "
+    "is_question: true and reconstruct the request as far as it was spoken "
+    "(e.g. \"…how you handled scaling the payments system and\" → \"How did "
+    "you handle scaling the payments system?\"). Set is_question: false only "
+    "if nothing was asked of the candidate at all."
+)
+
+
+def question_detection_user_prompt(
+    utterances: Sequence[Utterance | str], *, manual: bool = False
+) -> str:
     """Format utterances as a numbered list for the classifier.
 
     Accepts either the new Utterance dataclass (with speaker info) or
@@ -138,11 +157,18 @@ def question_detection_user_prompt(utterances: Sequence[Utterance | str]) -> str
     line gets a `[N, Speaker M]` prefix so the model can use the SPEAKER
     LABELS section of the system prompt; otherwise we fall back to the
     plain `[N]` numbering and the system prompt's fallback rule kicks in.
+
+    `manual` appends MANUAL_REQUEST_NOTE for candidate-triggered runs.
     """
+    task = (
+        MANUAL_REQUEST_NOTE
+        if manual
+        else "Classify the interviewer's most recent question and reconstruct it if complete."
+    )
     if not utterances:
         return (
             "Last 30 seconds of transcript: (empty)\n\n"
-            "Classify the interviewer's most recent question."
+            f"{task}"
         )
     # Normalize to Utterance and check whether any speaker is known.
     norm: list[Utterance] = []
@@ -163,5 +189,5 @@ def question_detection_user_prompt(utterances: Sequence[Utterance | str]) -> str
     return (
         "Last 30 seconds of transcript (numbered utterances, oldest first):\n\n"
         f"{listing}\n\n"
-        "Classify the interviewer's most recent question and reconstruct it if complete."
+        f"{task}"
     )
