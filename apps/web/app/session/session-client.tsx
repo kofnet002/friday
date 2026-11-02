@@ -162,6 +162,11 @@ export function SessionClient() {
   const [panelError, setPanelError] = useState<string | null>(null);
   const [answerConnected, setAnswerConnected] = useState(false);
   const streamingIdRef = useRef<string | null>(null);
+  // request_id of the stream streamingIdRef is waiting on. The backend echoes
+  // it on every message, so stragglers from a stream we already cancelled
+  // (its `cancelled`, a last token, a racing `done`) are dropped instead of
+  // landing on — and ending — the new entry.
+  const answerRequestIdRef = useRef<string | null>(null);
 
   // Question-detection model + lifecycle state. The model is a user
   // preference; the state reflects the per-session detector's current
@@ -467,6 +472,9 @@ export function SessionClient() {
     (msg: AnswerServerMessage) => {
       const id = streamingIdRef.current;
       if (!id) return;
+      if (msg.type !== 'pong' && msg.request_id && msg.request_id !== answerRequestIdRef.current) {
+        return;
+      }
       if (msg.type === 'started') {
         // Reset the pending assistant turn — askAnswer/followUp already
         // appended an empty {role:'assistant', content:''} placeholder to
@@ -512,18 +520,24 @@ export function SessionClient() {
         answerStartedAtRef.current = null;
         updateEntry(id, { status: 'done' });
         streamingIdRef.current = null;
+        answerRequestIdRef.current = null;
         return;
       }
       if (msg.type === 'cancelled') {
         answerStartedAtRef.current = null;
         updateEntry(id, { status: 'cancelled' });
         streamingIdRef.current = null;
+        answerRequestIdRef.current = null;
         return;
       }
-      if (msg.type === 'error') {
+      if (msg.type === 'error' || msg.type === 'limit_exceeded') {
+        // limit_exceeded ends the stream before `started`; without this the
+        // entry would spin on "Generating…" forever.
         answerStartedAtRef.current = null;
         updateEntry(id, { status: 'error', error: msg.message });
         streamingIdRef.current = null;
+        answerRequestIdRef.current = null;
+        return;
       }
       if (msg.type === 'provider_changed') {
         // Backend auto-fell-back to a different provider mid-call (primary
@@ -1037,6 +1051,7 @@ export function SessionClient() {
     ws.cancel?.();
     updateEntry(oldId, { status: 'cancelled' });
     streamingIdRef.current = null;
+    answerRequestIdRef.current = null;
   };
 
   const newId = () =>
@@ -1089,8 +1104,11 @@ export function SessionClient() {
       return next;
     });
     streamingIdRef.current = id;
+    const requestId = newId();
+    answerRequestIdRef.current = requestId;
     ws.send({
       type: 'question',
+      request_id: requestId,
       messages: [{ role: 'user', content: q }],
       thread_id: threadId,
       provider: providerRef.current,
@@ -1141,8 +1159,11 @@ export function SessionClient() {
       error: null,
     });
     streamingIdRef.current = current.id;
+    const requestId = newId();
+    answerRequestIdRef.current = requestId;
     ws.send({
       type: 'question',
+      request_id: requestId,
       // Send the full thread minus the trailing empty assistant placeholder
       // so the backend sees user/assistant/user… with the new turn last.
       messages: nextMessages.slice(0, -1),
@@ -1268,6 +1289,7 @@ export function SessionClient() {
     if (removed && streamingIdRef.current === removed.id) {
       answerRef.current?.cancel();
       streamingIdRef.current = null;
+      answerRequestIdRef.current = null;
     }
     setEntries((prev) => {
       const next = prev.filter((_, i) => i !== entryIndex);

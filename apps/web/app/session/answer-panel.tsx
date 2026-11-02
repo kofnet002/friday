@@ -367,6 +367,7 @@ export function AnswerPanel({
               question={question}
               messages={messages}
               isStreaming={isStreaming}
+              status={status}
               marked={marked}
               privacyMode={privacyMode}
             />
@@ -378,6 +379,7 @@ export function AnswerPanel({
           question={question}
           messages={messages}
           isStreaming={isStreaming}
+          status={status}
           marked={marked}
           privacyMode={privacyMode}
         />
@@ -529,11 +531,23 @@ export function AnswerPanel({
   );
 }
 
+// Shown when an entry has a question but no answer text. Only `idle` is
+// genuinely "ready"; the rest mean a stream ended without output, and
+// saying "Ready." there hid the failure.
+const EMPTY_ANSWER_LABEL: Record<AnswerStatus, string> = {
+  idle: 'Ready.',
+  streaming: 'Generating…',
+  done: 'No answer came back — re-ask from the menu.',
+  cancelled: 'Cancelled before an answer arrived — re-ask from the menu.',
+  error: 'Answer failed — re-ask from the menu.',
+};
+
 function AnswerBody({
   answer,
   question,
   messages,
   isStreaming,
+  status,
   marked,
   privacyMode,
 }: {
@@ -541,6 +555,7 @@ function AnswerBody({
   question: string | null;
   messages: AnswerMessage[];
   isStreaming: boolean;
+  status: AnswerStatus;
   marked: boolean;
   privacyMode: boolean;
 }) {
@@ -578,7 +593,9 @@ function AnswerBody({
           <span>Generating…</span>
         </div>
       ) : question ? (
-        <p className="text-sm text-neutral-500 dark:text-neutral-400">Ready.</p>
+        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          {EMPTY_ANSWER_LABEL[status]}
+        </p>
       ) : (
         <div className="flex h-full flex-col items-start justify-center gap-3 py-2">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">

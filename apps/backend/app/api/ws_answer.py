@@ -75,13 +75,23 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 log.warning("ws_answer.send_failed", error=str(exc))
 
     async def run_stream(request: dict[str, Any]) -> None:
+        # Echoed on every message of this stream so the client can drop
+        # stragglers from a stream it already cancelled (e.g. the old
+        # stream's `cancelled` arriving after the next question was sent).
+        request_id = request.get("request_id")
+
+        async def emit(payload: dict[str, Any]) -> None:
+            if request_id:
+                payload = {**payload, "request_id": request_id}
+            await send_json(payload)
+
         provider: Provider = request.get("provider", "gemini")
         selected_model: str | None = None
         raw_model = request.get("model")
         if raw_model:
             selection = resolve_model(str(raw_model), provider_hint=provider)
             if selection is None:
-                await send_json(
+                await emit(
                     {
                         "type": "error",
                         "message": f"Can't resolve model {raw_model!r} — use a vendor ID "
@@ -105,7 +115,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             # cancel) are dropped — we only want completed turns as context.
             tail_idx = _last_user_index(raw_messages)
             if tail_idx is None:
-                await send_json({"type": "error", "message": "no user turn in thread"})
+                await emit({"type": "error", "message": "no user turn in thread"})
                 return
             question = str(raw_messages[tail_idx].get("content") or "").strip()
             prior_turns = tuple(
@@ -119,7 +129,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             prior_turns = ()
 
         if not question:
-            await send_json({"type": "error", "message": "empty question"})
+            await emit({"type": "error", "message": "empty question"})
             return
 
         # Pre-flight budget check.
@@ -132,7 +142,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 used=budget.used,
                 limit=budget.limit,
             )
-            await send_json(
+            await emit(
                 {
                     "type": "limit_exceeded",
                     "kind": "tokens",
@@ -172,7 +182,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         auto_detected = bool(request.get("auto_detected", False))
         model = selected_model or _default_model(provider)
 
-        await send_json(
+        await emit(
             {
                 "type": "started",
                 "question": question,
@@ -190,7 +200,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             nonlocal effective_provider, effective_model
             effective_provider = nxt
             effective_model = _default_model(nxt)
-            await send_json(
+            await emit(
                 {
                     "type": "provider_changed",
                     "from": prev,
@@ -220,14 +230,14 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 on_usage=_on_usage,
             ):
                 collected.append(token)
-                await send_json({"type": "token", "text": token})
-            await send_json({"type": "done"})
+                await emit({"type": "token", "text": token})
+            await emit({"type": "done"})
         except asyncio.CancelledError:
-            await send_json({"type": "cancelled"})
+            await emit({"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001
             log.error("ws_answer.stream_error", error=str(exc))
-            await send_json({"type": "error", "message": str(exc)})
+            await emit({"type": "error", "message": str(exc)})
             return
 
         answer_text = "".join(collected).strip()
@@ -242,7 +252,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                     auto_detected=auto_detected,
                     thread_id=thread_id,
                 )
-                await send_json({"type": "saved", "id": row_id, "thread_id": thread_id})
+                await emit({"type": "saved", "id": row_id, "thread_id": thread_id})
             except Exception as exc:  # noqa: BLE001
                 log.warning("ws_answer.save_failed", error=str(exc))
             # Cache the latest Q+A so the follow-up classifier gets real

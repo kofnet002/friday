@@ -137,14 +137,24 @@ export type AnswerClientMessage =
       effort?: ReasoningEffort;
       session_context?: AnswerSessionContext;
       auto_detected?: boolean;
+      /** Unique per send (a follow-up reuses `thread_id` but gets a fresh
+       *  `request_id`). Echoed on every server message of that stream. */
+      request_id?: string;
     }
   | { type: 'cancel' }
   | { type: 'ping' };
 
 /** Server → client. `started.question` is the latest user turn (for legacy
  *  rendering); `started.thread_id` echoes the client's thread_id when one is
- *  provided so the client can correlate `saved` rows. */
+ *  provided so the client can correlate `saved` rows. Every message of a
+ *  stream echoes the `request_id` the client sent, so messages from a stream
+ *  the client already cancelled can be told apart from the current one.
+ *  `pong` is connection-level and carries none. */
 export type AnswerServerMessage =
+  | ({ request_id?: string } & AnswerStreamMessage)
+  | { type: 'pong' };
+
+type AnswerStreamMessage =
   | {
       type: 'started';
       question: string;
@@ -154,7 +164,6 @@ export type AnswerServerMessage =
   | { type: 'token'; text: string }
   | { type: 'done' }
   | { type: 'cancelled' }
-  | { type: 'pong' }
   | { type: 'saved'; id: number; thread_id?: string }
   | {
       type: 'limit_exceeded';

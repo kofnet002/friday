@@ -33,6 +33,13 @@ FactoryFn = Callable[[ProviderName], AsyncIterator[str]]
 FallbackHook = Callable[[ProviderName, ProviderName, str], Awaitable[None]]
 
 
+class EmptyStreamError(RuntimeError):
+    """A provider finished cleanly without producing any visible text (e.g.
+    reasoning consumed the whole token budget, or a tool-only turn). Treated
+    as a failure so the chain falls back instead of reporting an empty
+    answer as success."""
+
+
 async def stream_with_fallback(
     *,
     providers: list[ProviderName],
@@ -52,12 +59,25 @@ async def stream_with_fallback(
         raise ValueError("stream_with_fallback called with no providers")
     last_exc: BaseException | None = None
     for idx, provider in enumerate(providers):
+        # True once a non-whitespace token reached the caller — from then on
+        # switching providers would splice two answers together. Leading
+        # whitespace-only tokens are held back so a blank attempt leaks
+        # nothing before we fall back.
         emitted = False
+        held: list[str] = []
         start = time.monotonic()
         try:
             async for token in factory(provider):
-                emitted = True
+                if not emitted and not token.strip():
+                    held.append(token)
+                    continue
+                if not emitted:
+                    emitted = True
+                    for pending in held:
+                        yield pending
                 yield token
+            if not emitted:
+                raise EmptyStreamError(f"{provider} returned an empty response")
             elapsed_ms = (time.monotonic() - start) * 1000
             log.info(
                 "stream.provider_done",
