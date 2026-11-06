@@ -52,6 +52,7 @@ import {
   fetchSessionUsage,
   getCodingLanguagePreference,
   getOrCreateSessionId,
+  DEFAULT_QD_MODEL,
   getProviderPreference,
   getEffortPreference,
   getModelPreference,
@@ -85,6 +86,7 @@ import {
   SettingsBody,
   ShortcutsModal,
 } from './session-modals';
+import { placeScannedTab } from './scan-tabs';
 
 const MAX_CODING_TABS = 3;
 
@@ -150,7 +152,7 @@ export function SessionClient() {
   // currently-streaming entry is tracked separately via streamingIdRef so
   // tokens always land on the right entry even if the user navigates away
   // while the LLM is still streaming.
-  const [provider, setProvider] = useState<AnswerProvider>('gemini');
+  const [provider, setProvider] = useState<AnswerProvider>('claude');
   const [model, setModel] = useState<string>(getModelPreference);
   const modelRef = useRef(model);
   modelRef.current = model;
@@ -171,7 +173,7 @@ export function SessionClient() {
   // Question-detection model + lifecycle state. The model is a user
   // preference; the state reflects the per-session detector's current
   // phase (idle/listening/detecting) and drives the Listen-panel pill.
-  const [qdModel, setQdModelState] = useState<QdModel>('gemini-3.5-flash-lite');
+  const [qdModel, setQdModelState] = useState<QdModel>(DEFAULT_QD_MODEL);
   const [qdState, setQdState] = useState<QdState>('idle');
   // Non-null when the backend has fallen back from Gemini to GPT-4o for
   // QD (typically a 429). Reset when the user explicitly picks a new
@@ -183,7 +185,7 @@ export function SessionClient() {
   // Briefly highlights the status pill when the detector saw a question
   // and suppressed it as a duplicate. Auto-clears.
   const [qdDedupAt, setQdDedupAt] = useState<number>(0);
-  const qdModelRef = useRef<QdModel>('gemini-3.5-flash-lite');
+  const qdModelRef = useRef<QdModel>(DEFAULT_QD_MODEL);
   qdModelRef.current = qdModel;
 
   // Coding panel state
@@ -198,6 +200,8 @@ export function SessionClient() {
     interval_ms: number;
   } | null>(null);
   const [codingError, setCodingError] = useState<string | null>(null);
+  // Scroll scan (⌘⇧; / Scan button): several screenshots → one problem.
+  const [scanState, setScanState] = useState<FridayScanState>({ state: 'idle', frames: 0 });
   const [codingConnected, setCodingConnected] = useState(false);
   // Coding panel mode (solve / explain / debug / tests). Each non-solve
   // mode keeps its OWN scratch buffer — switching from Explain to Debug
@@ -662,7 +666,8 @@ export function SessionClient() {
       return;
     }
     if (msg.type === 'coding_problem_detected') {
-      onCodingProblemDetected(msg.problem, msg.fingerprint);
+      if (msg.source === 'scan') onScannedProblemDetected(msg.problem, msg.fingerprint);
+      else onCodingProblemDetected(msg.problem, msg.fingerprint);
       return;
     }
     // `saved` only fires for solve mode (other modes are ephemeral on the
@@ -961,6 +966,47 @@ export function SessionClient() {
       // runs; it's replaced only when the agent returns its verified answer.
       agent: { status: 'streaming', steps: [], startedAt: Date.now() },
     }));
+  };
+
+  // A scan is an explicit "read this whole problem" — unlike watcher
+  // detections it replaces partial tabs of the same problem and takes over
+  // the solve slot even if another solve is streaming (that one is cancelled
+  // server-side: ws_coding is single-in-flight).
+  const onScannedProblemDetected = (problem: ExtractedProblem, fingerprint: string) => {
+    setCodingError(null);
+    const lang = codingLanguageRef.current;
+    const existing = codingTabsRef.current.find((t) => t.fingerprint === fingerprint);
+    // Re-scanning a problem that already has an answer keeps that answer.
+    const shouldSolve = !existing?.solution || existing.status === 'error';
+    const scannedTab: CodingProblemTab = existing
+      ? { ...existing, problem }
+      : {
+          fingerprint,
+          problem,
+          language: lang,
+          model: modelRef.current,
+          solution: '',
+          status: 'idle',
+          error: null,
+          savedId: null,
+          tests: null,
+          agent: null,
+        };
+    setCodingTabs((prev) => {
+      const placed = placeScannedTab(prev, scannedTab, MAX_CODING_TABS).tabs;
+      if (!shouldSolve) return placed;
+      return placed.map((t) =>
+        t.fingerprint === fingerprint
+          ? { ...t, solution: '', status: 'streaming' as const, error: null, tests: null }
+          : // Its stream is about to be cancelled by the new solve.
+            t.status === 'streaming'
+            ? { ...t, status: 'cancelled' as const }
+            : t,
+      );
+    });
+    setActiveFeature('coding');
+    setActiveFingerprint(fingerprint);
+    if (shouldSolve) requestSolve(fingerprint, problem, lang);
   };
 
   const onCodingProblemDetected = (problem: ExtractedProblem, fingerprint: string) => {
@@ -1525,6 +1571,46 @@ export function SessionClient() {
     setCodingActive(true);
   };
 
+  // ⌘⇧; (global) / Scan button: start a scroll scan, or finish the running
+  // one. Starts coding mode first when it's off, so a single press from the
+  // interview app is enough.
+  const toggleScan = async () => {
+    const fridayApi = window.friday;
+    if (!fridayApi?.coding?.toggleScan) {
+      setCodingError('Scanning only works inside the Friday desktop window.');
+      return;
+    }
+    setActiveFeature('coding');
+    if (!codingActiveRef.current) {
+      await toggleCodingMode();
+      if (!(await fridayApi.coding.isActive())) return;
+    }
+    const result = await fridayApi.coding.toggleScan();
+    if (!result.ok) setCodingError(result.error ?? 'scan failed');
+  };
+  // The desktop hotkey subscription is mounted once; read the latest closure.
+  const toggleScanRef = useRef(toggleScan);
+  toggleScanRef.current = toggleScan;
+
+  useEffect(() => {
+    const codingApi = window.friday?.coding;
+    if (!codingApi?.onScanState) return;
+    const offState = codingApi.onScanState((next) => {
+      setScanState(next);
+      if (next.state === 'scanning') setCodingError(null);
+      if (next.error) setCodingError(`Scan failed: ${next.error}`);
+    });
+    const offHotkey = codingApi.onScanHotkey(() => void toggleScanRef.current());
+    codingApi
+      .scanStatus()
+      .then(setScanState)
+      .catch(() => setScanState({ state: 'idle', frames: 0 }));
+    return () => {
+      offState();
+      offHotkey();
+    };
+  }, []);
+
   const onCodingLanguageChange = (lang: CodingLanguage) => {
     setCodingLanguage(lang);
     setCodingLanguagePreference(lang);
@@ -1881,6 +1967,8 @@ export function SessionClient() {
             onClearAll={onClearAllCodingTabs}
             onRegenerate={onCodingRegenerate}
             onReExtract={onCodingReExtract}
+            scanState={scanState}
+            onToggleScan={() => void toggleScan()}
             onCancel={onCodingCancel}
             onRefine={onCodingRefine}
             onAgentSolve={() => requestAgentSolve()}

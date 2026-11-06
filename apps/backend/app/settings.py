@@ -30,16 +30,20 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://127.0.0.1:6379")
 
     gemini_model: str = Field(default="gemini-2.5-flash")
-    openai_model: str = Field(default="gpt-4o")
+    # gpt-5.6 = gpt-5.6-sol. Best OpenAI model in the Nov 2026 eval: 15/15
+    # coding scans + full screen-question transcription, and the strongest
+    # OpenAI answer at high effort. gpt-4o was weakest on every task.
+    openai_model: str = Field(default="gpt-5.6")
     deepseek_model: str = Field(default="deepseek-chat")
     deepseek_base_url: str = Field(default="https://api.deepseek.com")
-    # Claude / Anthropic. Opus 4.8 is the most capable tier; override via
-    # ANTHROPIC_MODEL (e.g. claude-sonnet-4-6 / claude-haiku-4-5) to trade
-    # quality for latency/cost. Note: the Opus 4.x family rejects
+    # Claude / Anthropic. Opus 5.5 gave the best live answers in the Nov 2026
+    # eval (the only model to catch every core point at any effort); override
+    # via ANTHROPIC_MODEL (e.g. claude-sonnet-5-5) to trade quality for
+    # latency/cost. Note: the Opus 4.x family rejects
     # temperature/top_p/top_k and budget_tokens — the streamers below omit
     # them deliberately, so swapping in an older model that needs them would
     # require changing the call, not just this string.
-    anthropic_model: str = Field(default="claude-opus-4-8")
+    anthropic_model: str = Field(default="claude-opus-5-5")
 
     # Deepgram streaming config
     deepgram_model: str = Field(default="nova-3")
@@ -48,10 +52,11 @@ class Settings(BaseSettings):
     deepgram_sample_rate: int = Field(default=16000)
     deepgram_channels: int = Field(default=1)
 
-    # Question detection — default to flash-lite so it doesn't share
-    # gemini-2.5-flash's free-tier daily bucket with vision + answer streams.
-    # (gemini-2.5-flash-lite is no longer available to new API keys.)
-    question_detection_model: str = Field(default="gemini-3.5-flash-lite")
+    # Question detection. gpt-4o-mini: fast, cheap, and it was already the
+    # model doing the work — Gemini credits ran out (Nov 2026), so every
+    # detection paid for a failed Gemini call before falling back to it.
+    # gemini-3.5-flash-lite is still selectable in the Listen panel.
+    question_detection_model: str = Field(default="gpt-4o-mini")
     question_detection_silence_ms: int = Field(default=1200)
     # Hard ceiling: even if the interviewer keeps talking without a pause
     # long enough to satisfy the silence timer, fire detection this many ms
@@ -91,7 +96,11 @@ class Settings(BaseSettings):
     # (e.g. openai = gpt-4o, ~2s) while solves still use the selected provider
     # (e.g. the Claude subscription). Empty = follow the coding provider.
     # One of: "" | gemini | openai | deepseek | claude.
-    vision_provider: str = Field(default="")
+    # Defaults to openai (OPENAI_MODEL, gpt-5.6): in the Nov 2026 eval it read
+    # every coding scan and screen question correctly in ~12-20s, while the
+    # Claude CLI path took ~35s per scan and bills the API key unless
+    # CLAUDE_CODE_OAUTH_TOKEN is set.
+    vision_provider: str = Field(default="openai")
     # After a coding problem is confidently detected, suppress re-running the
     # vision model for this many seconds (non-force frames serve the detected
     # problem). Cuts quota churn from re-OCR-ing the same on-screen problem
@@ -145,10 +154,9 @@ class Settings(BaseSettings):
     # "opus"/"claude-opus-4-8" if you'd rather trade speed for raw capability.
     agent_model: str = Field(default="sonnet")
     # Model used when Claude is the selected provider for VISION extraction
-    # (screen → problem) via the subscription CLI. Opus does the best OCR but
-    # is the slowest/most quota-heavy per frame — override to a faster Claude
-    # (e.g. claude-haiku-4-5) if the watch loop feels sluggish.
-    claude_vision_model: str = Field(default="claude-opus-4-8")
+    # (screen → problem) via the CLI. Sonnet 5.5 read every coding scan and
+    # screen question correctly in the Nov 2026 eval, faster than Opus.
+    claude_vision_model: str = Field(default="claude-sonnet-5-5")
 
     # Per-model price overrides for the cost pill, as JSON
     # {"model-id": [input_usd_per_1M, output_usd_per_1M]}. Use it for models
@@ -161,6 +169,11 @@ class Settings(BaseSettings):
     # Per-session safety budgets — pre-flight checked before each LLM call
     # and audio second is metered as it's sent to Deepgram.
     session_token_limit: int = Field(default=500_000)
+    # The token cap counts only the last N hours of a session's usage. The web
+    # app keeps one session id until you start a new session, so a lifetime
+    # total silently piled up across days of practice and tripped the cap
+    # mid-interview. 0 = count all usage ever (the old behaviour).
+    session_token_window_hours: float = Field(default=12.0, ge=0)
     session_audio_minute_limit: int = Field(default=120)
 
     # After this many fallback calls have succeeded against OpenAI, the

@@ -16,6 +16,12 @@ const MODEL_KEY = 'friday.session.model';
 const EFFORT_KEY = 'friday.session.effort';
 const CODING_LANGUAGE_KEY = 'friday.session.coding_language';
 const QD_MODEL_KEY = 'friday.session.qd_model';
+// Best live-answer model in the Nov 2026 eval (see apps/backend settings).
+const DEFAULT_PROVIDER: AnswerProvider = 'claude';
+const DEFAULT_MODEL = 'claude-opus-5-5';
+// Gemini credits are out, so detection defaults to the OpenAI model that
+// was already serving as its fallback.
+export const DEFAULT_QD_MODEL: QdModel = 'gpt-4o-mini';
 // Presets shown in the QD dropdown. Any resolvable ID is also accepted
 // (Claude / DeepSeek need their API key on the backend).
 const QD_MODELS: readonly QdModel[] = [
@@ -55,12 +61,13 @@ export function readSessionId(): string | null {
 }
 
 export function getProviderPreference(): AnswerProvider {
-  if (typeof window === 'undefined') return 'gemini';
+  if (typeof window === 'undefined') return DEFAULT_PROVIDER;
   const raw = window.localStorage.getItem(PROVIDER_KEY);
   if (raw === 'openai') return 'openai';
   if (raw === 'deepseek') return 'deepseek';
+  if (raw === 'gemini') return 'gemini';
   if (raw === 'claude') return 'claude';
-  return 'gemini';
+  return DEFAULT_PROVIDER;
 }
 
 export function setProviderPreference(p: AnswerProvider): void {
@@ -69,10 +76,10 @@ export function setProviderPreference(p: AnswerProvider): void {
 }
 
 export function getModelPreference(): string {
-  if (typeof window === 'undefined') return 'gemini-2.5-flash';
+  if (typeof window === 'undefined') return DEFAULT_MODEL;
   const raw = window.localStorage.getItem(MODEL_KEY);
   // Any resolvable ID is valid — custom models persist like catalog ones.
-  return raw && providerForModel(raw) ? raw : 'gemini-2.5-flash';
+  return raw && providerForModel(raw) ? raw : DEFAULT_MODEL;
 }
 
 export function setModelPreference(model: string): void {
@@ -110,10 +117,10 @@ export function setCodingLanguagePreference(lang: CodingLanguage): void {
 export const ALL_CODING_LANGUAGES = CODING_LANGUAGES;
 
 export function getQdModelPreference(): QdModel {
-  if (typeof window === 'undefined') return 'gemini-3.5-flash-lite';
+  if (typeof window === 'undefined') return DEFAULT_QD_MODEL;
   const raw = window.localStorage.getItem(QD_MODEL_KEY);
   if (raw && providerForModel(raw)) return raw;
-  return 'gemini-3.5-flash-lite';
+  return DEFAULT_QD_MODEL;
 }
 
 export function setQdModelPreference(model: QdModel): void {

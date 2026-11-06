@@ -52,7 +52,7 @@ def build_agent_prompt(
     `prior_solution` + `feedback` flip into refine framing: a previous attempt
     failed (locally or on the real judge) and the agent should diagnose that
     failure rather than solve from scratch."""
-    problem_block = coding_solution_user_prompt(problem)
+    problem_block = coding_solution_user_prompt(problem, language=language)
     tag = _lang_tag(language)
     extra = (
         f"\n\nADDITIONAL INSTRUCTIONS:\n{extra_instructions}"
@@ -62,7 +62,8 @@ def build_agent_prompt(
     starter_note = (
         f"\n   A file `{starter_file}` in the working directory contains the exact"
         " starter signature from the candidate's editor — copy it as your"
-        " starting point and keep the signature verbatim."
+        " starting point and keep its names and parameters (ported to"
+        f" {language} if it's in another language)."
         if starter_file
         else ""
     )

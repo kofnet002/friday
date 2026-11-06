@@ -81,3 +81,50 @@ async def test_token_budget_no_session_id() -> None:
 
     result = await check_token_budget(None)
     assert result.ok is True
+
+
+@pytest.mark.asyncio
+async def test_token_budget_ignores_usage_older_than_window(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session id reused across days must not carry last week's tokens into
+    today's budget: the cap is a rolling window, not a lifetime total."""
+    import time
+
+    from app import db
+    from app.db import init_db, log_usage
+    from app.services.limits import check_token_budget
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "session_token_limit", 1000)
+    monkeypatch.setattr(settings, "session_token_window_hours", 12.0)
+    await init_db()
+    real_now = time.time()
+    monkeypatch.setattr(db.time, "time", lambda: real_now - 3 * 24 * 3600)
+    await log_usage(session_id="s3", kind="answer", input_tokens=5000, output_tokens=0)
+    monkeypatch.setattr(db.time, "time", lambda: real_now)
+    await log_usage(session_id="s3", kind="answer", input_tokens=300, output_tokens=0)
+
+    result = await check_token_budget("s3")
+    assert result.ok is True
+    assert result.used == 300
+
+
+@pytest.mark.asyncio
+async def test_token_budget_message_names_friday_not_the_provider(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.db import init_db, log_usage
+    from app.services.limits import check_token_budget
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "session_token_limit", 100)
+    await init_db()
+    await log_usage(session_id="s4", kind="answer", input_tokens=150, output_tokens=0)
+
+    result = await check_token_budget("s4")
+    assert result.ok is False
+    assert result.message is not None
+    assert "Friday" in result.message
+    assert "not" in result.message and "provider" in result.message
+    assert "new session" in result.message.lower()

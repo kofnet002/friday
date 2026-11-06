@@ -18,8 +18,11 @@ from app.models.catalog import resolve_model
 from app.models.coding import ExtractedProblem
 from app.models.params import openai_options
 from app.prompts.coding_extraction import (
+    CODING_EXTRACTION_SCAN_ADDENDUM,
+    CODING_EXTRACTION_SCAN_CROP_NOTE,
     CODING_EXTRACTION_SYSTEM_PROMPT,
     EXTRACTION_MAX_OUTPUT_TOKENS,
+    EXTRACTION_SCAN_MAX_OUTPUT_TOKENS,
     EXTRACTION_TEMPERATURE,
 )
 from app.redis_client import get_redis
@@ -40,6 +43,19 @@ def _claude_vision_available() -> bool:
 
 def image_content_hash(image_bytes: bytes) -> str:
     return hashlib.sha256(image_bytes).hexdigest()
+
+
+def images_content_hash(images: list[bytes]) -> str:
+    """Order-sensitive hash over every screenshot of a request."""
+    digest = hashlib.sha256()
+    for img in images:
+        digest.update(hashlib.sha256(img).digest())
+    return digest.hexdigest()
+
+
+def _image_mime(image_bytes: bytes) -> str:
+    """Desktop sends JPEG, but tests/tools may post PNG — label it truthfully."""
+    return "image/png" if image_bytes[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
 
 
 # ─── Post-detection cooldown ─────────────────────────────────────────────────
@@ -187,16 +203,57 @@ def _vision_chain(
     return chain
 
 
+class ExtractionPlan(BaseModel):
+    """Per-call prompt + budget. One screenshot uses the base prompt; a scan
+    (several screenshots of one scrolled page) appends the merge rules and
+    gets a larger output budget and timeout."""
+
+    system: str
+    user_text: str
+    max_output_tokens: int
+    timeout_s: float
+
+
+def extraction_plan(image_count: int, *, cropped: bool = False) -> ExtractionPlan:
+    if image_count <= 1:
+        return ExtractionPlan(
+            system=CODING_EXTRACTION_SYSTEM_PROMPT,
+            user_text=(
+                "Extract either the coding problem or the readable general question"
+                " from this screenshot as strict JSON matching the schema."
+            ),
+            max_output_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            timeout_s=20.0,
+        )
+    crop_note = CODING_EXTRACTION_SCAN_CROP_NOTE.format(n=image_count) if cropped else ""
+    return ExtractionPlan(
+        system=CODING_EXTRACTION_SYSTEM_PROMPT
+        + CODING_EXTRACTION_SCAN_ADDENDUM.format(n=image_count)
+        + crop_note,
+        user_text=(
+            f"These {image_count} screenshots are consecutive scroll positions of ONE"
+            " page, in capture order. Merge them and extract the single coding problem"
+            " (or general question) as strict JSON matching the schema."
+        ),
+        max_output_tokens=EXTRACTION_SCAN_MAX_OUTPUT_TOKENS,
+        timeout_s=60.0,
+    )
+
+
 async def extract_problem(
-    image_base64: str,
+    images: list[bytes],
     session_id: str,
     provider: str | None = None,
+    *,
+    cropped: bool = False,
 ) -> ExtractedProblem:
     """Run vision extraction using the user-selected provider. DeepSeek has
-    no native vision model so it transparently falls back to Gemini (logged)."""
-    # Allow data-URI prefix ("data:image/jpeg;base64,…") as well as raw base64.
-    payload = image_base64.split(",", 1)[1] if image_base64.startswith("data:") else image_base64
-    image_bytes = base64.b64decode(payload)
+    no native vision model so it transparently falls back to Gemini (logged).
+    `images` is one screenshot, or several for a scroll scan (merged into one
+    problem)."""
+    if not images:
+        raise ValueError("no images to extract from")
+    plan = extraction_plan(len(images), cropped=cropped)
 
     chosen = await _resolve_provider(session_id, provider)
     if chosen == "deepseek":
@@ -231,15 +288,15 @@ async def extract_problem(
         try:
             if prov == "claude":
                 problem, output_tokens, model_used = await _extract_claude(
-                    image_bytes, session_id, model=model
+                    images, plan, session_id, model=model
                 )
             elif prov == "openai":
                 problem, output_tokens, model_used = await _extract_openai(
-                    image_bytes, model=model
+                    images, plan, model=model
                 )
             else:
                 problem, output_tokens, model_used = await _extract_gemini(
-                    image_bytes, model=model
+                    images, plan, model=model
                 )
             chosen = prov
             break
@@ -268,6 +325,7 @@ async def extract_problem(
         provider=chosen,
         model=model_used,
         elapsed_ms=elapsed_ms,
+        images=len(images),
         is_coding_problem=problem.is_coding_problem,
         confidence=problem.confidence,
     )
@@ -299,7 +357,7 @@ def _parse_extraction_json(text: str) -> ExtractedProblem:
 
 
 async def _extract_gemini(
-    image_bytes: bytes, *, model: str | None = None
+    images: list[bytes], plan: ExtractionPlan, *, model: str | None = None
 ) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
@@ -308,12 +366,13 @@ async def _extract_gemini(
     response = await client.aio.models.generate_content(
         model=model,
         contents=[
-            genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            *(genai_types.Part.from_bytes(data=img, mime_type=_image_mime(img)) for img in images),
+            plan.user_text,
         ],
         config=genai_types.GenerateContentConfig(
-            system_instruction=CODING_EXTRACTION_SYSTEM_PROMPT,
+            system_instruction=plan.system,
             temperature=EXTRACTION_TEMPERATURE,
-            max_output_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            max_output_tokens=plan.max_output_tokens,
             response_mime_type="application/json",
         ),
     )
@@ -339,7 +398,7 @@ def _strip_json_fence(text: str) -> str:
 
 
 async def _extract_claude(
-    image_bytes: bytes, session_id: str, *, model: str | None = None
+    images: list[bytes], plan: ExtractionPlan, session_id: str, *, model: str | None = None
 ) -> tuple[ExtractedProblem, int | None, str]:
     """Vision extraction via the Claude subscription CLI (no API key needed).
     Claude Code reads the screenshot and returns the extraction JSON."""
@@ -347,12 +406,11 @@ async def _extract_claude(
 
     model = model or settings.claude_vision_model
     raw = await run_claude_cli_vision(
-        image_bytes=image_bytes,
-        system=CODING_EXTRACTION_SYSTEM_PROMPT,
+        images=images,
+        system=plan.system,
         prompt=(
-            "Extract the coding problem shown in the screenshot. Reply with ONLY"
-            " a single JSON object matching the schema — no markdown fences, no"
-            " commentary."
+            f"{plan.user_text} Reply with ONLY a single JSON object matching the"
+            " schema — no markdown fences, no commentary."
         ),
         model=model,
         session_id=session_id,
@@ -385,40 +443,42 @@ class _StrictExtraction(BaseModel):
     constraints: list[str] | None
     function_signature: str | None
     language_hint: str | None
+    screen_code: str | None
     confidence: float
 
 
 async def _extract_openai(
-    image_bytes: bytes, *, model: str | None = None
+    images: list[bytes], plan: ExtractionPlan, *, model: str | None = None
 ) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     # Fail fast: default SDK timeout is 10min with retries — a network blip
     # would stall the frame for ages. 20s + 1 retry, then the fallback chain
     # takes over.
-    client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=20.0, max_retries=1)
+    client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=plan.timeout_s, max_retries=1)
     model = model or settings.openai_model  # must accept image input
     # Token-limit key + temperature vary by model family (gpt-5 / o-series).
     limits = openai_options(
         model,
         effort=None,
-        max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+        max_tokens=plan.max_output_tokens,
         temperature=EXTRACTION_TEMPERATURE,
     )
-    image_b64 = base64.b64encode(image_bytes).decode("ascii")
-    image_url = f"data:image/jpeg;base64,{image_b64}"
-    messages: list[Any] = [
-        {"role": "system", "content": CODING_EXTRACTION_SYSTEM_PROMPT},
+    image_parts: list[dict[str, Any]] = [
         {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Extract either the coding problem or the readable general question from this screenshot as strict JSON matching the schema.",
-                },
-                {"type": "image_url", "image_url": {"url": image_url}},
-            ],
-        },
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{_image_mime(img)};base64,{base64.b64encode(img).decode('ascii')}",
+                # "high" keeps small problem text legible; "auto" may pick low
+                # detail (512px) for large screenshots.
+                "detail": "high",
+            },
+        }
+        for img in images
+    ]
+    messages: list[Any] = [
+        {"role": "system", "content": plan.system},
+        {"role": "user", "content": [{"type": "text", "text": plan.user_text}, *image_parts]},
     ]
     # STRICT structured outputs: the API guarantees schema-valid JSON, which
     # eliminates the "Unterminated string" / free-form-JSON parse failures.
@@ -450,3 +510,60 @@ async def _extract_openai(
     problem = _parse_extraction_json(text)
     output_tokens = response.usage.completion_tokens if response.usage else None
     return problem, output_tokens, model
+
+
+# ─── Fragment suppression ────────────────────────────────────────────────────
+# A long problem only partly fits on screen. Once the panel has the whole thing
+# (from a scan, or a full single frame), the background watcher keeps OCR-ing
+# whatever slice is currently visible — the bottom half, the editor plus
+# constraints — and each slice reads as slightly different text → a different
+# fingerprint → a new, truncated tab (and a solve on the truncated problem).
+# A re-read that adds nothing beyond what the panel already has is suppressed.
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+_SHINGLE = 3
+# Fraction of the candidate's word 3-grams that must already appear in the
+# known problem for the candidate to count as "nothing new".
+FRAGMENT_CONTAINMENT = 0.7
+
+
+def _problem_text(problem: ExtractedProblem) -> str:
+    return problem.problem_statement or problem.question or ""
+
+
+def _shingles(text: str) -> set[tuple[str, ...]]:
+    words = _WORD_RE.findall(text.lower())
+    if len(words) < _SHINGLE:
+        return {tuple(words)} if words else set()
+    return {tuple(words[i : i + _SHINGLE]) for i in range(len(words) - _SHINGLE + 1)}
+
+
+def _norm_title(title: str | None) -> str:
+    return " ".join(_WORD_RE.findall((title or "").lower()))
+
+
+def is_fragment_of(candidate: ExtractedProblem, known: ExtractedProblem) -> bool:
+    """True when `candidate` is the same problem as `known` (or a slice of it)
+    and adds no statement text, examples, constraints or signature that
+    `known` lacks. Conservative: any doubt → False (emit as usual)."""
+    cand_title, known_title = _norm_title(candidate.title), _norm_title(known.title)
+    if cand_title and known_title and cand_title != known_title:
+        return False
+    cand_sh = _shingles(_problem_text(candidate))
+    known_sh = _shingles(_problem_text(known))
+    if not known_sh:
+        return False
+    if cand_sh:
+        if len(cand_sh & known_sh) / len(cand_sh) < FRAGMENT_CONTAINMENT:
+            return False
+    elif not (cand_title and cand_title == known_title):
+        # No statement to compare and no matching title → can't tell.
+        return False
+    if len(candidate.examples or []) > len(known.examples or []):
+        return False
+    if len(candidate.constraints or []) > len(known.constraints or []):
+        return False
+    if candidate.function_signature and not known.function_signature:
+        return False
+    # Clearly longer statement = a more complete read, not a fragment.
+    return len(cand_sh) <= len(known_sh) * 1.1

@@ -12,6 +12,8 @@ const codingListeners = {
   extraction_result: new Set(),
   error: new Set(),
   log: new Set(),
+  scanState: new Set(),
+  scanHotkey: new Set(),
 };
 
 const windowListeners = {
@@ -44,6 +46,12 @@ ipcRenderer.on('coding:error', (_evt, msg) => {
 });
 ipcRenderer.on('coding:log', (_evt, msg) => {
   for (const cb of codingListeners.log) cb(msg);
+});
+ipcRenderer.on('coding:scan_state', (_evt, state) => {
+  for (const cb of codingListeners.scanState) cb(state);
+});
+ipcRenderer.on('coding:scan_hotkey', () => {
+  for (const cb of codingListeners.scanHotkey) cb();
 });
 ipcRenderer.on('window:status', (_evt, payload) => {
   for (const cb of windowListeners.status) cb(payload);
@@ -87,6 +95,16 @@ contextBridge.exposeInMainWorld('friday', {
     forceExtract: () => ipcRenderer.invoke('coding:force_extract'),
     isActive: () => ipcRenderer.invoke('coding:isActive'),
     setProvider: (provider) => ipcRenderer.invoke('coding:set_provider', provider),
+    toggleScan: () => ipcRenderer.invoke('coding:toggle_scan'),
+    scanStatus: () => ipcRenderer.invoke('coding:scan_status'),
+    onScanState: (cb) => {
+      codingListeners.scanState.add(cb);
+      return () => codingListeners.scanState.delete(cb);
+    },
+    onScanHotkey: (cb) => {
+      codingListeners.scanHotkey.add(cb);
+      return () => codingListeners.scanHotkey.delete(cb);
+    },
     onFrameProcessed: (cb) => {
       codingListeners.frame_processed.add(cb);
       return () => codingListeners.frame_processed.delete(cb);

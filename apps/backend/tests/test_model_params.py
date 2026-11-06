@@ -9,12 +9,26 @@ from app.models.params import (
 )
 
 
-def test_anthropic_without_effort_sends_only_max_tokens() -> None:
-    assert anthropic_options(effort=None, max_tokens=1500) == {"max_tokens": 1500}
+def test_anthropic_without_effort_turns_thinking_off_per_model() -> None:
+    # Claude 5.x thinks by default; left on, thinking eats the whole answer
+    # budget (stop_reason=max_tokens with little or no text). Each model
+    # spells "off" differently (verified against the live API, Nov 2026).
+    def thinking(model: str) -> object:
+        return anthropic_options(effort=None, max_tokens=1500, model=model).get("thinking")
+
+    assert thinking("claude-haiku-5-5") == {"type": "disabled"}
+    assert thinking("claude-sonnet-5-5") == {"type": "between_tools"}
+    assert thinking("claude-opus-4-8") == {"type": "disabled"}
+    # Opus 5.x / Fable can't turn thinking off — send nothing, keep headroom.
+    assert thinking("claude-opus-5-5") is None
+    assert thinking("claude-fable-5-1") is None
+    assert anthropic_options(effort=None, max_tokens=1500, model="claude-opus-5-5") == {
+        "max_tokens": 1500
+    }
 
 
 def test_anthropic_effort_enables_adaptive_thinking_and_headroom() -> None:
-    opts = anthropic_options(effort="high", max_tokens=1500)
+    opts = anthropic_options(effort="high", max_tokens=1500, model="claude-opus-5-5")
     assert opts["output_config"] == {"effort": "high"}
     assert opts["thinking"] == {"type": "adaptive"}
     # Thinking tokens share max_tokens, so the cap must leave room for them.
@@ -26,9 +40,10 @@ def test_openai_classic_model_keeps_temperature_and_max_tokens() -> None:
     assert opts == {"max_tokens": 1500, "temperature": 0.4}
 
 
-def test_openai_reasoning_model_without_effort_preserves_existing_shape() -> None:
+def test_gpt5_without_effort_omits_temperature() -> None:
+    # The API rejects any non-default temperature for gpt-5.x.
     opts = openai_options("gpt-5.5", effort=None, max_tokens=1500, temperature=0.4)
-    assert opts == {"max_completion_tokens": 1500, "temperature": 0.4}
+    assert opts == {"max_completion_tokens": 1500}
 
 
 def test_openai_reasoning_model_with_effort_drops_temperature() -> None:

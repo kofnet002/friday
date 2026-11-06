@@ -58,7 +58,9 @@ button,
   --md-fg-strong: 23 23 23; /* neutral-900 */
   --md-fg-muted: 82 82 82; /* neutral-600 */
 }
-html.dark {
+/* `.dark` also matches a locally dark subtree (e.g. the /lab page). */
+html.dark,
+.dark {
   --md-fg: 245 245 245; /* neutral-100 */
   --md-fg-strong: 255 255 255; /* white */
   --md-fg-muted: 163 163 163; /* neutral-400 */

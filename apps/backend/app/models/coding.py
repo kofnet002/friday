@@ -36,6 +36,9 @@ class ExtractedProblem(BaseModel):
     constraints: list[str] | None = None
     function_signature: str | None = None
     language_hint: str | None = None
+    # Code visible on screen (editor, snippet, diff), read even when there is no
+    # written question, so a question asked OUT LOUD about it can be answered.
+    screen_code: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
 
     @field_validator("platform", mode="before")

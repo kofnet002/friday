@@ -63,3 +63,24 @@ def test_omitted_request_id_keeps_legacy_shape(fake_stream: None) -> None:
         messages = _read_until_done(ws)
 
     assert all("request_id" not in m for m in messages)
+
+
+def test_answer_sees_what_is_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Interviewer shows buggy code and asks out loud: the answer model must be
+    given the code vision last read off the screen."""
+    seen: dict[str, Any] = {}
+
+    async def stream_answer(_p: str, _q: str, context: Any, **_k: Any) -> AsyncIterator[str]:
+        seen["screen"] = context.screen_context
+        yield "ok"
+
+    async def fake_screen(sid: str) -> str | None:
+        return f"code for {sid}"
+
+    monkeypatch.setattr(ws_answer, "stream_answer", stream_answer)
+    monkeypatch.setattr(ws_answer, "get_screen_context", fake_screen)
+    with TestClient(app).websocket_connect("/ws/answer?session_id=sess-9") as ws:
+        ws.send_json({"type": "question", "question": "What's wrong here?", "provider": "claude"})
+        _read_until_done(ws)
+
+    assert seen["screen"] == "code for sess-9"

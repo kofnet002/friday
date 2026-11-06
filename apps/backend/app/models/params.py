@@ -66,7 +66,9 @@ _GEMINI_LEVEL: dict[Effort, genai_types.ThinkingLevel] = {
 
 _OPENAI_REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
 # o-series reject any non-default temperature even without an effort.
-_OPENAI_NO_TEMPERATURE_PREFIXES = ("o1", "o3", "o4")
+# These reject any temperature but the default (live API: gpt-5.5 / gpt-5.6 →
+# 400 "Only the default (1) value is supported"), so omit it entirely.
+_OPENAI_NO_TEMPERATURE_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
 
 def effort_max_tokens(effort: Effort | None, max_tokens: int) -> int:
@@ -75,9 +77,28 @@ def effort_max_tokens(effort: Effort | None, max_tokens: int) -> int:
     return max(max_tokens, _EFFORT_MAX_TOKENS[effort])
 
 
-def anthropic_options(*, effort: Effort | None, max_tokens: int) -> dict[str, Any]:
+def _anthropic_thinking_off(model: str) -> dict[str, str] | None:
+    """How to say "don't think" to a Claude model, or None when it can't.
+    Verified against the live API (Nov 2026): Sonnet 5.x rejects "disabled"
+    and wants "between_tools"; Opus 5.x and Fable always think (only effort
+    tunes it). Anything else takes the classic "disabled"."""
+    lowered = model.lower()
+    if lowered.startswith("claude-sonnet-5"):
+        return {"type": "between_tools"}
+    if lowered.startswith(("claude-opus-5", "claude-fable")):
+        return None
+    return {"type": "disabled"}
+
+
+def anthropic_options(
+    *, effort: Effort | None, max_tokens: int, model: str
+) -> dict[str, Any]:
     if effort is None:
-        return {"max_tokens": max_tokens}
+        # Claude 5.x thinks by default. Unasked-for thinking eats the output
+        # budget (stop_reason=max_tokens, answer cut off or empty) and adds
+        # first-token latency, so the default turns it off where it can.
+        thinking = _anthropic_thinking_off(model)
+        return {"max_tokens": max_tokens, **({"thinking": thinking} if thinking else {})}
     return {
         "max_tokens": effort_max_tokens(effort, max_tokens),
         "output_config": {"effort": effort},

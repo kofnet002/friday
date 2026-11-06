@@ -240,7 +240,25 @@ _FUNC_RE_JS = re.compile(
 )
 
 
+# A top-level declaration whose value is a function (not a lookup table like
+# `const SLA = {...}`, which used to be picked as the entry and then "called").
+_TOP_FUNC_RE_JS = re.compile(
+    r"^(?:async\s+)?function\s*\*?\s*(\w+)\s*\("
+    r"|^(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)",
+    re.MULTILINE,
+)
+
+
 def _find_entry_js(code: str) -> str | None:
+    """The function the examples should call: among top-level functions, the
+    first one nothing else calls (helpers are called by the entry); else the
+    first top-level function; else the first declaration of any kind."""
+    names = [m.group(1) or m.group(2) for m in _TOP_FUNC_RE_JS.finditer(code)]
+    if names:
+        uncalled = [
+            n for n in names if len(re.findall(rf"\b{re.escape(n)}\s*\(", code)) <= 1
+        ]
+        return uncalled[0] if uncalled else names[0]
     m = _FUNC_RE_JS.search(code)
     if m:
         return m.group(1) or m.group(2)

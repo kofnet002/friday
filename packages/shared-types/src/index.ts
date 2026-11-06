@@ -262,10 +262,15 @@ export interface ExtractedProblem {
 }
 
 /** Pushed over /ws/transcribe when vision extraction has a new problem. */
+/** What produced a vision detection: the background watcher, an explicit
+ *  Re-extract, or a scroll scan (several screenshots merged into one). */
+export type VisionDetectionSource = 'auto' | 'force' | 'scan';
+
 export interface CodingProblemDetectedEvent {
   type: 'coding_problem_detected';
   problem: ExtractedProblem;
   fingerprint: string;
+  source?: VisionDetectionSource;
 }
 
 export interface ScreenQuestionDetectedEvent {

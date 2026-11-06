@@ -4,7 +4,6 @@ const {
   ipcMain,
   shell,
   systemPreferences,
-  dialog,
   globalShortcut,
   Tray,
   Menu,
@@ -18,6 +17,7 @@ const { AudioSupervisor } = require('./audio');
 const { CodingCapture } = require('./coding');
 const stealth = require('./stealth');
 const services = require('./services');
+const { showNotice } = require('./notice');
 
 const DEV_URL = process.env.FRIDAY_WEB_URL || 'http://127.0.0.1:3333';
 const OPACITY_STEP = 0.1;
@@ -300,12 +300,19 @@ function registerGlobalHotkeys() {
     // Global so it works while the interview app has focus; the renderer
     // asks the backend for the newest question and answers it.
     ['CommandOrControl+Shift+Space', () => broadcast('window:answer_latest')],
+    // Scroll scan: start, scroll through a long problem, press again to read
+    // every scroll position as one problem. Routed through the renderer so it
+    // can start coding mode first when it's off.
+    ['CommandOrControl+Shift+;', () => broadcast('coding:scan_hotkey')],
     // ⌘Q only reaches a focused app; the overlay usually isn't. ⌘⇧Q and
     // ⌘⌥⇧Q are macOS Log Out, so quit lives on ⌘⌥Q.
     ['CommandOrControl+Alt+Q', () => app.quit()],
   ];
   for (const [accelerator, handler] of bindings) {
-    globalShortcut.register(accelerator, handler);
+    if (!globalShortcut.register(accelerator, handler)) {
+      // Another app already owns it — the in-app button still works.
+      console.warn(`[friday] global shortcut unavailable: ${accelerator}`);
+    }
   }
 }
 
@@ -348,6 +355,7 @@ coding.on('frame_processed', (info) => broadcast('coding:frame_processed', info)
 coding.on('extraction_result', (payload) => broadcast('coding:extraction_result', payload));
 coding.on('error', (msg) => broadcast('coding:error', msg));
 coding.on('log', (msg) => broadcast('coding:log', msg));
+coding.on('scan_state', (state) => broadcast('coding:scan_state', state));
 
 async function ensurePermissions() {
   // Microphone (separate TCC bucket from screen recording)
@@ -362,13 +370,12 @@ async function ensurePermissions() {
   // Screen capture access status (covers system audio via ScreenCaptureKit)
   const screenStatus = systemPreferences.getMediaAccessStatus('screen');
   if (screenStatus !== 'granted') {
-    dialog.showMessageBox({
-      type: 'info',
+    // Not awaited. A notice, not a native dialog: hidden from screen share.
+    showNotice({
       title: 'Screen & System Audio Permission',
       message: 'Friday needs Screen & System Audio Recording permission to transcribe app audio.',
       detail:
         'Open System Settings → Privacy & Security → Screen & System Audio Recording, then enable Friday. The first audio:start call will also trigger the system prompt.',
-      buttons: ['OK'],
     });
   }
 }
@@ -382,35 +389,38 @@ async function startBundledServices() {
       userDataPath: app.getPath('userData'),
       logsPath: app.getPath('logs'),
       electronPath: process.execPath,
-      onUnexpectedExit: (message) => {
-        dialog.showErrorBox(
-          'Friday stopped working',
-          `${message}\n\nRelaunch Friday to restart it.`,
-        );
+      onUnexpectedExit: async (message) => {
+        await showNotice({
+          title: 'Friday stopped working',
+          message,
+          detail: 'Relaunch Friday to restart it.',
+        });
         app.quit();
       },
     });
     if (createdEnv) {
       // Not awaited: the window still opens behind the prompt.
-      dialog
-        .showMessageBox({
-          type: 'info',
-          title: 'Add your API keys',
-          message: 'Friday created a settings file for your API keys.',
-          detail: `Fill in ${envPath} (at least DEEPGRAM_API_KEY plus one LLM key), save it, then quit and relaunch Friday from the menu bar.`,
-          buttons: ['Open settings file', 'Later'],
-          defaultId: 0,
-        })
-        .then(({ response }) => {
-          if (response === 0) shell.openPath(envPath);
-        });
+      showNotice({
+        title: 'Add your API keys',
+        message: 'Friday created a settings file for your API keys.',
+        detail: `Fill in ${envPath} (at least DEEPGRAM_API_KEY plus one LLM key), save it, then quit and relaunch Friday from the menu bar.`,
+        buttons: [
+          { id: 'open', label: 'Open settings file' },
+          { id: 'later', label: 'Later' },
+        ],
+      }).then((choice) => {
+        if (choice === 'open') shell.openPath(envPath);
+      });
     }
     return true;
   } catch (err) {
     // Interrupted by a quit — nothing went wrong.
     if (err instanceof services.ServicesStoppedError) return false;
     await services.stopBundledServices();
-    dialog.showErrorBox('Friday could not start', err instanceof Error ? err.message : String(err));
+    await showNotice({
+      title: 'Friday could not start',
+      message: err instanceof Error ? err.message : String(err),
+    });
     app.quit();
     return false;
   }
@@ -493,6 +503,8 @@ ipcMain.handle('coding:stop', () => {
 });
 ipcMain.handle('coding:force_extract', () => coding.forceExtract());
 ipcMain.handle('coding:isActive', () => coding.isActive());
+ipcMain.handle('coding:toggle_scan', () => coding.toggleScan());
+ipcMain.handle('coding:scan_status', () => coding.scanStatus());
 ipcMain.handle('coding:set_provider', (_evt, provider) => {
   coding.setProvider(provider);
   return { ok: true, provider: coding.provider };

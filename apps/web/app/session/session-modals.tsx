@@ -24,6 +24,10 @@ export const SESSION_SHORTCUTS = [
   { keys: '⌘ ⇧ Space', label: 'Answer the most recent question (works from any app)' },
   { keys: '⌘ ⇧ C', label: 'Toggle coding mode' },
   { keys: '⌘ ⇧ R', label: 'Capture and analyze the screen now' },
+  {
+    keys: '⌘ ⇧ ;',
+    label: 'Scan a long problem — press, scroll through it, press again',
+  },
   { keys: '⌘ ⇧ .', label: 'Panic blur — mask all panels, close active popover' },
   { keys: '⌘ /', label: 'Show this shortcuts cheat-sheet' },
 ];

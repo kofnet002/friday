@@ -123,6 +123,7 @@ def _build_prompts_for_mode(
                 problem,
                 prior_solution=prior_solution,
                 feedback=feedback,
+                language=language,
             ),
         )
 
@@ -481,8 +482,8 @@ async def _stream_anthropic(
 
     stream = await open_with_param_fallback(
         open_stream,
-        anthropic_options(effort=effort, max_tokens=_max_tokens(deep)),
-        anthropic_options(effort=None, max_tokens=_max_tokens(deep)),
+        anthropic_options(effort=effort, max_tokens=_max_tokens(deep), model=model),
+        {"max_tokens": _max_tokens(deep)},
         label="coding.claude",
     )
     # aclosing: an outer cancel must reach anthropic_text's finally, which

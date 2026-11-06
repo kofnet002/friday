@@ -159,6 +159,41 @@ async def set_current_problem(session_id: str, problem_json: str) -> None:
     await cast(Awaitable[Any], client.set(key, problem_json, ex=CODING_PROBLEM_TTL_S))
 
 
+async def get_current_problem(session_id: str) -> str | None:
+    """JSON of the coding problem most recently surfaced to the panel."""
+    client = await get_redis()
+    if client is None:
+        return None
+    raw = await cast(Awaitable[Any], client.get(f"session:{session_id}:current_problem"))
+    if raw is None:
+        return None
+    return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+
+# What vision last read off the screen, for answers to questions asked out
+# loud about it ("what's wrong with this code?"). Short-lived: an hour-old
+# screen is not what the interviewer is pointing at.
+SCREEN_CONTEXT_TTL_S = 15 * 60
+
+
+async def set_screen_context(session_id: str, text: str) -> None:
+    client = await get_redis()
+    if client is None:
+        return
+    key = f"session:{session_id}:screen_context"
+    await cast(Awaitable[Any], client.set(key, text, ex=SCREEN_CONTEXT_TTL_S))
+
+
+async def get_screen_context(session_id: str) -> str | None:
+    client = await get_redis()
+    if client is None:
+        return None
+    raw = await cast(Awaitable[Any], client.get(f"session:{session_id}:screen_context"))
+    if raw is None:
+        return None
+    return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+
 async def add_seen_problem_fingerprint(session_id: str, fingerprint: str) -> bool:
     """Record that we've already surfaced this problem fingerprint this session.
     Returns True if this was a NEW fingerprint (first time), False if already seen.

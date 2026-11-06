@@ -10,7 +10,7 @@ from app.db import append_qa, get_session
 from app.logging import log
 from app.models.catalog import Provider, parse_effort, resolve_model
 from app.prompts.answer_generation import AnswerContext, PriorTurn
-from app.redis_client import recent_transcript_text, set_last_answer
+from app.redis_client import get_screen_context, recent_transcript_text, set_last_answer
 from app.services.answer import stream_answer
 from app.services.limits import check_token_budget
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
@@ -167,6 +167,15 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             except Exception:  # noqa: BLE001
                 recent_transcript = None
 
+        raw_screen = override.get("screen_context")
+        screen_context = raw_screen if isinstance(raw_screen, str) else None
+        if not screen_context and session_id:
+            try:
+                screen_context = await get_screen_context(session_id)
+            except Exception:  # answering without the screen beats failing
+                log.warning("ws_answer.screen_context_unavailable", session_id=session_id)
+                screen_context = None
+
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
@@ -176,6 +185,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             company=override.get("company") or persisted.get("company"),
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
+            screen_context=screen_context,
             prior_turns=prior_turns,
         )
 

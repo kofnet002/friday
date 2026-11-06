@@ -20,6 +20,7 @@ import {
   Code2,
   Copy,
   Eye,
+  ScanLine,
   FileText,
   Play,
   Sparkles,
@@ -127,6 +128,10 @@ export interface CodingPanelProps {
   onClearAll: () => void;
   onRegenerate: () => void;
   onReExtract: () => void;
+  /** Scroll scan for problems taller than the screen: start, the user
+   *  scrolls through the problem, toggle again to read every position. */
+  scanState: FridayScanState;
+  onToggleScan: () => void;
   onCancel: () => void;
   /** Re-runs solve mode with the current solution as `prior_solution` and
    *  the user's note as `feedback`. Used when LeetCode-style test cases
@@ -169,6 +174,8 @@ export function CodingPanel({
   onClearAll,
   onRegenerate,
   onReExtract,
+  scanState,
+  onToggleScan,
   onCancel,
   onRefine,
   onAgentSolve,
@@ -223,6 +230,7 @@ export function CodingPanel({
           {/* Start/Stop is the screen-watcher toggle — only meaningful in
               solve mode where vision extraction feeds tabs. Hidden in scratch
               modes so the user doesn't think it gates Run. */}
+          {isSolveMode ? <ScanButton scan={scanState} onToggle={onToggleScan} /> : null}
           {isSolveMode ? (
             <Button
               type="button"
@@ -234,6 +242,10 @@ export function CodingPanel({
             </Button>
           ) : null}
         </div>
+      ) : null}
+
+      {isSolveMode && !privacyMode && scanState.state !== 'idle' ? (
+        <ScanBanner scan={scanState} />
       ) : null}
 
       {!privacyMode ? <ModeStrip mode={mode} onModeChange={onModeChange} /> : null}
@@ -533,6 +545,62 @@ function ScratchView({
   );
 }
 
+const SCAN_KEYS = '⌘⇧;';
+
+function ScanButton({ scan, onToggle }: { scan: FridayScanState; onToggle: () => void }) {
+  const scanning = scan.state === 'scanning';
+  const processing = scan.state === 'processing';
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      onClick={onToggle}
+      disabled={processing}
+      aria-pressed={scanning}
+      title={
+        scanning
+          ? `Finish the scan and read all captured screens (${SCAN_KEYS})`
+          : `Scan a problem taller than the screen: press, scroll through it, press again (${SCAN_KEYS})`
+      }
+      className={cn(
+        'gap-1.5 tabular-nums',
+        scanning &&
+          'border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-500/50 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-950/60',
+      )}
+    >
+      {scanning ? (
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden />
+      ) : (
+        <ScanLine className="h-3.5 w-3.5" aria-hidden />
+      )}
+      {scanning ? `Finish · ${scan.frames}` : processing ? 'Reading…' : 'Scan'}
+    </Button>
+  );
+}
+
+function ScanBanner({ scan }: { scan: FridayScanState }) {
+  const screens = `${scan.frames} screen${scan.frames === 1 ? '' : 's'}`;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex items-center gap-2 rounded-lg border border-amber-300/70 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/25 dark:text-amber-100"
+    >
+      <ScanLine className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      {scan.state === 'scanning' ? (
+        <span>
+          Scanning — scroll through the whole problem, pausing briefly on each part, then press{' '}
+          <kbd className="font-mono">{SCAN_KEYS}</kbd> or <b>Finish</b>.
+        </span>
+      ) : (
+        <span>Reading {screens} as one problem…</span>
+      )}
+      <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">{screens}</span>
+    </div>
+  );
+}
+
 function ActivePill({ active }: { active: boolean }) {
   return (
     <div
@@ -637,8 +705,8 @@ function ActiveProblemView({
           <div className="flex flex-col gap-1">
             <span className="font-medium">Looks like the problem was partially captured.</span>
             <span className="text-amber-900/80 dark:text-amber-100/80">
-              Screen capture only sees the visible viewport — scroll the LeetCode page so the
-              examples / constraints / editor are on screen, then click <b>Re-extract</b>.
+              Screen capture only sees the visible screen. Press <b>Scan</b> (⌘⇧;), scroll through
+              the whole problem, then press it again to read every part.
             </span>
           </div>
         </div>

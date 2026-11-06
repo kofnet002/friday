@@ -39,7 +39,9 @@ from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.settings import settings
 
-ANSWER_MAX_TOKENS = 1500
+# Room for multi-part written exercises (reply + escalation note + fix);
+# only billed when used.
+ANSWER_MAX_TOKENS = 3000
 ANSWER_TEMPERATURE = 0.4
 
 
@@ -146,7 +148,10 @@ async def stream_answer(
             # use Gemini's native multi-turn contents array here to keep
             # prior_turns framing centralized in the prompt template.
             user = answer_user_prompt(
-                question, context.recent_transcript, context.prior_turns
+                question,
+                context.recent_transcript,
+                context.prior_turns,
+                screen_context=context.screen_context,
             )
             base = lambda: _stream_gemini(  # noqa: E731
                 system, user, model=selected, effort=level, on_usage=on_usage
@@ -155,7 +160,12 @@ async def stream_answer(
             # OpenAI / DeepSeek / Claude path: pass prior turns as real
             # assistant/user messages on the wire. Strip <thread> from the
             # user prompt so we don't duplicate the history.
-            user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
+            user = answer_user_prompt(
+                question,
+                context.recent_transcript,
+                prior_turns=None,
+                screen_context=context.screen_context,
+            )
             if p == "deepseek":
                 base = lambda: _stream_deepseek(  # noqa: E731
                     system, user, context.prior_turns, model=selected, on_usage=on_usage
@@ -355,10 +365,14 @@ async def _stream_anthropic(
     stream = await open_with_param_fallback(
         open_stream,
         {
-            **anthropic_options(effort=effort, max_tokens=ANSWER_MAX_TOKENS),
+            **anthropic_options(
+                effort=effort, max_tokens=ANSWER_MAX_TOKENS, model=effective_model
+            ),
             **_anthropic_web_search(),
         },
-        anthropic_options(effort=None, max_tokens=ANSWER_MAX_TOKENS),
+        # Bare fallback: no effort, no thinking flag, no tools — for models
+        # that reject any of them.
+        {"max_tokens": ANSWER_MAX_TOKENS},
         label="answer.claude",
     )
     # aclosing: an outer cancel must reach anthropic_text's finally, which

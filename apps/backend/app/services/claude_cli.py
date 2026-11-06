@@ -84,14 +84,14 @@ def _image_ext(image_bytes: bytes) -> str:
 
 async def run_claude_cli_vision(
     *,
-    image_bytes: bytes,
+    images: list[bytes],
     prompt: str,
     system: str,
     model: str | None = None,
     session_id: str | None = None,
 ) -> str:
-    """One-shot vision call: write the screenshot to a scratch dir, let the CLI
-    read it (Read tool), and return the final answer text.
+    """One-shot vision call: write the screenshot(s) to a scratch dir, let the
+    CLI read them (Read tool) in order, and return the final answer text.
 
     Used for coding-problem extraction when Claude is the selected provider but
     there's no ANTHROPIC_API_KEY — the subscription CLI does the OCR. `system`
@@ -105,11 +105,16 @@ async def run_claude_cli_vision(
 
     env = resolve_agent_env(session_id)
     workspace = tempfile.mkdtemp(prefix="friday-vision-")
-    image_name = f"screen.{_image_ext(image_bytes)}"
+    # Zero-padded so the files sort in capture order for the model too.
+    image_names = [
+        f"screen-{i + 1:02d}.{_image_ext(img)}" if len(images) > 1 else f"screen.{_image_ext(img)}"
+        for i, img in enumerate(images)
+    ]
     proc: asyncio.subprocess.Process | None = None
     try:
-        # Blocking write off the event loop (ASYNC230).
-        await asyncio.to_thread(Path(workspace, image_name).write_bytes, image_bytes)
+        # Blocking writes off the event loop (ASYNC230).
+        for name, img in zip(image_names, images, strict=True):
+            await asyncio.to_thread(Path(workspace, name).write_bytes, img)
 
         cmd = [
             settings.claude_cli_path,
@@ -139,7 +144,14 @@ async def run_claude_cli_vision(
             start_new_session=True,
         )
         assert proc.stdin is not None
-        stdin_text = f"Read the image file {image_name} in the current directory. {prompt}"
+        if len(image_names) == 1:
+            read_hint = f"Read the image file {image_names[0]} in the current directory."
+        else:
+            read_hint = (
+                f"Read ALL {len(image_names)} image files in the current directory, in this"
+                f" order: {', '.join(image_names)}."
+            )
+        stdin_text = f"{read_hint} {prompt}"
         proc.stdin.write(stdin_text.encode("utf-8"))
         await proc.stdin.drain()
         proc.stdin.close()

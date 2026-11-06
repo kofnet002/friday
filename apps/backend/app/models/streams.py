@@ -24,6 +24,9 @@ def _int_or_none(value: Any) -> int | None:
     return int(value) if isinstance(value, int | float) else None
 
 
+TRUNCATED_NOTICE = "\n\n*(Answer cut off at the length limit.)*"
+
+
 async def anthropic_text(
     stream: Any, on_usage: UsageCallback | None = None
 ) -> AsyncGenerator[str, None]:
@@ -31,6 +34,7 @@ async def anthropic_text(
     response on cancel/early exit so an abandoned generation stops billing."""
     input_tokens: int | None = None
     output_tokens: int | None = None
+    wrote_text = False
     try:
         async for event in stream:
             if event.type == "message_start":
@@ -45,8 +49,12 @@ async def anthropic_text(
                 )
             elif event.type == "message_delta":
                 output_tokens = _int_or_none(event.usage.output_tokens)
+                if event.delta.stop_reason == "max_tokens" and wrote_text:
+                    # Never let a truncated answer pass as a complete one.
+                    yield TRUNCATED_NOTICE
             elif event.type == "content_block_delta" and event.delta.type == "text_delta":
                 if event.delta.text:
+                    wrote_text = True
                     yield event.delta.text
     finally:
         await stream.close()

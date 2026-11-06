@@ -24,6 +24,9 @@ class AnswerContext:
     company: str | None = None
     language: str | None = None
     recent_transcript: str | None = None
+    # What vision last read off the candidate's screen (question, problem,
+    # visible code). Lets a question asked out loud refer to it.
+    screen_context: str | None = None
     # Earlier turns in the same thread, oldest first. Excludes the current
     # user turn (that's `question` in answer_user_prompt). Empty list for a
     # one-shot question.
@@ -75,8 +78,8 @@ Always emit Markdown with these section headers, each on its own line, bold:
 **💬 Question:** <restate the extracted interview question in one short line>
 
 **⭐ Answer:**
-- 3–5 short bullets. Each bullet is a phrase or short sentence the candidate can expand on verbally.
-- Lead with the thesis / direct answer in the first bullet.
+- 3–5 bullets. Each bullet is one or two complete sentences the candidate can say out loud exactly as written (see SPOKEN DELIVERY).
+- Lead with the direct answer in the first bullet.
 
 **🔑 Key Steps:** (include only when there is a process, algorithm, or design walkthrough)
 - One step per bullet, ≤12 words each.
@@ -89,13 +92,23 @@ Always emit Markdown with these section headers, each on its own line, bold:
 
 Section rules:
 - Sections that don't apply MUST be omitted entirely (no empty heading).
-- For pure behavioral questions: only **💬 Question** and **⭐ Answer** (compressed STAR — one bullet each for Situation, Task, Action, Result).
+- For pure behavioral questions: only **💬 Question** and **⭐ Answer**, told as a short story in STAR order (situation, task, action, result), one bullet each. Don't write the labels; tell it the way a person would.
 - For system design: **💬 Question**, **⭐ Answer** (thesis), **🔑 Key Steps** (requirements → high-level design → components → tradeoffs).
 - For conceptual / definition questions: **💬 Question** and **⭐ Answer** are enough.
 - For coding questions: all four sections.
 - Total length target: 80–200 words for conversational answers, up to 400 for technical deep-dives.
 - Never use filler like "Great question" or "That's an interesting one". The candidate won't say it.
 - Do NOT add any other top-level headings, preamble, or sign-off — start directly with the **💬 Question** line.
+
+SPOKEN DELIVERY
+
+The candidate reads **⭐ Answer** aloud, live, often word for word. It must sound like someone talking, not someone reading notes.
+- Write the way people speak in a good interview: first person, contractions (I'd, we'd, it's, didn't), plain words, natural links ("so", "the main thing is", "what I'd do first is", "that's why").
+- Every sentence must make sense heard once, with no visual cues. No parentheses, slashes, arrows, semicolons, ampersands, "e.g.", "i.e.", "etc.", or "vs."; say "for example", "and", "or", "compared with".
+- One idea per sentence, under about 20 words, point first. No sentence fragments or headline-style bullets.
+- No bold labels or mini-headings inside **⭐ Answer** bullets ("**Line 6, the hang:** ..."). Say it: "On line 6, the loop can hang because ...".
+- Keep symbols, code identifiers and big-O notation out of **⭐ Answer** unless they're natural to say ("the user id", "linear time"). Exact names, code and complexity go in **🔑 Key Steps** and **💻 Code**, which the candidate glances at but doesn't read aloud.
+- Don't list several tools or buzzwords in one breath; name one or two and say why.
 
 STYLE
 
@@ -111,6 +124,13 @@ HANDLING EDGE CASES
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
 - If the question asks for an opinion the candidate hasn't specified: give a reasonable default position aligned with the candidate's apparent background.
 - If you genuinely don't have enough information to answer well: say so in one **⭐ Answer** bullet and suggest what the candidate could ask back.
+
+SCREEN CONTEXT
+
+<on_screen>, when present, is what was most recently visible on the candidate's screen: a question, a coding problem, and/or code (it can be a few minutes old, or unrelated to the question).
+- When the question points at it - "this code", "what's wrong here", "this function", "line 12", "why does this fail", "walk me through it", "how would you improve this" - answer about THAT content specifically, not in general. For a bug hunt: name each bug with its line numbers and why it breaks, then give the corrected code in **💻 Code**.
+- The interviewer may read the task aloud while only the code is on screen: combine the spoken question with the on-screen code.
+- When the question doesn't refer to it, ignore <on_screen> entirely.
 
 WEB SEARCH
 
@@ -133,7 +153,13 @@ def answer_user_prompt(
     question: str,
     recent_transcript: str | None = None,
     prior_turns: tuple[PriorTurn, ...] | None = None,
+    screen_context: str | None = None,
 ) -> str:
+    screen_block = (
+        f"<on_screen>\n{screen_context.strip()}\n</on_screen>\n\n"
+        if screen_context and screen_context.strip()
+        else ""
+    )
     context_block = (
         f"<recent_conversation>\n{recent_transcript.strip()}\n</recent_conversation>\n\n"
         if recent_transcript
@@ -165,6 +191,6 @@ def answer_user_prompt(
         else "Generate the candidate's response now."
     )
     return (
-        f"{context_block}{thread_block}<question>\n{question}\n</question>\n\n"
+        f"{screen_block}{context_block}{thread_block}<question>\n{question}\n</question>\n\n"
         f"{instructions}"
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-CODING_SOLUTION_VERSION = "1.2.0"
+CODING_SOLUTION_VERSION = "1.3.0"
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,8 @@ def coding_solution_system_prompt(ctx: CodingSolutionContext) -> str:
     )
     return f"""\
 You solve coding interview problems. The candidate is in a live interview and will read your solution while explaining it verbally.
+
+LANGUAGE: Always write the code in {ctx.language} - the candidate chose it. Starter code read off their screen may be in another language (the page's editor can still show its default); then port it: same function, parameters and return value, written idiomatically in {ctx.language} with its naming style (a Python `merge_bookings` becomes `mergeBookings` in JavaScript, TypeScript or Java), since that is what the editor shows once the language is switched. Never answer in the starter's language instead.
 
 OUTPUT STRUCTURE (MANDATORY — exact H3 headings, exact emoji, in this order)
 
@@ -70,8 +72,9 @@ the platform clearly expects a specific wrapper. When you see a
   statement implies; default to a bare function with the language's
   idiomatic style.
 
-If the user prompt provides BOTH `**Starter code:**` AND `**Platform:**`,
-the starter code wins — it's the literal text on the candidate's screen.
+If the user prompt provides BOTH starter code AND `**Platform:**`, the
+starter code's names and structure win (it's the literal text on the
+candidate's screen) - ported to the chosen language if it's in another one.
 
 REFINING A PRIOR SOLUTION (MANDATORY when **Previous attempt:** is present)
 
@@ -128,11 +131,32 @@ RULES
 LENGTH TARGET: 250-500 words total including code.{extra}"""
 
 
+_LANGUAGE_ALIASES = {
+    "js": "javascript",
+    "node": "javascript",
+    "ts": "typescript",
+    "py": "python",
+    "python3": "python",
+    "c++": "cpp",
+    "golang": "go",
+    "c#": "csharp",
+}
+
+
+def _same_language(a: str, b: str) -> bool:
+    def norm(x: str) -> str:
+        key = x.strip().lower()
+        return _LANGUAGE_ALIASES.get(key, key)
+
+    return bool(a.strip()) and norm(a) == norm(b)
+
+
 def coding_solution_user_prompt(
     problem: dict[str, Any],
     *,
     prior_solution: str | None = None,
     feedback: str | None = None,
+    language: str | None = None,
 ) -> str:
     parts: list[str] = []
     title = problem.get("title")
@@ -172,7 +196,16 @@ def coding_solution_user_prompt(
         parts.append("\n**Constraints:**\n" + "\n".join(f"- {c}" for c in constraints))
     signature = problem.get("function_signature")
     if signature:
-        parts.append(f"\n**Starter code:**\n```\n{signature}\n```")
+        hint = str(problem.get("language_hint") or "").strip()
+        label = f"**Starter code ({hint}):**" if hint else "**Starter code:**"
+        parts.append(f"\n{label}\n```\n{signature}\n```")
+        if language and not _same_language(hint, language):
+            lead = f"Port it to {language}" if hint else f"If it isn't {language}, port it to {language}"
+            parts.append(
+                f"{lead}: same function, parameters and return value, in "
+                f"{language}'s naming style (snake_case becomes camelCase in "
+                "JavaScript, TypeScript and Java)."
+            )
     # Refine mode: previous attempt + failure note attach at the end so
     # the model sees the problem first, then the artifact-to-improve.
     if prior_solution:

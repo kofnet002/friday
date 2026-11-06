@@ -181,6 +181,48 @@ async def test_coding_claude_retries_without_effort_when_rejected(
     assert "thinking" not in rec.requests[1]
 
 
+async def test_answer_claude_default_effort_disables_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rec = _Recorder(body=_sse(_ANTHROPIC_EVENTS))
+    _patch_anthropic(monkeypatch, answer, rec)
+
+    await _collect(answer._stream_anthropic("sys", "q", (), model="claude-sonnet-5-5"))
+
+    assert rec.requests[0]["thinking"] == {"type": "between_tools"}
+
+
+async def test_answer_claude_retries_without_thinking_flag_when_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "answer_web_search", False)
+    rec = _Recorder(reject_when="thinking", body=_sse(_ANTHROPIC_EVENTS))
+    _patch_anthropic(monkeypatch, answer, rec)
+
+    text = await _collect(answer._stream_anthropic("sys", "q", (), model="claude-old-model"))
+
+    assert text == "Hello world"
+    assert "thinking" not in rec.requests[-1]
+
+
+async def test_claude_answer_cut_at_length_limit_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    truncated = [
+        (name, {**data, "delta": {**data["delta"], "stop_reason": "max_tokens"}})
+        if name == "message_delta"
+        else (name, data)
+        for name, data in _ANTHROPIC_EVENTS
+    ]
+    rec = _Recorder(body=_sse(truncated))
+    _patch_anthropic(monkeypatch, answer, rec)
+
+    text = await _collect(answer._stream_anthropic("sys", "q", (), model="claude-opus-5-5"))
+
+    assert text.startswith("Hello world")
+    assert "cut off" in text
+
+
 def _responses_events(*deltas: str) -> bytes:
     events: list[tuple[str | None, dict[str, Any]]] = [
         (

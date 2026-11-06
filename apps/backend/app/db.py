@@ -276,6 +276,21 @@ async def session_usage_summary(session_id: str) -> list[dict[str, Any]]:
             return [dict(r) for r in await cursor.fetchall()]
 
 
+async def session_tokens_since(session_id: str, since: float) -> int:
+    """Input + output tokens this session logged at or after `since` (epoch s)."""
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
+            FROM usage_log
+            WHERE session_id = ? AND created_at >= ?
+            """,
+            (session_id, since),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
+
 async def set_resume_text(session_id: str, resume_text: str) -> None:
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(

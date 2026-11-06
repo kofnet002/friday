@@ -28,12 +28,25 @@ declare global {
     interval_ms: number;
   }
 
+  /** Scroll-scan lifecycle pushed from the desktop capture. */
+  interface FridayScanState {
+    state: 'idle' | 'scanning' | 'processing';
+    frames: number;
+    /** Set on the final 'idle' when the scan failed. */
+    error?: string | null;
+  }
+
   interface FridayCodingApi {
     start: (sessionId: string) => Promise<{ ok: boolean; error?: string }>;
     stop: () => Promise<{ ok: boolean }>;
     forceExtract: () => Promise<{ ok: boolean; error?: string }>;
     isActive: () => Promise<boolean>;
     setProvider: (provider: AnswerProvider) => Promise<{ ok: boolean; provider: string | null }>;
+    toggleScan: () => Promise<{ ok: boolean; state?: FridayScanState['state']; error?: string }>;
+    scanStatus: () => Promise<FridayScanState>;
+    onScanState: (cb: (state: FridayScanState) => void) => () => void;
+    /** Global ⌘⇧; — fires even while another app has focus. */
+    onScanHotkey: (cb: () => void) => () => void;
     onFrameProcessed: (cb: (info: FridayCodingFrameInfo) => void) => () => void;
     onExtractionResult: (cb: (payload: FridayCodingExtractionResult) => void) => () => void;
     onError: (cb: (msg: string) => void) => () => void;

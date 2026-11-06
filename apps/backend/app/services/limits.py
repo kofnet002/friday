@@ -1,7 +1,8 @@
 """Per-session safety budgets.
 
 - Token budget: summed from `usage_log` SQLite table (input + output tokens)
-  across vision + answer + coding-solution calls.
+  across vision + answer + coding-solution calls, over a rolling window
+  (`session_token_window_hours`).
 - Audio-minute budget: incrementing counter in Redis,
   `session:{id}:audio_seconds`, INCRBYFLOAT'd as audio frames are
   forwarded to Deepgram.
@@ -9,11 +10,12 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from app.db import session_usage_summary
+from app.db import session_tokens_since
 from app.redis_client import get_redis
 from app.settings import settings
 
@@ -33,18 +35,19 @@ class BudgetCheck:
 
 
 async def check_token_budget(session_id: str | None) -> BudgetCheck:
-    if not session_id:
-        return BudgetCheck(True, None, 0.0, float(settings.session_token_limit))
-    rows = await session_usage_summary(session_id)
-    total = 0
-    for row in rows:
-        total += int(row.get("input_tokens") or 0)
-        total += int(row.get("output_tokens") or 0)
     limit = settings.session_token_limit
+    if not session_id:
+        return BudgetCheck(True, None, 0.0, float(limit))
+    hours = settings.session_token_window_hours
+    since = time.time() - hours * 3600 if hours > 0 else 0.0
+    total = await session_tokens_since(session_id, since)
     if total >= limit:
+        span = f"in the last {hours:g} h" if hours > 0 else "so far"
         return BudgetCheck(
             False,
-            f"Session token limit reached ({total:,}/{limit:,}).",
+            f"Friday's own safety cap: this session used {total:,} of {limit:,} tokens {span}. "
+            "This is not your AI provider's rate limit. Start a new session, or raise "
+            "SESSION_TOKEN_LIMIT in Friday's .env.",
             float(total),
             float(limit),
         )

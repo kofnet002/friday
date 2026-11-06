@@ -17,7 +17,10 @@ export async function* parseSseStream(response: Response): AsyncGenerator<SseEve
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      // The spec allows CRLF line endings (sse-starlette sends them); fold
+      // them to LF so blocks split on a blank line. A trailing lone CR stays
+      // until the next chunk shows whether an LF follows it.
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
 
       let sep: number;
       while ((sep = buffer.indexOf('\n\n')) !== -1) {
