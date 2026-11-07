@@ -47,6 +47,19 @@ const DEFAULT_WINDOW_STATE = Object.freeze({
 const audio = new AudioSupervisor();
 const coding = new CodingCapture();
 let mainWindow = null;
+// Click-through has two voters: the renderer (cursor over a
+// [data-interactive] surface, from mousemove) and the drop-zone poller
+// (cursor over a [data-drop-zone], from polling — the only signal that
+// works while a file is being dragged in from Finder, since macOS sends no
+// mouse moves to an ignored window during a drag). The window accepts the
+// mouse when either says so.
+let rendererInteractive = false;
+let dropZoneInteractive = false;
+let mouseInteractive = false;
+let dropZones = [];
+let dropZoneTimer = null;
+const DROP_ZONE_POLL_MS = 50;
+const MAX_DROP_ZONES = 8;
 let tray = null;
 let windowState = null;
 let Store = null;
@@ -163,7 +176,7 @@ function publishToast(message) {
 function applyWindowPreferences() {
   if (!mainWindow || !windowState) return;
   const { preferences, opacity } = getWindowState();
-  mainWindow.setAlwaysOnTop(Boolean(preferences.alwaysOnTop), 'screen-saver');
+  applyWindowLevel(preferences);
   mainWindow.setVisibleOnAllWorkspaces(Boolean(preferences.visibleOnAllWorkspaces), {
     visibleOnFullScreen: Boolean(preferences.visibleOnAllWorkspaces),
   });
@@ -395,6 +408,9 @@ function createWindow() {
   // Default to click-through so only explicit interactive regions (the
   // control bar, popovers, modals) capture mouse events. The renderer
   // toggles this on hover over its data-interactive surfaces.
+  rendererInteractive = false;
+  dropZoneInteractive = false;
+  mouseInteractive = false;
   mainWindow.setIgnoreMouseEvents(true, { forward: true });
   // Launch directly into the floating control bar.
   mainWindow.loadURL(`${DEV_URL}/session`);
@@ -476,14 +492,96 @@ ipcMain.handle('window:update_preferences', (_evt, patch) => {
   publishStatus();
   return buildStatusPayload();
 });
-ipcMain.handle('window:set_interactive', (_evt, interactive) => {
-  if (!mainWindow) return { ok: false };
-  if (interactive) {
+// macOS does not deliver drags from other apps (Finder) to a window at the
+// screen-saver level, even when it accepts the mouse, so while the cursor
+// is over a drop zone the window steps down to the floating level (still
+// above regular app windows) and returns to screen-saver when it leaves.
+const DROP_ZONE_LEVEL = 'floating';
+
+function applyWindowLevel(preferences = getWindowState().preferences) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setAlwaysOnTop(
+    Boolean(preferences.alwaysOnTop),
+    dropZoneInteractive ? DROP_ZONE_LEVEL : 'screen-saver',
+  );
+}
+
+function applyMouseMode() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const next = rendererInteractive || dropZoneInteractive;
+  if (next === mouseInteractive) return;
+  mouseInteractive = next;
+  if (next) {
     mainWindow.setIgnoreMouseEvents(false);
   } else {
     mainWindow.setIgnoreMouseEvents(true, { forward: true });
   }
+}
+
+function pollDropZones() {
+  let inside = false;
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && dropZones.length) {
+    const point = screen.getCursorScreenPoint();
+    const bounds = mainWindow.getContentBounds();
+    const zoom = mainWindow.webContents.getZoomFactor() || 1;
+    // Zones are in CSS pixels relative to the page viewport.
+    const x = (point.x - bounds.x) / zoom;
+    const y = (point.y - bounds.y) / zoom;
+    inside = dropZones.some(
+      (r) => x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height,
+    );
+  }
+  if (inside !== dropZoneInteractive) {
+    dropZoneInteractive = inside;
+    applyMouseMode();
+    applyWindowLevel();
+  }
+}
+
+function setDropZones(rects) {
+  dropZones = (Array.isArray(rects) ? rects : [])
+    .slice(0, MAX_DROP_ZONES)
+    .map((r) => ({
+      x: Number(r?.x),
+      y: Number(r?.y),
+      width: Number(r?.width),
+      height: Number(r?.height),
+    }))
+    .filter(
+      (r) => [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.width > 0 && r.height > 0,
+    );
+  if (dropZones.length && dropZoneTimer === null) {
+    dropZoneTimer = setInterval(pollDropZones, DROP_ZONE_POLL_MS);
+  } else if (!dropZones.length && dropZoneTimer !== null) {
+    clearInterval(dropZoneTimer);
+    dropZoneTimer = null;
+  }
+  pollDropZones();
+}
+
+ipcMain.handle('window:set_interactive', (_evt, interactive) => {
+  if (!mainWindow) return { ok: false };
+  rendererInteractive = Boolean(interactive);
+  applyMouseMode();
   return { ok: true, interactive: Boolean(interactive) };
+});
+ipcMain.handle('window:set_drop_zones', (_evt, rects) => {
+  setDropZones(rects);
+  return { ok: true, zones: dropZones.length };
+});
+ipcMain.handle('dialog:choose_folder', async () => {
+  // Stealth-aware native picker when available; Electron's dialog otherwise.
+  const native = stealth.chooseFolder(mainWindow, stealthEnabled, app.getPath('home'));
+  if (native !== undefined) {
+    return { path: (await native) || null, hidden: Boolean(stealthEnabled) };
+  }
+  // Attached to the overlay so it isn't hidden behind it (screen-saver level).
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    defaultPath: app.getPath('home'),
+    buttonLabel: 'Add folder',
+  });
+  return { path: result.canceled ? null : result.filePaths[0] || null, hidden: false };
 });
 ipcMain.handle('window:set_opacity', (_evt, value) => {
   if (!mainWindow || !windowState) return buildStatusPayload();

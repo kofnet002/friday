@@ -79,8 +79,18 @@ declare global {
     updatePreferences: (patch: Partial<FridayWindowPreferences>) => Promise<FridayWindowStatus>;
     setOpacity: (value: number) => Promise<FridayWindowStatus>;
     setInteractive: (value: boolean) => Promise<{ ok: boolean; interactive?: boolean }>;
+    /** Viewport rects (CSS px) where a drag from Finder should be accepted
+     *  even though the window is click-through. Absent in older shells. */
+    setDropZones?: (rects: FridayRect[]) => Promise<{ ok: boolean; zones: number }>;
     onStatus: (cb: (status: FridayWindowStatus) => void) => () => void;
     onToast: (cb: (toast: FridayWindowToast) => void) => () => void;
+  }
+
+  interface FridayRect {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
   }
 
   interface FridayStealthStatus {
@@ -103,6 +113,9 @@ declare global {
     /** Absolute path of a dropped/picked File ('' when not on disk).
      *  Desktop only; absent in older shells. */
     getPathForFile?: (file: File) => string;
+    /** Native folder picker (hidden from screen capture while stealth is
+     *  on). `path` is null when cancelled. Absent in older shells. */
+    chooseFolder?: () => Promise<{ path: string | null; hidden: boolean }>;
     audio: FridayAudioApi;
     coding: FridayCodingApi;
     appWindow: FridayWindowApi;

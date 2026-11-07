@@ -171,7 +171,16 @@ Upload tab also accepts multiple files.
 Folders can be dropped too:
 
 - **Desktop app**: the real path comes from `webUtils.getPathForFile`
-  (exposed by the preload as `window.friday.getPathForFile`).
+  (exposed by the preload as `window.friday.getPathForFile`). Two things
+  normally stop a drag from Finder reaching the overlay: the window is
+  click-through until the page sees a mouse move (and macOS sends none
+  during a drag), and macOS doesn't deliver drags from other apps to
+  windows at the screen-saver level the overlay uses. So while Setup is
+  open, the page reports its rect as a drop zone
+  (`appWindow.setDropZones`); the main process polls the cursor every
+  50 ms and, while it is over a zone, makes the window accept the mouse
+  and steps it down to the floating level, restoring both when the cursor
+  leaves or Setup closes. Stealth (capture protection) is unaffected.
 - **Browser tab**: browsers hide a dropped folder's path, so the page sends
   the folder's name and its top-level entry names to
   `POST /api/folders/locate`. The local backend finds folders with that name
@@ -179,6 +188,17 @@ Folders can be dropped too:
   and ranks them by how many of those entries they contain. The folder is
   added only when one candidate clearly matches (≥80% of entries, no tie);
   otherwise the error names the candidates and points to the Folder tab.
+
+## Choosing a folder (desktop)
+
+The Folder tab has a **Choose…** button in the desktop app. It opens a
+native macOS folder picker built in `native/stealth.mm`: it sits above the
+overlay and, while stealth is on, gets the same capture protection as the
+main window, including the windows it opens itself (the ⌘⇧G "Go to
+folder" box, sheets). Checked with `screencapture`: with stealth on, neither
+Friday nor the picker appears; with stealth off, both do. Without the
+native module it falls back to Electron's dialog, which a screen share can
+see.
 
 ## Not built yet
 

@@ -87,8 +87,20 @@ function moveCursor(x, y) {
   }
 }
 
+/** Native folder picker that honours stealth: with `hidden` it gets the
+ *  same NSWindowSharingNone as the main window, so a screen share doesn't
+ *  show it. Resolves to the chosen path, or null when cancelled. Returns
+ *  undefined when the native binding can't do it (caller falls back to
+ *  Electron's dialog). */
+function chooseFolder(win, hidden, defaultPath) {
+  if (process.platform !== 'darwin' || !nativeAddon?.chooseFolder) return undefined;
+  const handle = win && !win.isDestroyed() ? win.getNativeWindowHandle() : null;
+  return nativeAddon.chooseFolder(handle, Boolean(hidden), defaultPath ?? null);
+}
+
 module.exports = {
   applyToWindow,
+  chooseFolder,
   isAvailable,
   moveCursor,
   statusShape,

@@ -61,6 +61,8 @@ contextBridge.exposeInMainWorld('friday', {
   // Absolute path of a dropped File (File.path was removed in Electron 32).
   // Returns '' for files that don't live on disk.
   getPathForFile: (file) => webUtils.getPathForFile(file),
+  // Folder picker; hidden from screen capture while stealth is on.
+  chooseFolder: () => ipcRenderer.invoke('dialog:choose_folder'),
   audio: {
     start: (opts) => ipcRenderer.invoke('audio:start', opts || {}),
     stop: () => ipcRenderer.invoke('audio:stop'),
@@ -114,6 +116,8 @@ contextBridge.exposeInMainWorld('friday', {
     updatePreferences: (patch) => ipcRenderer.invoke('window:update_preferences', patch),
     setOpacity: (value) => ipcRenderer.invoke('window:set_opacity', value),
     setInteractive: (value) => ipcRenderer.invoke('window:set_interactive', Boolean(value)),
+    // Viewport rects (CSS px) where a drag from Finder should be accepted.
+    setDropZones: (rects) => ipcRenderer.invoke('window:set_drop_zones', rects),
     onStatus: (cb) => {
       windowListeners.status.add(cb);
       return () => windowListeners.status.delete(cb);

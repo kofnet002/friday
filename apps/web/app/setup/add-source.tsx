@@ -320,22 +320,52 @@ function FolderTab({
   const [path, setPath] = useState('');
   const [includeDiff, setIncludeDiff] = useState(false);
 
+  const [picking, setPicking] = useState(false);
+  // Desktop only: the native picker (hidden from screen capture in stealth).
+  const [chooseFolder, setChooseFolder] = useState<FridayApi['chooseFolder']>();
+  useEffect(() => setChooseFolder(() => window.friday?.chooseFolder), []);
+
   const submit = async () => {
     if (!path.trim()) return;
     if (await onSubmit(path.trim(), includeDiff)) setPath('');
   };
 
+  const pick = async () => {
+    if (!chooseFolder) return;
+    setPicking(true);
+    try {
+      const { path: chosen } = await chooseFolder();
+      if (chosen) setPath(chosen);
+    } finally {
+      setPicking(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <FieldLabel label="Absolute folder path">
-        <Input
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-          onKeyDown={stopImplicitSubmit(submit)}
-          placeholder="/Users/you/code/my-repo"
-          className="font-mono text-xs"
-          spellCheck={false}
-        />
+        <div className="flex gap-2">
+          <Input
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={stopImplicitSubmit(submit)}
+            placeholder="/Users/you/code/my-repo"
+            className="font-mono text-xs"
+            spellCheck={false}
+          />
+          {chooseFolder ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 shrink-0"
+              onClick={pick}
+              disabled={busy || picking}
+            >
+              {picking ? 'Choosing…' : 'Choose…'}
+            </Button>
+          ) : null}
+        </div>
       </FieldLabel>
       <SubmitRow
         busy={busy}

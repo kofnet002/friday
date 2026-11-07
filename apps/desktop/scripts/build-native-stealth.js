@@ -6,8 +6,15 @@ const projectRoot = path.resolve(__dirname, '..');
 const sourcePath = path.join(projectRoot, 'native', 'stealth.mm');
 const outputDir = path.join(projectRoot, 'build', 'Release');
 const outputPath = path.join(outputDir, 'friday-stealth.node');
-const nodePrefix = process.config.variables.node_prefix;
-const includeDir = path.join(nodePrefix, 'include', 'node');
+// node_prefix is empty for some installs (nvm); the headers then sit next to
+// the running binary (<prefix>/bin/node -> <prefix>/include/node).
+const includeDir = [
+  process.config.variables.node_prefix,
+  path.resolve(process.execPath, '..', '..'),
+]
+  .filter(Boolean)
+  .map((prefix) => path.join(prefix, 'include', 'node'))
+  .find((dir) => fs.existsSync(path.join(dir, 'node_api.h')));
 
 if (process.platform !== 'darwin') {
   console.log('Skipping friday-stealth build on non-macOS platform');
@@ -18,8 +25,8 @@ if (!fs.existsSync(sourcePath)) {
   throw new Error(`Missing source file: ${sourcePath}`);
 }
 
-if (!fs.existsSync(includeDir)) {
-  throw new Error(`Missing Node headers: ${includeDir}`);
+if (!includeDir) {
+  throw new Error(`Missing Node headers (node_api.h) for ${process.execPath}`);
 }
 
 fs.mkdirSync(outputDir, { recursive: true });

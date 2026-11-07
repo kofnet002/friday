@@ -494,6 +494,39 @@ export function SessionClient() {
     };
   }, [inElectron]);
 
+  // Drop zones: while Setup is open, tell the desktop shell where files and
+  // folders can be dropped. A drag from Finder sends no mouse moves to a
+  // click-through window, so the hover routing above never flips it; the
+  // shell polls the cursor against these rects instead.
+  useEffect(() => {
+    const setZones = window.friday?.appWindow?.setDropZones;
+    if (!inElectron || !setZones || activeFeature !== 'setup') return;
+    let last = '';
+    const report = () => {
+      const rects = Array.from(document.querySelectorAll<HTMLElement>('[data-drop-zone="true"]'))
+        .map((el) => el.getBoundingClientRect())
+        .filter((r) => r.width > 0 && r.height > 0)
+        .map((r) => ({
+          x: Math.round(r.left),
+          y: Math.round(r.top),
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+        }));
+      const key = JSON.stringify(rects);
+      if (key === last) return;
+      last = key;
+      void setZones(rects);
+    };
+    report();
+    // The popover animates in, can be resized and grows with its content;
+    // re-measuring is cheap and only sends IPC when a rect changed.
+    const id = window.setInterval(report, 250);
+    return () => {
+      window.clearInterval(id);
+      void setZones([]);
+    };
+  }, [inElectron, activeFeature]);
+
   // ─── answer WS message handling ────────────────────────────────────────────
   const updateEntry = useCallback(
     (id: string, patch: Partial<AnswerEntry> | ((entry: AnswerEntry) => Partial<AnswerEntry>)) => {
@@ -2232,6 +2265,7 @@ export function SessionClient() {
                 }
               }}
               data-interactive="true"
+              data-drop-zone={activeFeature === 'setup' ? 'true' : undefined}
               className={cn(
                 'pointer-events-auto z-50 resize overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl backdrop-saturate-150',
                 'h-[68vh] min-h-[20rem] min-w-[24rem] max-h-[92vh]',
