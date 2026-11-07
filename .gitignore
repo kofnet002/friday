@@ -56,3 +56,6 @@ coverage/
 .nyc_output/
 
 .claude
+# Project-context benchmark: cached briefs + per-run results
+apps/backend/evals/projects/.cache/
+apps/backend/evals/projects/results/

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-ANSWER_GENERATION_VERSION = "1.3.0"
+ANSWER_GENERATION_VERSION = "1.5.0"
 
 Role = Literal["user", "assistant"]
 
@@ -14,6 +14,29 @@ Role = Literal["user", "assistant"]
 class PriorTurn:
     role: Role
     content: str
+
+
+@dataclass(frozen=True)
+class ProjectContext:
+    """A project the candidate may be asked about (see api/projects.py)."""
+
+    name: str
+    brief: str | None = None
+    project_id: str | None = None
+    # Raw source text, only when every attached project's sources fit the
+    # raw budget (services/project_context.py); None → brief only.
+    raw_text: str | None = None
+
+
+@dataclass(frozen=True)
+class CodeRef:
+    """A code block retrieved for this question (services/code_search.py)."""
+
+    path: str  # repo-relative
+    start_line: int
+    end_line: int
+    code: str
+    root: str = ""  # absolute repo root, for building an editor link
 
 
 @dataclass(frozen=True)
@@ -28,6 +51,57 @@ class AnswerContext:
     # user turn (that's `question` in answer_user_prompt). Empty list for a
     # one-shot question.
     prior_turns: tuple[PriorTurn, ...] = field(default_factory=tuple)
+    projects: tuple[ProjectContext, ...] = field(default_factory=tuple)
+    # Per-question code retrieval — rendered in the USER turn so the system
+    # prompt (resume + projects) stays identical and prompt-cacheable.
+    code_refs: tuple[CodeRef, ...] = field(default_factory=tuple)
+
+
+def _projects_block(projects: tuple[ProjectContext, ...]) -> str:
+    if not projects:
+        return ""
+    parts: list[str] = []
+    for p in projects:
+        body: list[str] = []
+        if p.brief:
+            body.append(f"<brief>\n{p.brief.strip()}\n</brief>")
+        if p.raw_text:
+            body.append(f"<source_material>\n{p.raw_text.strip()}\n</source_material>")
+        if body:
+            parts.append(
+                f'<project_context name="{p.name}">\n' + "\n".join(body) + "\n</project_context>"
+            )
+    if not parts:
+        return ""
+    return "\n\n<candidate_projects>\n" + "\n\n".join(parts) + "\n</candidate_projects>"
+
+
+PROJECT_RULES = """\
+PROJECT QUESTIONS
+
+<candidate_projects> holds projects the candidate built and may be questioned on (e.g. a code review or project walkthrough). When a question is about one of them — its design, a decision, a bug, a tradeoff, "why did you…", "how does X work", "what would you change" — answer from that project's context:
+- Speak as the person who built it: "I chose X because Y". Never mention a brief, notes, documents or an AI assistant.
+- Use the real component, file, library and config names and the real numbers from the context. Specific beats generic.
+- For "why" questions give the reason AND the alternative that was rejected, when the context has them.
+- NEVER invent features, numbers, files or reasons the context does not contain. If the context does not cover the question, say what IS known in one bullet, then give an honest answer such as "I'd need to check — my instinct is…" and keep it short.
+- Questions unrelated to these projects: answer normally, ignoring the project context.
+
+CITING CODE
+
+The user turn may include <code_references>: code blocks from the project's repository retrieved for this question, each with its file path and line range. When one of them directly shows the implementation that answers the question, end your response with this section:
+
+**📎 Source:**
+`<path>:<start>-<end>`
+```<language>
+<the most relevant lines, copied verbatim from that reference — at most 12 lines>
+```
+
+- Cite at most 2 references. Use the path and line range exactly as given in the reference's attributes; if you show only part of a block, keep the reference's full range.
+- Only cite references that were provided. Never invent a path, a line number or code.
+- Omit the section entirely when no reference actually answers the question (retrieval is keyword-based and often returns unrelated code). Omit it silently: never mention code references, retrieval, or what you were or weren't shown.
+- The answer bullets come first and must stand on their own; the source is supporting evidence for the candidate to point at.
+
+"""
 
 
 def answer_system_prompt(ctx: AnswerContext) -> str:
@@ -43,11 +117,12 @@ def answer_system_prompt(ctx: AnswerContext) -> str:
         else ""
     )
     instructions_block = (
-        f"\n\n<candidate_instructions>\n{ctx.extra_instructions.strip()}\n"
-        f"</candidate_instructions>"
+        f"\n\n<candidate_instructions>\n{ctx.extra_instructions.strip()}\n</candidate_instructions>"
         if ctx.extra_instructions
         else ""
     )
+    projects_block = _projects_block(ctx.projects)
+    projects_rules = PROJECT_RULES if projects_block else ""
     language_block = (
         f"\n\nRespond in {ctx.language}." if ctx.language and ctx.language != "en" else ""
     )
@@ -105,7 +180,7 @@ STYLE
 - When uncertain about a technical detail, hedge explicitly ("I believe...", "If I recall correctly...") rather than fabricate.
 - Match the interviewer's register: formal for enterprise, conversational for startups.
 
-HANDLING EDGE CASES
+{projects_rules}HANDLING EDGE CASES
 
 - If the question is unclear or ambiguous: pick the most likely interpretation, answer it, and add a single italic line at the very bottom: *Clarify if you meant X vs Y.*
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
@@ -117,13 +192,27 @@ CODING QUESTIONS (brief mode — full coding mode is handled separately)
 If this appears to be a LeetCode-style problem asked verbally:
 - **⭐ Answer**: state approach in one bullet.
 - **🔑 Key Steps**: walk the algorithm in 4–6 bullets with inline `code` chips for variables.
-- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.{resume_block}{job_block}{instructions_block}{language_block}"""
+- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.{resume_block}{projects_block}{job_block}{instructions_block}{language_block}"""
+
+
+def _code_refs_block(refs: tuple[CodeRef, ...] | None) -> str:
+    if not refs:
+        return ""
+    parts = ["<code_references>"]
+    for r in refs:
+        parts.append(
+            f'<code_reference path="{r.path}" lines="{r.start_line}-{r.end_line}">\n'
+            f"{r.code}\n</code_reference>"
+        )
+    parts.append("</code_references>\n\n")
+    return "\n".join(parts)
 
 
 def answer_user_prompt(
     question: str,
     recent_transcript: str | None = None,
     prior_turns: tuple[PriorTurn, ...] | None = None,
+    code_refs: tuple[CodeRef, ...] | None = None,
 ) -> str:
     context_block = (
         f"<recent_conversation>\n{recent_transcript.strip()}\n</recent_conversation>\n\n"
@@ -155,7 +244,8 @@ def answer_user_prompt(
         if prior_turns
         else "Generate the candidate's response now."
     )
+    code_block = _code_refs_block(code_refs)
     return (
-        f"{context_block}{thread_block}<question>\n{question}\n</question>\n\n"
+        f"{context_block}{code_block}{thread_block}<question>\n{question}\n</question>\n\n"
         f"{instructions}"
     )

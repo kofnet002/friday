@@ -1,0 +1,300 @@
+'use client';
+
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+
+import { addProjectSource, errorMessage, locateFolder, uploadProjectFile } from '@/lib/projects';
+
+// Mirrors TEXT_EXTENSIONS in app.services.context_sources.files plus PDF/DOCX.
+const UPLOAD_EXTENSIONS = [
+  '.pdf',
+  '.docx',
+  '.md',
+  '.markdown',
+  '.txt',
+  '.rst',
+  '.json',
+  '.jsonl',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.csv',
+  '.diff',
+  '.patch',
+  '.py',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.go',
+  '.rs',
+  '.java',
+  '.kt',
+  '.swift',
+  '.rb',
+  '.php',
+  '.cs',
+  '.cpp',
+  '.c',
+  '.h',
+  '.hpp',
+  '.sql',
+  '.sh',
+  '.html',
+  '.css',
+  '.scss',
+  '.vue',
+  '.svelte',
+];
+
+export const UPLOAD_ACCEPT = UPLOAD_EXTENSIONS.join(',');
+
+/** Matches MAX_UPLOAD_BYTES in app.api.projects. */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/** A browser match is used only when most of the dropped folder's entries
+ *  are present and no other candidate scores as well. */
+const MIN_FOLDER_MATCH = 0.8;
+const MAX_CHILDREN = 500;
+
+/** Client-side mirror of the backend's upload checks. Returns an error
+ *  message, or null when the file looks acceptable. */
+export function checkUploadFile(file: File): string | null {
+  const name = file.name.toLowerCase();
+  const typeOk =
+    UPLOAD_EXTENSIONS.some((ext) => name.endsWith(ext)) ||
+    file.type.startsWith('text/') ||
+    file.type.endsWith('pdf') ||
+    file.type.includes('wordprocessingml');
+  if (!typeOk) return 'Unsupported file type — use PDF, DOCX, Markdown, text or code';
+  if (file.size > MAX_UPLOAD_BYTES) return 'Too large (25 MB max)';
+  if (file.size === 0) return 'Empty file';
+  return null;
+}
+
+export type DroppedItem =
+  | { kind: 'file'; file: File }
+  | { kind: 'folder'; name: string; file: File | null; entry: FileSystemDirectoryEntry | null };
+
+function carriesFiles(e: DragEvent | globalThis.DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+}
+
+/** Read the dropped entries. Must run synchronously inside the drop event —
+ *  the DataTransfer is emptied once the handler returns. */
+function readDropped(dt: DataTransfer): DroppedItem[] {
+  const items = Array.from(dt.items ?? []).filter((it) => it.kind === 'file');
+  if (items.length === 0) {
+    return Array.from(dt.files).map((file) => ({ kind: 'file', file }));
+  }
+  const out: DroppedItem[] = [];
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry?.() ?? null;
+    const file = item.getAsFile();
+    if (entry?.isDirectory) {
+      out.push({
+        kind: 'folder',
+        name: entry.name,
+        file,
+        entry: entry as FileSystemDirectoryEntry,
+      });
+    } else if (file) out.push({ kind: 'file', file });
+  }
+  return out;
+}
+
+/** Turns an element into a file drop target. Spread `dropHandlers` onto it
+ *  and render an overlay while `dragging`. Only reacts to drags carrying
+ *  files, so text/element drags inside the target behave normally. */
+export function useFileDrop(onDrop: (items: DroppedItem[]) => void) {
+  const [dragging, setDragging] = useState(false);
+  // dragenter/dragleave fire for every child crossed; count them so moving
+  // between children doesn't flicker the overlay.
+  const depth = useRef(0);
+
+  const dropHandlers = {
+    onDragEnter: (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      depth.current += 1;
+      setDragging(true);
+    },
+    onDragOver: (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    },
+    onDragLeave: (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      depth.current = Math.max(0, depth.current - 1);
+      if (depth.current === 0) setDragging(false);
+    },
+    onDrop: (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      // Nested drop targets (none today) must not double-handle.
+      e.stopPropagation();
+      depth.current = 0;
+      setDragging(false);
+      const items = readDropped(e.dataTransfer);
+      if (items.length > 0) onDrop(items);
+    },
+  };
+
+  return { dragging, dropHandlers };
+}
+
+/** Stop a file dropped outside any drop target from replacing the page
+ *  (the browser default is to open it). Mount for the page's lifetime. */
+export function useWindowDropGuard() {
+  useEffect(() => {
+    const guard = (e: globalThis.DragEvent) => {
+      // A drop target already handled it (React's root listener runs first).
+      if (e.defaultPrevented || !carriesFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+    };
+    window.addEventListener('dragover', guard);
+    window.addEventListener('drop', guard);
+    return () => {
+      window.removeEventListener('dragover', guard);
+      window.removeEventListener('drop', guard);
+    };
+  }, []);
+}
+
+/** Names of a directory entry's immediate children (first MAX_CHILDREN). */
+async function childNames(entry: FileSystemDirectoryEntry): Promise<string[]> {
+  const reader = entry.createReader();
+  const names: string[] = [];
+  // readEntries returns results in batches; an empty batch means done.
+  while (names.length < MAX_CHILDREN) {
+    const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+      reader.readEntries(resolve, reject),
+    );
+    if (batch.length === 0) break;
+    names.push(...batch.map((e) => e.name));
+  }
+  return names.slice(0, MAX_CHILDREN);
+}
+
+/** Absolute path of a dropped folder. The desktop app exposes it directly;
+ *  a browser tab only sees the name and contents, so the (local) backend
+ *  looks the folder up under $HOME and we accept a clear match. */
+async function resolveDroppedFolder(
+  item: Extract<DroppedItem, { kind: 'folder' }>,
+): Promise<string> {
+  const getPath = typeof window !== 'undefined' ? window.friday?.getPathForFile : undefined;
+  const direct = getPath && item.file ? getPath(item.file) : '';
+  if (direct) return direct;
+
+  const children = item.entry ? await childNames(item.entry).catch(() => []) : [];
+  const candidates = await locateFolder(item.name, children);
+  const [best, next] = candidates;
+  if (best && best.score >= MIN_FOLDER_MATCH && !(next && next.score >= best.score)) {
+    return best.path;
+  }
+  if (!best) {
+    throw new Error(
+      `Couldn't find a folder named "${item.name}" in your home folder — use the Folder tab and paste its path.`,
+    );
+  }
+  if (best.score >= MIN_FOLDER_MATCH) {
+    const options = candidates
+      .filter((c) => c.score >= best.score)
+      .slice(0, 3)
+      .map((c) => c.path)
+      .join(', ');
+    throw new Error(
+      `More than one "${item.name}" folder matches (${options}) — use the Folder tab and paste the right path.`,
+    );
+  }
+  throw new Error(
+    `Found ${best.path}, but its contents don't match the folder you dropped — use the Folder tab and paste the path.`,
+  );
+}
+
+export type UploadFailure = { name: string; error: string };
+
+export type UploadStatus =
+  | { phase: 'working'; current: number; total: number; name: string }
+  | { phase: 'done'; added: number; total: number; failures: UploadFailure[] };
+
+const SUCCESS_DISMISS_MS = 6000;
+
+/** Adds dropped/picked files and folders to a project one at a time. Items
+ *  added while a run is in progress join the queue (the total grows).
+ *  `onFinished` fires once the queue drains with at least one success. */
+export function useSourceQueue(projectId: string, onFinished: () => void) {
+  const [status, setStatus] = useState<UploadStatus | null>(null);
+  const queue = useRef<DroppedItem[]>([]);
+  const running = useRef(false);
+  const run = useRef({ done: 0, total: 0, added: 0, failures: [] as UploadFailure[] });
+  const finishedRef = useRef(onFinished);
+  useEffect(() => {
+    finishedRef.current = onFinished;
+  }, [onFinished]);
+
+  const addOne = useCallback(
+    async (item: DroppedItem): Promise<void> => {
+      if (item.kind === 'folder') {
+        const path = await resolveDroppedFolder(item);
+        await addProjectSource(projectId, { kind: 'folder', path });
+        return;
+      }
+      const problem = checkUploadFile(item.file);
+      if (problem) throw new Error(problem);
+      await uploadProjectFile(projectId, item.file);
+    },
+    [projectId],
+  );
+
+  const add = useCallback(
+    async (items: DroppedItem[]) => {
+      if (items.length === 0) return;
+      queue.current.push(...items);
+      if (!running.current) {
+        run.current = { done: 0, total: 0, added: 0, failures: [] };
+      }
+      run.current.total += items.length;
+      if (running.current) {
+        setStatus((s) => (s?.phase === 'working' ? { ...s, total: run.current.total } : s));
+        return;
+      }
+      running.current = true;
+      let item: DroppedItem | undefined;
+      while ((item = queue.current.shift())) {
+        const name = item.kind === 'folder' ? `${item.name}/` : item.file.name;
+        setStatus({
+          phase: 'working',
+          current: run.current.done + 1,
+          total: run.current.total,
+          name,
+        });
+        try {
+          await addOne(item);
+          run.current.added += 1;
+        } catch (err) {
+          run.current.failures.push({ name, error: errorMessage(err) });
+        }
+        run.current.done += 1;
+      }
+      running.current = false;
+      const { added, total, failures } = run.current;
+      setStatus({ phase: 'done', added, total, failures: [...failures] });
+      if (added > 0) finishedRef.current();
+    },
+    [addOne],
+  );
+
+  // A clean run's summary clears itself; failures stay until dismissed.
+  useEffect(() => {
+    if (status?.phase !== 'done' || status.failures.length > 0) return;
+    const id = window.setTimeout(() => setStatus(null), SUCCESS_DISMISS_MS);
+    return () => window.clearTimeout(id);
+  }, [status]);
+
+  const dismiss = useCallback(() => setStatus(null), []);
+
+  return { status, add, dismiss };
+}

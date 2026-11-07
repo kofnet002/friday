@@ -88,6 +88,7 @@ async def stream_answer(
     callback fires once per switch so the WS layer can notify the client.
     """
     system = answer_system_prompt(context)
+
     # Build a per-provider factory that handles in-provider transient
     # retries (`retry_stream`). The outer fallback helper switches providers
     # only after these retries are exhausted or hit a hard error.
@@ -97,14 +98,16 @@ async def stream_answer(
             # use Gemini's native multi-turn contents array here to keep
             # prior_turns framing centralized in the prompt template.
             user = answer_user_prompt(
-                question, context.recent_transcript, context.prior_turns
+                question, context.recent_transcript, context.prior_turns, context.code_refs
             )
             base = lambda: _stream_gemini(system, user)  # noqa: E731
         else:
             # OpenAI / DeepSeek / Claude path: pass prior turns as real
             # assistant/user messages on the wire. Strip <thread> from the
             # user prompt so we don't duplicate the history.
-            user = answer_user_prompt(question, context.recent_transcript, prior_turns=None)
+            user = answer_user_prompt(
+                question, context.recent_transcript, prior_turns=None, code_refs=context.code_refs
+            )
             if p == "deepseek":
                 base = lambda: _stream_deepseek(system, user, context.prior_turns)  # noqa: E731
             elif p == "claude":
@@ -113,7 +116,7 @@ async def stream_answer(
                 # Gemini path does. Build both and let _stream_anthropic pick
                 # the one matching the transport it resolves to.
                 threaded = answer_user_prompt(
-                    question, context.recent_transcript, context.prior_turns
+                    question, context.recent_transcript, context.prior_turns, context.code_refs
                 )
                 base = lambda: _stream_anthropic(  # noqa: E731
                     system, user, threaded, context.prior_turns
@@ -243,6 +246,7 @@ async def _stream_anthropic(
         max_tokens=1500,
         effort=settings.anthropic_effort,
         prior=((turn.role, turn.content) for turn in prior),
+        cache_system=True,
     ):
         yield text
 

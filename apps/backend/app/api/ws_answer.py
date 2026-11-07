@@ -13,6 +13,8 @@ from app.redis_client import recent_transcript_text, set_last_answer
 from app.services import latency
 from app.services.answer import Provider, claude_answer_model, stream_answer
 from app.services.limits import check_token_budget
+from app.services.code_search import find_code_refs
+from app.services.project_context import load_project_contexts
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
 
@@ -153,6 +155,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             except Exception:  # noqa: BLE001
                 recent_transcript = None
 
+        projects = await load_project_contexts(session_id)
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
@@ -163,6 +166,16 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
             prior_turns=prior_turns,
+            projects=projects,
+            code_refs=await find_code_refs(
+                [p.project_id for p in projects if p.project_id],
+                # Follow-ups ("why there?") lean on the thread's opening
+                # question for retrieval keywords.
+                " ".join([question, *(t.content for t in prior_turns if t.role == "user")]),
+                hints="\n".join(f"{p.brief or ''}\n{p.raw_text or ''}" for p in projects),
+            )
+            if projects
+            else (),
         )
 
         auto_detected = bool(request.get("auto_detected", False))
@@ -276,9 +289,16 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             try:
                 prior_chars = sum(len(t.content) for t in prior_turns)
                 transcript_chars = len(context.recent_transcript or "")
+                # Attached project briefs/sources can dwarf the fixed
+                # overhead (tens of thousands of tokens). Counted at full
+                # input price; prompt caching makes repeat questions
+                # cheaper, so this errs high rather than 10x low.
+                project_chars = sum(
+                    len(p.brief or "") + len(p.raw_text or "") for p in context.projects
+                ) + sum(len(r.code) for r in context.code_refs)
                 input_tokens = (
                     ANSWER_PROMPT_OVERHEAD_TOKENS
-                    + (len(question) + transcript_chars + prior_chars) // 4
+                    + (len(question) + transcript_chars + prior_chars + project_chars) // 4
                 )
                 output_tokens = max(1, len(answer_text) // 4)
                 await record_answer_call(

@@ -34,6 +34,7 @@ import type {
   CodingSolutionServerMessage,
   ExtractedFunctionCall,
   ExtractedProblem,
+  Project,
   QAHistoryRow,
   QdModel,
   QdState,
@@ -74,6 +75,7 @@ import {
   type CodingScratchState,
 } from './coding-panel';
 import { FeatureBar, SECONDARY_FEATURES, getFeatureWidth, type FeatureKey } from './feature-bar';
+import { AttachedProjectChips, ProjectBriefModal } from './project-chips';
 import {
   ConnectionPill,
   HistoryList,
@@ -270,6 +272,7 @@ export function SessionClient() {
 
   // Modals + history
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [briefProject, setBriefProject] = useState<Project | null>(null);
   const [history, setHistory] = useState<QAHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [usage, setUsage] = useState<SessionUsageSummary | null>(null);
@@ -348,7 +351,19 @@ export function SessionClient() {
     const ws = new AnswerWs(sid, {
       onMessage: onAnswerMessage,
       onOpen: () => setAnswerConnected(true),
-      onClose: () => setAnswerConnected(false),
+      onClose: () => {
+        setAnswerConnected(false);
+        // A stream cut off by the drop will never get `done`; end it as an
+        // error so it doesn't spin forever (the socket reconnects itself).
+        if (streamingIdRef.current) {
+          onAnswerMessage({
+            type: 'error',
+            message:
+              'Connection to the backend dropped mid-answer. Ask again once Copilot is live.',
+            ...(activeRequestRef.current ? { request_id: activeRequestRef.current } : {}),
+          });
+        }
+      },
       onError: () => setAnswerConnected(false),
     });
     ws.connect();
@@ -478,6 +493,39 @@ export function SessionClient() {
       void api.setInteractive(false);
     };
   }, [inElectron]);
+
+  // Drop zones: while Setup is open, tell the desktop shell where files and
+  // folders can be dropped. A drag from Finder sends no mouse moves to a
+  // click-through window, so the hover routing above never flips it; the
+  // shell polls the cursor against these rects instead.
+  useEffect(() => {
+    const setZones = window.friday?.appWindow?.setDropZones;
+    if (!inElectron || !setZones || activeFeature !== 'setup') return;
+    let last = '';
+    const report = () => {
+      const rects = Array.from(document.querySelectorAll<HTMLElement>('[data-drop-zone="true"]'))
+        .map((el) => el.getBoundingClientRect())
+        .filter((r) => r.width > 0 && r.height > 0)
+        .map((r) => ({
+          x: Math.round(r.left),
+          y: Math.round(r.top),
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+        }));
+      const key = JSON.stringify(rects);
+      if (key === last) return;
+      last = key;
+      void setZones(rects);
+    };
+    report();
+    // The popover animates in, can be resized and grows with its content;
+    // re-measuring is cheap and only sends IPC when a rect changed.
+    const id = window.setInterval(report, 250);
+    return () => {
+      window.clearInterval(id);
+      void setZones([]);
+    };
+  }, [inElectron, activeFeature]);
 
   // ─── answer WS message handling ────────────────────────────────────────────
   const updateEntry = useCallback(
@@ -2169,6 +2217,10 @@ export function SessionClient() {
                 exportSession();
                 setOverflowOpen(false);
               }}
+              onOpenProject={(project) => {
+                setBriefProject(project);
+                setOverflowOpen(false);
+              }}
             />
 
             {/* Drag handle — the entire .session-bar already has
@@ -2213,6 +2265,7 @@ export function SessionClient() {
                 }
               }}
               data-interactive="true"
+              data-drop-zone={activeFeature === 'setup' ? 'true' : undefined}
               className={cn(
                 'pointer-events-auto z-50 resize overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl backdrop-saturate-150',
                 'h-[68vh] min-h-[20rem] min-w-[24rem] max-h-[92vh]',
@@ -2252,6 +2305,7 @@ export function SessionClient() {
       {desktopToast ? <DesktopToast message={desktopToast} /> : null}
 
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <ProjectBriefModal project={briefProject} onClose={() => setBriefProject(null)} />
 
       <ModalShell
         title="Disable stealth mode?"
@@ -2709,6 +2763,7 @@ function OverflowMenu({
   onClearTranscript,
   onShortcuts,
   onExport,
+  onOpenProject,
 }: {
   open: boolean;
   onOpenChange: (next: boolean) => void;
@@ -2730,6 +2785,7 @@ function OverflowMenu({
   onClearTranscript: () => void;
   onShortcuts: () => void;
   onExport: () => void;
+  onOpenProject: (project: Project) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -2825,6 +2881,9 @@ function OverflowMenu({
                   {sessionId.slice(0, 8)}
                 </span>
               </div>
+            ) : null}
+            {sessionId ? (
+              <AttachedProjectChips sessionId={sessionId} onOpen={onOpenProject} />
             ) : null}
           </div>
 

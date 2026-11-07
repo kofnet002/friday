@@ -84,7 +84,7 @@ def extract_keyterms(session: dict[str, Any] | None) -> list[str]:
 
     counts: Counter[str] = Counter()
     canonical: dict[str, str] = {}
-    for field in ("resume_text", "extra_instructions"):
+    for field in ("resume_text", "extra_instructions", "project_text"):
         for tok in _candidates(str(session.get(field) or "")):
             key = tok.lower()
             counts[key] += 1

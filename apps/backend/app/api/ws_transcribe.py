@@ -14,6 +14,7 @@ from app.providers.deepgram_flux import FluxSession, FluxTurnEvent
 from app.redis_client import append_transcript, recent_transcript_entries
 from app.services.keyterms import extract_keyterms
 from app.services.limits import add_audio_seconds, check_audio_budget
+from app.services.project_context import load_project_contexts, project_keyterm_text
 from app.services.question_detection import QuestionDetector
 from app.services.turn_detection import TurnCoordinator
 from app.settings import settings
@@ -99,7 +100,10 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
         await send_json_safe({"type": "error", "message": message})
 
     session_row = await get_session(effective_session_id) if session_id else None
-    keyterms = extract_keyterms(session_row)
+    project_text = project_keyterm_text(await load_project_contexts(effective_session_id))
+    keyterms = extract_keyterms(
+        {**(session_row or {}), "project_text": project_text} if project_text else session_row
+    )
     use_flux = _use_flux(session_row)
     log.info(
         "ws.transcribe_engine",
