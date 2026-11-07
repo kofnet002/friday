@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import io
 from typing import Any
 
-import docx
-import fitz  # PyMuPDF
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.db import get_session, set_resume_text, upsert_session
 from app.logging import log
+from app.services.context_sources.files import extract_docx as _extract_docx
+from app.services.context_sources.files import extract_pdf as _extract_pdf
 
 router = APIRouter(prefix="/api/context")
 
@@ -81,16 +80,3 @@ async def upload_resume(
 
     await set_resume_text(session_id, text)
     return {"ok": True, "session_id": session_id, "chars": len(text)}
-
-
-def _extract_pdf(data: bytes) -> str:
-    parts: list[str] = []
-    with fitz.open(stream=data, filetype="pdf") as doc:
-        for page in doc:
-            parts.append(page.get_text())
-    return "\n".join(parts)
-
-
-def _extract_docx(data: bytes) -> str:
-    document = docx.Document(io.BytesIO(data))
-    return "\n".join(p.text for p in document.paragraphs if p.text)

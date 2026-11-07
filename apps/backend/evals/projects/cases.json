@@ -1,0 +1,141 @@
+{
+  "project": {
+    "name": "Friday",
+    "description": "Local-first macOS interview copilot: live transcription, question detection, streamed answers and a coding mode.",
+    "folder": "../../../.."
+  },
+  "cases": [
+    {
+      "id": "agent-cli-not-api",
+      "question": "Why does the coding agent run on the Claude Code CLI rather than calling the Anthropic API directly?",
+      "kind": "covered",
+      "must": [
+        "It bills against the Claude subscription (CLAUDE_CODE_OAUTH_TOKEN), not pay-per-token API usage",
+        "The CLI gives a real tool-use loop: it writes code, runs it, sees output and fixes it"
+      ],
+      "cite": [
+        "services/coding_agent.py",
+        "services/claude_agent_auth.py",
+        "services/claude_cli.py"
+      ]
+    },
+    {
+      "id": "sonnet-for-answers",
+      "question": "Why did you pick Sonnet for the live answers instead of Opus?",
+      "kind": "covered",
+      "must": [
+        "Sonnet 5.5 starts streaming in about 1.0 s median versus about 2.3 s for Opus 5.5",
+        "Sonnet is about half the price with equivalent answer quality"
+      ],
+      "cite": ["app/settings.py", "services/answer.py"]
+    },
+    {
+      "id": "solve-escalation",
+      "question": "Walk me through what happens when the instant coding solution is wrong.",
+      "kind": "covered",
+      "must": [
+        "The instant solve uses a fast API provider (Gemini/OpenAI/DeepSeek)",
+        "The solution is self-verified against the extracted examples (code_runner)",
+        "On verify failure it automatically escalates to the Claude Agent, which writes, runs and fixes code until the examples pass"
+      ],
+      "cite": [
+        "session-client.tsx",
+        "coding-panel.tsx",
+        "services/code_runner.py",
+        "api/ws_coding.py"
+      ]
+    },
+    {
+      "id": "agent-runaway",
+      "question": "How do you stop the agent from running forever and burning through the subscription quota?",
+      "kind": "covered",
+      "must": [
+        "AGENT_TIMEOUT_S is a wall-clock kill for one run (default 300 s)",
+        "The CLI has no turn-count flag, so the timeout is the backstop",
+        "Runs can also be cancelled from the panel"
+      ],
+      "cite": ["services/coding_agent.py", "app/settings.py"]
+    },
+    {
+      "id": "vision-dedupe",
+      "question": "Why didn't you just use a perceptual image hash to avoid re-processing the same screenshot?",
+      "kind": "covered",
+      "must": [
+        "Coding screenshots are mostly whitespace, so different problems hash nearly identically and a new problem could be silently deduped",
+        "Instead a per-session cooldown (VISION_COOLDOWN_S, default 25 s) is armed after a confident detection"
+      ],
+      "cite": ["api/vision.py", "app/settings.py"]
+    },
+    {
+      "id": "audio-capture",
+      "question": "How do you actually capture the call audio on macOS?",
+      "kind": "covered",
+      "must": [
+        "A Swift helper (friday-audio) captures system audio via ScreenCaptureKit",
+        "It writes 16 kHz mono Int16 PCM to stdout"
+      ],
+      "cite": ["friday-audio/main.swift", "desktop/audio.js"]
+    },
+    {
+      "id": "cost-limits",
+      "question": "What stops a single session from running up a huge bill?",
+      "kind": "covered",
+      "must": [
+        "SESSION_TOKEN_LIMIT caps input+output tokens per session (default 500k)",
+        "SESSION_AUDIO_MINUTE_LIMIT caps audio minutes sent to Deepgram (default 120)",
+        "Exceeding a limit emits a limit_exceeded event instead of billing"
+      ],
+      "cite": ["services/limits.py", "app/settings.py"]
+    },
+    {
+      "id": "log-secrets",
+      "question": "How do you make sure API keys don't leak into your logs?",
+      "kind": "covered",
+      "must": [
+        "A structlog processor masks API keys anywhere in the log stream (to a sk-…<redacted>…last4 form)"
+      ],
+      "cite": ["app/logging.py"]
+    },
+    {
+      "id": "architecture",
+      "question": "Give me the high-level architecture.",
+      "kind": "covered",
+      "must": [
+        "FastAPI backend on 127.0.0.1:8000",
+        "Electron desktop shell with a Swift audio helper",
+        "Next.js web UI",
+        "Deepgram for streaming transcription",
+        "SQLite for persistence and Redis for transient session state"
+      ]
+    },
+    {
+      "id": "claude-transport",
+      "question": "How does the app decide whether a Claude call goes through the API or the subscription?",
+      "kind": "covered",
+      "must": [
+        "CLAUDE_TRANSPORT setting with auto / api / subscription",
+        "auto uses the metered API when an API key is set, otherwise the subscription CLI",
+        "Decided in one place: claude_transport() in services/claude_api.py"
+      ],
+      "cite": ["services/claude_api.py"]
+    },
+    {
+      "id": "uncovered-load-test",
+      "question": "What was your p99 latency when you load tested it with a thousand concurrent users?",
+      "kind": "uncovered",
+      "must": [
+        "Does NOT state any p99 figure or load-test result (none exists in the material)",
+        "Acknowledges it wasn't load tested at that scale or that they'd need to check, and/or notes it is a local single-user app"
+      ]
+    },
+    {
+      "id": "false-premise-k8s",
+      "question": "Why did you choose Kubernetes for deploying the backend?",
+      "kind": "uncovered",
+      "must": [
+        "Does NOT claim Kubernetes was used or invent reasons for choosing it",
+        "Corrects the premise: the backend runs locally (local-first, on 127.0.0.1) on the user's Mac"
+      ]
+    }
+  ]
+}

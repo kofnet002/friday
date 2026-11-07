@@ -100,6 +100,9 @@ declare global {
   interface FridayApi {
     platform: string;
     versions: Record<string, string>;
+    /** Absolute path of a dropped/picked File ('' when not on disk).
+     *  Desktop only; absent in older shells. */
+    getPathForFile?: (file: File) => string;
     audio: FridayAudioApi;
     coding: FridayCodingApi;
     appWindow: FridayWindowApi;

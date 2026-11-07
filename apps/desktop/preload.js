@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const audioListeners = {
   frame: new Set(),
@@ -58,6 +58,9 @@ ipcRenderer.on('window:toast', (_evt, payload) => {
 contextBridge.exposeInMainWorld('friday', {
   platform: process.platform,
   versions: process.versions,
+  // Absolute path of a dropped File (File.path was removed in Electron 32).
+  // Returns '' for files that don't live on disk.
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   audio: {
     start: (opts) => ipcRenderer.invoke('audio:start', opts || {}),
     stop: () => ipcRenderer.invoke('audio:stop'),

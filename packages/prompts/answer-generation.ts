@@ -16,7 +16,7 @@
  * - CALIBRATED CONFIDENCE. Admits uncertainty rather than fabricating.
  */
 
-export const ANSWER_GENERATION_VERSION = '1.2.0';
+export const ANSWER_GENERATION_VERSION = '1.5.0';
 
 export interface AnswerContext {
   resume_text?: string;
@@ -25,7 +25,55 @@ export interface AnswerContext {
   company?: string;
   language?: string;
   recent_transcript?: string;
+  projects?: ProjectContext[];
 }
+
+/** A project the candidate may be asked about (mirrors ProjectContext in Python). */
+export interface ProjectContext {
+  name: string;
+  brief?: string | null;
+  raw_text?: string | null;
+}
+
+export const PROJECT_RULES = `PROJECT QUESTIONS
+
+<candidate_projects> holds projects the candidate built and may be questioned on (e.g. a code review or project walkthrough). When a question is about one of them — its design, a decision, a bug, a tradeoff, "why did you…", "how does X work", "what would you change" — answer from that project's context:
+- Speak as the person who built it: "I chose X because Y". Never mention a brief, notes, documents or an AI assistant.
+- Use the real component, file, library and config names and the real numbers from the context. Specific beats generic.
+- For "why" questions give the reason AND the alternative that was rejected, when the context has them.
+- NEVER invent features, numbers, files or reasons the context does not contain. If the context does not cover the question, say what IS known in one bullet, then give an honest answer such as "I'd need to check — my instinct is…" and keep it short.
+- Questions unrelated to these projects: answer normally, ignoring the project context.
+
+CITING CODE
+
+The user turn may include <code_references>: code blocks from the project's repository retrieved for this question, each with its file path and line range. When one of them directly shows the implementation that answers the question, end your response with this section:
+
+**📎 Source:**
+\`<path>:<start>-<end>\`
+\`\`\`<language>
+<the most relevant lines, copied verbatim from that reference — at most 12 lines>
+\`\`\`
+
+- Cite at most 2 references. Use the path and line range exactly as given in the reference's attributes; if you show only part of a block, keep the reference's full range.
+- Only cite references that were provided. Never invent a path, a line number or code.
+- Omit the section entirely when no reference actually answers the question (retrieval is keyword-based and often returns unrelated code). Omit it silently: never mention code references, retrieval, or what you were or weren't shown.
+- The answer bullets come first and must stand on their own; the source is supporting evidence for the candidate to point at.
+
+`;
+
+const projectsBlockOf = (projects: ProjectContext[] | undefined): string => {
+  const parts = (projects ?? []).flatMap((p) => {
+    const body: string[] = [];
+    if (p.brief) body.push(`<brief>\n${p.brief.trim()}\n</brief>`);
+    if (p.raw_text) body.push(`<source_material>\n${p.raw_text.trim()}\n</source_material>`);
+    return body.length
+      ? [`<project_context name="${p.name}">\n${body.join('\n')}\n</project_context>`]
+      : [];
+  });
+  return parts.length
+    ? `\n\n<candidate_projects>\n${parts.join('\n\n')}\n</candidate_projects>`
+    : '';
+};
 
 export const ANSWER_GENERATION_SYSTEM_PROMPT = (ctx: AnswerContext): string => {
   const resumeBlock = ctx.resume_text
@@ -40,6 +88,9 @@ export const ANSWER_GENERATION_SYSTEM_PROMPT = (ctx: AnswerContext): string => {
   const instructionsBlock = ctx.extra_instructions
     ? `\n\n<candidate_instructions>\n${ctx.extra_instructions.trim()}\n</candidate_instructions>`
     : '';
+
+  const projectsBlock = projectsBlockOf(ctx.projects);
+  const projectsRules = projectsBlock ? PROJECT_RULES : '';
 
   const languageBlock =
     ctx.language && ctx.language !== 'en' ? `\n\nRespond in ${ctx.language}.` : '';
@@ -96,7 +147,7 @@ STYLE
 - When uncertain about a technical detail, hedge explicitly ("I believe...", "If I recall correctly...") rather than fabricate.
 - Match the interviewer's register: formal for enterprise, conversational for startups.
 
-HANDLING EDGE CASES
+${projectsRules}HANDLING EDGE CASES
 
 - If the question is unclear or ambiguous: pick the most likely interpretation, answer it, and add a single italic line at the very bottom: *Clarify if you meant X vs Y.*
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
@@ -108,7 +159,7 @@ CODING QUESTIONS (brief mode — full coding mode is handled separately)
 If this appears to be a LeetCode-style problem asked verbally:
 - **⭐ Answer**: state approach in one bullet.
 - **🔑 Key Steps**: walk the algorithm in 4–6 bullets with inline \`code\` chips for variables.
-- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.${resumeBlock}${jobBlock}${instructionsBlock}${languageBlock}`;
+- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.${resumeBlock}${projectsBlock}${jobBlock}${instructionsBlock}${languageBlock}`;
 };
 
 export const ANSWER_GENERATION_USER_TEMPLATE = (

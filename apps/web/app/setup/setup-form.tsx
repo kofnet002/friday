@@ -1,6 +1,6 @@
 'use client';
 
-import { Briefcase, FileText, Sparkles, Upload } from 'lucide-react';
+import { Briefcase, FileText, FolderKanban, Sparkles, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, type ReactNode } from 'react';
 import type { AnswerProvider, InterviewType } from '@friday/shared-types';
@@ -19,6 +19,8 @@ import {
   uploadResume,
 } from '@/lib/session-context';
 import { cn } from '@/lib/utils';
+
+import { ProjectsLibrary } from './projects-section';
 
 export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
   const router = useRouter();
@@ -199,6 +201,14 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
           fileName={resumeFile?.name}
           onChange={handleResumeChange}
         />
+      </Section>
+
+      <Section
+        icon={<FolderKanban className="h-3.5 w-3.5" aria-hidden />}
+        title="Projects"
+        description="Repos and PRs you may be asked about. Attached projects' briefs ground live answers."
+      >
+        <ProjectsLibrary sessionId={sessionId} />
       </Section>
 
       <div className="flex flex-col gap-3 border-t border-neutral-200 pt-5 sm:flex-row sm:items-center sm:justify-between dark:border-neutral-800">

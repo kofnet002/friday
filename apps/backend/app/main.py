@@ -8,6 +8,7 @@ from app.api.chat import router as chat_router
 from app.api.context import router as context_router
 from app.api.function_calling import router as function_calling_router
 from app.api.health import router as health_router
+from app.api.projects import router as projects_router
 from app.api.sessions import router as sessions_router
 from app.api.vision import router as vision_router
 from app.api.ws_answer import router as ws_answer_router
@@ -42,6 +43,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(chat_router)
 app.include_router(context_router)
+app.include_router(projects_router)
 app.include_router(sessions_router)
 app.include_router(vision_router)
 app.include_router(function_calling_router)

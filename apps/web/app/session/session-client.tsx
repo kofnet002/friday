@@ -34,6 +34,7 @@ import type {
   CodingSolutionServerMessage,
   ExtractedFunctionCall,
   ExtractedProblem,
+  Project,
   QAHistoryRow,
   QdModel,
   QdState,
@@ -74,6 +75,7 @@ import {
   type CodingScratchState,
 } from './coding-panel';
 import { FeatureBar, SECONDARY_FEATURES, getFeatureWidth, type FeatureKey } from './feature-bar';
+import { AttachedProjectChips, ProjectBriefModal } from './project-chips';
 import {
   ConnectionPill,
   HistoryList,
@@ -270,6 +272,7 @@ export function SessionClient() {
 
   // Modals + history
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [briefProject, setBriefProject] = useState<Project | null>(null);
   const [history, setHistory] = useState<QAHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [usage, setUsage] = useState<SessionUsageSummary | null>(null);
@@ -348,7 +351,19 @@ export function SessionClient() {
     const ws = new AnswerWs(sid, {
       onMessage: onAnswerMessage,
       onOpen: () => setAnswerConnected(true),
-      onClose: () => setAnswerConnected(false),
+      onClose: () => {
+        setAnswerConnected(false);
+        // A stream cut off by the drop will never get `done`; end it as an
+        // error so it doesn't spin forever (the socket reconnects itself).
+        if (streamingIdRef.current) {
+          onAnswerMessage({
+            type: 'error',
+            message:
+              'Connection to the backend dropped mid-answer. Ask again once Copilot is live.',
+            ...(activeRequestRef.current ? { request_id: activeRequestRef.current } : {}),
+          });
+        }
+      },
       onError: () => setAnswerConnected(false),
     });
     ws.connect();
@@ -2169,6 +2184,10 @@ export function SessionClient() {
                 exportSession();
                 setOverflowOpen(false);
               }}
+              onOpenProject={(project) => {
+                setBriefProject(project);
+                setOverflowOpen(false);
+              }}
             />
 
             {/* Drag handle — the entire .session-bar already has
@@ -2252,6 +2271,7 @@ export function SessionClient() {
       {desktopToast ? <DesktopToast message={desktopToast} /> : null}
 
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <ProjectBriefModal project={briefProject} onClose={() => setBriefProject(null)} />
 
       <ModalShell
         title="Disable stealth mode?"
@@ -2709,6 +2729,7 @@ function OverflowMenu({
   onClearTranscript,
   onShortcuts,
   onExport,
+  onOpenProject,
 }: {
   open: boolean;
   onOpenChange: (next: boolean) => void;
@@ -2730,6 +2751,7 @@ function OverflowMenu({
   onClearTranscript: () => void;
   onShortcuts: () => void;
   onExport: () => void;
+  onOpenProject: (project: Project) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -2825,6 +2847,9 @@ function OverflowMenu({
                   {sessionId.slice(0, 8)}
                 </span>
               </div>
+            ) : null}
+            {sessionId ? (
+              <AttachedProjectChips sessionId={sessionId} onOpen={onOpenProject} />
             ) : null}
           </div>
 

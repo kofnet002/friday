@@ -94,6 +94,59 @@ CREATE TABLE IF NOT EXISTS coding_agent_traces (
 
 CREATE INDEX IF NOT EXISTS idx_agent_traces_session
     ON coding_agent_traces(session_id, created_at DESC);
+
+-- Project context library: named projects the candidate may be asked about
+-- (a repo they shipped, a PR under review). Each holds raw sources plus one
+-- distilled brief; sessions attach projects so live answers can draw on
+-- them. Library-level (not per session) so one project serves many calls.
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    brief TEXT,
+    -- none | generating | ready | stale | error
+    brief_status TEXT NOT NULL DEFAULT 'none',
+    brief_error TEXT,
+    -- 1 once the user hand-edits the brief; regeneration then needs force.
+    brief_edited INTEGER NOT NULL DEFAULT 0,
+    brief_model TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_sources (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    -- file | text | folder | claude_code
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    origin TEXT,
+    raw_text TEXT NOT NULL,
+    chars INTEGER NOT NULL,
+    meta_json TEXT,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_sources_project
+    ON project_sources(project_id, created_at);
+
+-- Citable code chunks from folder sources (function/class-sized, with
+-- repo-relative path + line range), full-text indexed so a live answer can
+-- pull the few blocks that answer the question in milliseconds. A plain
+-- FTS5 table (not external-content): rows are deleted explicitly when their
+-- source or project goes away.
+CREATE VIRTUAL TABLE IF NOT EXISTS project_code_fts USING fts5(
+    path, symbol, body,
+    project_id UNINDEXED, source_id UNINDEXED, root UNINDEXED,
+    start_line UNINDEXED, end_line UNINDEXED,
+    tokenize = 'porter unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS session_projects (
+    session_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    PRIMARY KEY (session_id, project_id)
+);
 """
 
 
@@ -121,8 +174,14 @@ async def init_db() -> None:
         # no-op once the index already exists, so this is safe on
         # repeat startups.
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_qa_thread "
-            "ON qa_history(thread_id, created_at)"
+            "CREATE INDEX IF NOT EXISTS idx_qa_thread ON qa_history(thread_id, created_at)"
+        )
+        # A brief "generating" at startup was orphaned by a restart (the task
+        # lived in the old process) — surface it as retryable, not stuck.
+        await db.execute(
+            "UPDATE projects SET brief_status = 'error', "
+            "brief_error = 'interrupted by restart — generate again' "
+            "WHERE brief_status = 'generating'"
         )
         await db.commit()
 
@@ -423,3 +482,285 @@ async def log_usage(
             ),
         )
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Project context library
+# ---------------------------------------------------------------------------
+
+_PROJECT_COLUMNS = (
+    "id, name, description, brief, brief_status, brief_error, brief_edited, "
+    "brief_model, created_at, updated_at"
+)
+
+
+async def _fk_conn() -> aiosqlite.Connection:
+    """Connection with foreign keys ON (SQLite defaults them off) so deleting
+    a project cascades to its sources and session links."""
+    db = await aiosqlite.connect(_db_path())
+    await db.execute("PRAGMA foreign_keys = ON")
+    db.row_factory = aiosqlite.Row
+    return db
+
+
+async def create_project(project_id: str, name: str, description: str | None) -> None:
+    now = time.time()
+    db = await _fk_conn()
+    try:
+        await db.execute(
+            "INSERT INTO projects (id, name, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (project_id, name, description, now, now),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def list_projects() -> list[dict[str, Any]]:
+    db = await _fk_conn()
+    try:
+        async with db.execute(
+            f"""
+            SELECT {_PROJECT_COLUMNS},
+                   (SELECT COUNT(*) FROM project_sources s WHERE s.project_id = p.id)
+                       AS source_count,
+                   (SELECT COALESCE(SUM(chars), 0) FROM project_sources s
+                     WHERE s.project_id = p.id) AS source_chars
+            FROM projects p
+            ORDER BY updated_at DESC
+            """
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def get_project(project_id: str) -> dict[str, Any] | None:
+    db = await _fk_conn()
+    try:
+        async with db.execute(
+            f"SELECT {_PROJECT_COLUMNS} FROM projects WHERE id = ?", (project_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def update_project(project_id: str, **fields: Any) -> None:
+    """Set the given columns (name, description, brief, brief_status, …)."""
+    allowed = {
+        "name",
+        "description",
+        "brief",
+        "brief_status",
+        "brief_error",
+        "brief_edited",
+        "brief_model",
+    }
+    cols = {k: v for k, v in fields.items() if k in allowed}
+    if not cols:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in cols)
+    db = await _fk_conn()
+    try:
+        await db.execute(
+            f"UPDATE projects SET {assignments}, updated_at = ? WHERE id = ?",
+            (*cols.values(), time.time(), project_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def delete_project(project_id: str) -> bool:
+    db = await _fk_conn()
+    try:
+        await db.execute("DELETE FROM project_code_fts WHERE project_id = ?", (project_id,))
+        cursor = await db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        await db.commit()
+        return (cursor.rowcount or 0) > 0
+    finally:
+        await db.close()
+
+
+async def add_project_source(
+    *,
+    source_id: str,
+    project_id: str,
+    kind: str,
+    title: str,
+    origin: str | None,
+    raw_text: str,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    """Insert a source and mark the project's brief stale (if it had one)."""
+    import json
+
+    now = time.time()
+    db = await _fk_conn()
+    try:
+        await db.execute(
+            """
+            INSERT INTO project_sources (id, project_id, kind, title, origin,
+                                         raw_text, chars, meta_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id,
+                project_id,
+                kind,
+                title,
+                origin,
+                raw_text,
+                len(raw_text),
+                json.dumps(meta) if meta else None,
+                now,
+            ),
+        )
+        await _mark_stale(db, project_id, now)
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def _mark_stale(db: aiosqlite.Connection, project_id: str, now: float) -> None:
+    await db.execute(
+        """
+        UPDATE projects
+        SET brief_status = CASE WHEN brief_status IN ('ready', 'error')
+                                THEN 'stale' ELSE brief_status END,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (now, project_id),
+    )
+
+
+async def list_project_sources(project_id: str, *, with_text: bool = False) -> list[dict[str, Any]]:
+    cols = "id, project_id, kind, title, origin, chars, meta_json, created_at"
+    if with_text:
+        cols += ", raw_text"
+    db = await _fk_conn()
+    try:
+        async with db.execute(
+            f"SELECT {cols} FROM project_sources WHERE project_id = ? ORDER BY created_at",
+            (project_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def delete_project_source(project_id: str, source_id: str) -> bool:
+    db = await _fk_conn()
+    try:
+        cursor = await db.execute(
+            "DELETE FROM project_sources WHERE id = ? AND project_id = ?",
+            (source_id, project_id),
+        )
+        if (cursor.rowcount or 0) > 0:
+            await db.execute(
+                "DELETE FROM project_code_fts WHERE source_id = ? AND project_id = ?",
+                (source_id, project_id),
+            )
+            await _mark_stale(db, project_id, time.time())
+        await db.commit()
+        return (cursor.rowcount or 0) > 0
+    finally:
+        await db.close()
+
+
+async def set_session_projects(session_id: str, project_ids: list[str]) -> None:
+    db = await _fk_conn()
+    try:
+        await db.execute("DELETE FROM session_projects WHERE session_id = ?", (session_id,))
+        await db.executemany(
+            "INSERT OR IGNORE INTO session_projects (session_id, project_id) VALUES (?, ?)",
+            [(session_id, pid) for pid in project_ids],
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_session_projects(session_id: str) -> list[dict[str, Any]]:
+    """Attached projects with their brief (no raw source text)."""
+    db = await _fk_conn()
+    try:
+        async with db.execute(
+            f"""
+            SELECT {", ".join("p." + c.strip() for c in _PROJECT_COLUMNS.split(","))}
+            FROM session_projects sp JOIN projects p ON p.id = sp.project_id
+            WHERE sp.session_id = ?
+            ORDER BY p.name
+            """,
+            (session_id,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def add_code_chunks(
+    *, project_id: str, source_id: str, root: str, chunks: list[Any]
+) -> None:
+    """Index `CodeChunk`s (services/context_sources/code_index.py)."""
+    if not chunks:
+        return
+    db = await _fk_conn()
+    try:
+        await db.executemany(
+            """
+            INSERT INTO project_code_fts (path, symbol, body, project_id, source_id,
+                                          root, start_line, end_line)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (c.path, c.symbol, c.text, project_id, source_id, root, c.start_line, c.end_line)
+                for c in chunks
+            ],
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def count_code_chunks(source_id: str) -> int:
+    db = await _fk_conn()
+    try:
+        async with db.execute(
+            "SELECT COUNT(*) FROM project_code_fts WHERE source_id = ?", (source_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+    finally:
+        await db.close()
+
+
+async def search_code_chunks(
+    project_ids: list[str], match: str, limit: int
+) -> list[dict[str, Any]]:
+    """BM25-ranked chunks for an FTS5 `match` expression. Symbol and path
+    matches weigh more than body matches (a question naming a function or
+    file should land on it)."""
+    if not project_ids or not match:
+        return []
+    marks = ",".join("?" for _ in project_ids)
+    db = await _fk_conn()
+    try:
+        async with db.execute(
+            f"""
+            SELECT path, symbol, body, project_id, root, start_line, end_line,
+                   bm25(project_code_fts, 4.0, 6.0, 1.0) AS rank
+            FROM project_code_fts
+            WHERE project_code_fts MATCH ? AND project_id IN ({marks})
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (match, *project_ids, limit),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()

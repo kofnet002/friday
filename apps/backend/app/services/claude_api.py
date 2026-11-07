@@ -108,15 +108,26 @@ def _request_kwargs(
     max_tokens: int,
     effort: Effort | None,
     thinking: bool = True,
+    cache_system: bool = False,
 ) -> dict[str, Any]:
     """Per-model request shape. Never sends temperature/top_p/top_k — every
     current Claude model rejects them.
 
     `thinking=False` turns thinking off where the model allows it — for tiny
     latency-critical classifiers (question detection) where reasoning only
-    adds time."""
+    adds time.
+
+    `cache_system=True` marks the system prompt as a prompt-cache breakpoint.
+    Use it where the same (large) system prompt repeats across calls — the
+    live answer prompt carries resume + project context that is identical
+    for every question in a session. Below the model's minimum cacheable
+    length the marker is simply ignored."""
     kwargs: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": messages}
-    if system:
+    if system and cache_system:
+        kwargs["system"] = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]
+    elif system:
         kwargs["system"] = system
     if not thinking and model in _THINKING_DISABLE_OK:
         kwargs["thinking"] = {"type": "disabled"}
@@ -172,6 +183,8 @@ async def stream_claude_api(
     effort: Effort | None,
     prior: Iterable[tuple[str, str]] = (),
     image: tuple[bytes, str] | None = None,
+    cache_system: bool = False,
+    thinking: bool = True,
 ) -> AsyncIterator[str]:
     """Stream response text from the Anthropic API.
 
@@ -190,7 +203,13 @@ async def stream_claude_api(
     emitted = False
     async with anthropic_client().beta.messages.stream(
         **_request_kwargs(
-            system=system, messages=messages, model=model, max_tokens=max_tokens, effort=effort
+            system=system,
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            effort=effort,
+            cache_system=cache_system,
+            thinking=thinking,
         )
     ) as stream:
         async for text in stream.text_stream:

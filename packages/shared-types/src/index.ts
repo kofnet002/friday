@@ -463,3 +463,86 @@ export interface FunctionCallSolveResponse {
   check: FunctionCallCheck;
   grade?: FunctionCallGrade;
 }
+
+// ─── project context library ─────────────────────────────────────────────────
+// Mirrors app.api.projects. Projects are library-level (not per session);
+// sessions attach them so live answers can draw on each project's brief.
+
+/** none → never generated · generating → background job running ·
+ *  ready → current · stale → sources changed since the brief was made ·
+ *  error → last generation failed (see `brief_error`). */
+export type BriefStatus = 'none' | 'generating' | 'ready' | 'stale' | 'error';
+
+export type ProjectSourceKind = 'file' | 'text' | 'folder' | 'claude_code';
+
+/** Row shape of `projects` (GET /api/projects/{id}, PATCH, session links). */
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  brief: string | null;
+  brief_status: BriefStatus;
+  brief_error: string | null;
+  /** 1 once the user hand-edits the brief; regenerating then needs force. */
+  brief_edited: number | boolean;
+  brief_model: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** GET /api/projects adds aggregate source stats to each row. */
+export interface ProjectSummary extends Project {
+  source_count: number;
+  source_chars: number;
+}
+
+export interface ProjectSource {
+  id: string;
+  project_id: string;
+  kind: ProjectSourceKind;
+  title: string;
+  /** File name, folder path or Claude Code project dir; null for pasted text. */
+  origin: string | null;
+  chars: number;
+  meta: Record<string, unknown>;
+  created_at: number;
+}
+
+/** Abbreviated source returned by the add-source endpoints. */
+export interface ProjectSourceCreated {
+  id: string;
+  kind: ProjectSourceKind;
+  title: string;
+  chars: number;
+}
+
+/** Body of POST /api/projects/{id}/sources (file uploads are multipart). */
+export type ProjectSourceCreate =
+  | { kind: 'text'; title?: string; text: string }
+  | { kind: 'folder'; path: string; include_diff?: boolean; title?: string }
+  | {
+      kind: 'claude_code';
+      project_dir: string;
+      session_ids?: string[];
+      /** Also ingest the repo folder the sessions ran in. */
+      include_repo?: boolean;
+      title?: string;
+    };
+
+export interface ClaudeCodeSession {
+  id: string;
+  bytes: number;
+  modified_at: number;
+  first_prompt: string | null;
+}
+
+/** One entry of GET /api/claude-code/projects (~/.claude/projects/*). */
+export interface ClaudeCodeProject {
+  /** Directory name under ~/.claude/projects — pass back as `project_dir`. */
+  dir: string;
+  /** Working directory the sessions ran in. */
+  path: string;
+  name: string;
+  modified_at: number;
+  sessions: ClaudeCodeSession[];
+}

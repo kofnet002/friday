@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     # Latency-sensitive calls (answers, QD, vision, chat) use
     # ANTHROPIC_EFFORT; coding solves use ANTHROPIC_SOLVE_EFFORT, and deep
     # refines / hard problems step up to "high".
+    # Project context ("Projects" library). Brief generation is a one-off,
+    # offline distillation of a project's sources, so it uses the strongest
+    # model; live answers only ever see the (small) brief plus raw text when
+    # the attached sources fit PROJECT_RAW_BUDGET_CHARS (~4 chars/token).
+    project_brief_model: str = Field(default="claude-opus-5-5")
+    project_brief_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(default="medium")
+    project_raw_budget_chars: int = Field(default=120_000)
+    # Second pass that fact-checks the draft brief against its sources.
+    project_brief_verify: bool = Field(default=True)
     anthropic_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(default="low")
     anthropic_solve_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
         default="medium"

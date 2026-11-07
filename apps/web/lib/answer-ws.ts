@@ -9,10 +9,19 @@ export interface AnswerWsHandlers {
 
 const BACKEND_WS_URL = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? 'ws://127.0.0.1:8000';
 
+// Reconnect backoff: 1s → 2s → 4s … capped (same policy as CodingWs). A
+// backend restart (e.g. the dev server reloading on a file save) used to
+// leave the copilot OFFLINE for the rest of the call until a manual reload.
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
+
 export class AnswerWs {
   private ws: WebSocket | null = null;
   private handlers: AnswerWsHandlers;
   private sessionId: string;
+  private closedByUser = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer: number | null = null;
 
   constructor(sessionId: string, handlers: AnswerWsHandlers) {
     this.sessionId = sessionId;
@@ -21,10 +30,18 @@ export class AnswerWs {
 
   connect(): void {
     if (this.ws) return;
+    this.closedByUser = false;
+    this.open();
+  }
+
+  private open(): void {
     const ws = new WebSocket(
       `${BACKEND_WS_URL}/ws/answer?session_id=${encodeURIComponent(this.sessionId)}`,
     );
-    ws.onopen = () => this.handlers.onOpen?.();
+    ws.onopen = () => {
+      this.reconnectAttempt = 0;
+      this.handlers.onOpen?.();
+    };
     ws.onmessage = (event) => {
       if (typeof event.data !== 'string') return;
       try {
@@ -37,9 +54,23 @@ export class AnswerWs {
     ws.onclose = (event) => {
       this.ws = null;
       this.handlers.onClose?.(event);
+      this.scheduleReconnect();
     };
     ws.onerror = (event) => this.handlers.onError?.(event);
     this.ws = ws;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closedByUser || this.reconnectTimer !== null) return;
+    const delay = Math.min(
+      RECONNECT_MAX_MS,
+      RECONNECT_BASE_MS * 2 ** Math.min(this.reconnectAttempt, 5),
+    );
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.closedByUser && !this.ws) this.open();
+    }, delay);
   }
 
   isOpen(): boolean {
@@ -56,6 +87,11 @@ export class AnswerWs {
   }
 
   close(): void {
+    this.closedByUser = true;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
       try {
         this.ws.close();
