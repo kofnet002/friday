@@ -20,14 +20,14 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # Runs typecheck across all workspaces (web, shared-types, prompts, ui;
-      # backend's turbo typecheck target shells out to mypy via uv, so give
-      # it a python toolchain too).
+      # uv must exist before `pnpm install`: apps/backend's postinstall runs
+      # `uv sync`, and the backend's turbo typecheck target runs mypy via uv.
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --directory apps/backend
+      - run: pnpm install --frozen-lockfile
+      # Runs typecheck across all workspaces (web, shared-types, prompts, ui,
+      # backend).
       - run: pnpm turbo run typecheck
 
   backend:
