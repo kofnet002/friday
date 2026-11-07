@@ -138,6 +138,18 @@ export async function generateBrief(projectId: string, force = false): Promise<P
   return data.project;
 }
 
+export type FolderCandidate = { path: string; score: number };
+
+/** Find a folder dropped in a browser tab (which hides absolute paths) by
+ *  its name and its entries' names. Best match first. */
+export async function locateFolder(name: string, children: string[]): Promise<FolderCandidate[]> {
+  const data = await request<{ candidates: FolderCandidate[] }>(
+    '/api/folders/locate',
+    json('POST', { name, children }),
+  );
+  return data.candidates;
+}
+
 export async function listClaudeCodeProjects(): Promise<ClaudeCodeProject[]> {
   const data = await request<{ projects: ClaudeCodeProject[] }>('/api/claude-code/projects');
   return data.projects;

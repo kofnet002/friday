@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 
-import { addProjectSource, errorMessage, uploadProjectFile } from '@/lib/projects';
+import { addProjectSource, errorMessage, locateFolder, uploadProjectFile } from '@/lib/projects';
 
 // Mirrors TEXT_EXTENSIONS in app.services.context_sources.files plus PDF/DOCX.
 const UPLOAD_EXTENSIONS = [
@@ -52,8 +52,10 @@ export const UPLOAD_ACCEPT = UPLOAD_EXTENSIONS.join(',');
 /** Matches MAX_UPLOAD_BYTES in app.api.projects. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
-export const FOLDER_DROP_UNSUPPORTED =
-  'Folders can be dropped in the Friday desktop app — in the browser, use the Folder tab and paste the path.';
+/** A browser match is used only when most of the dropped folder's entries
+ *  are present and no other candidate scores as well. */
+const MIN_FOLDER_MATCH = 0.8;
+const MAX_CHILDREN = 500;
 
 /** Client-side mirror of the backend's upload checks. Returns an error
  *  message, or null when the file looks acceptable. */
@@ -72,7 +74,7 @@ export function checkUploadFile(file: File): string | null {
 
 export type DroppedItem =
   | { kind: 'file'; file: File }
-  | { kind: 'folder'; name: string; file: File | null };
+  | { kind: 'folder'; name: string; file: File | null; entry: FileSystemDirectoryEntry | null };
 
 function carriesFiles(e: DragEvent | globalThis.DragEvent): boolean {
   return Array.from(e.dataTransfer?.types ?? []).includes('Files');
@@ -89,8 +91,14 @@ function readDropped(dt: DataTransfer): DroppedItem[] {
   for (const item of items) {
     const entry = item.webkitGetAsEntry?.() ?? null;
     const file = item.getAsFile();
-    if (entry?.isDirectory) out.push({ kind: 'folder', name: entry.name, file });
-    else if (file) out.push({ kind: 'file', file });
+    if (entry?.isDirectory) {
+      out.push({
+        kind: 'folder',
+        name: entry.name,
+        file,
+        entry: entry as FileSystemDirectoryEntry,
+      });
+    } else if (file) out.push({ kind: 'file', file });
   }
   return out;
 }
@@ -155,6 +163,57 @@ export function useWindowDropGuard() {
   }, []);
 }
 
+/** Names of a directory entry's immediate children (first MAX_CHILDREN). */
+async function childNames(entry: FileSystemDirectoryEntry): Promise<string[]> {
+  const reader = entry.createReader();
+  const names: string[] = [];
+  // readEntries returns results in batches; an empty batch means done.
+  while (names.length < MAX_CHILDREN) {
+    const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+      reader.readEntries(resolve, reject),
+    );
+    if (batch.length === 0) break;
+    names.push(...batch.map((e) => e.name));
+  }
+  return names.slice(0, MAX_CHILDREN);
+}
+
+/** Absolute path of a dropped folder. The desktop app exposes it directly;
+ *  a browser tab only sees the name and contents, so the (local) backend
+ *  looks the folder up under $HOME and we accept a clear match. */
+async function resolveDroppedFolder(
+  item: Extract<DroppedItem, { kind: 'folder' }>,
+): Promise<string> {
+  const getPath = typeof window !== 'undefined' ? window.friday?.getPathForFile : undefined;
+  const direct = getPath && item.file ? getPath(item.file) : '';
+  if (direct) return direct;
+
+  const children = item.entry ? await childNames(item.entry).catch(() => []) : [];
+  const candidates = await locateFolder(item.name, children);
+  const [best, next] = candidates;
+  if (best && best.score >= MIN_FOLDER_MATCH && !(next && next.score >= best.score)) {
+    return best.path;
+  }
+  if (!best) {
+    throw new Error(
+      `Couldn't find a folder named "${item.name}" in your home folder — use the Folder tab and paste its path.`,
+    );
+  }
+  if (best.score >= MIN_FOLDER_MATCH) {
+    const options = candidates
+      .filter((c) => c.score >= best.score)
+      .slice(0, 3)
+      .map((c) => c.path)
+      .join(', ');
+    throw new Error(
+      `More than one "${item.name}" folder matches (${options}) — use the Folder tab and paste the right path.`,
+    );
+  }
+  throw new Error(
+    `Found ${best.path}, but its contents don't match the folder you dropped — use the Folder tab and paste the path.`,
+  );
+}
+
 export type UploadFailure = { name: string; error: string };
 
 export type UploadStatus =
@@ -179,10 +238,7 @@ export function useSourceQueue(projectId: string, onFinished: () => void) {
   const addOne = useCallback(
     async (item: DroppedItem): Promise<void> => {
       if (item.kind === 'folder') {
-        const getPath = typeof window !== 'undefined' ? window.friday?.getPathForFile : undefined;
-        if (!getPath) throw new Error(FOLDER_DROP_UNSUPPORTED);
-        const path = item.file ? getPath(item.file) : '';
-        if (!path) throw new Error('Could not read the folder path — use the Folder tab instead');
+        const path = await resolveDroppedFolder(item);
         await addProjectSource(projectId, { kind: 'folder', path });
         return;
       }

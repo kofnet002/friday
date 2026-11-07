@@ -30,6 +30,7 @@ from app.services.context_sources.claude_code import ingest_claude_code, list_cl
 from app.services.context_sources.code_index import CodeChunk, chunk_repo
 from app.services.context_sources.files import ingest_file
 from app.services.context_sources.folder import ingest_folder
+from app.services.context_sources.locate import locate_folder
 from app.services.context_sources.redact import redact
 from app.services.project_brief import start_brief
 
@@ -62,6 +63,13 @@ class SourceCreate(BaseModel):
     session_ids: list[str] | None = None
     # claude_code: also ingest the repo folder the sessions ran in
     include_repo: bool = False
+
+
+class FolderLocate(BaseModel):
+    # A folder dropped in a browser tab: its name and its entries' names
+    # (the browser hides the absolute path).
+    name: str = Field(min_length=1, max_length=255)
+    children: list[str] = Field(default_factory=list, max_length=500)
 
 
 class BriefRequest(BaseModel):
@@ -272,6 +280,18 @@ async def brief_generate(project_id: str, payload: BriefRequest | None = None) -
 @router.get("/claude-code/projects")
 async def claude_code_projects() -> dict[str, Any]:
     return {"projects": await asyncio.to_thread(list_claude_code_projects)}
+
+
+# ---------------------------------------------------------- folder lookup
+
+
+@router.post("/folders/locate")
+async def folders_locate(payload: FolderLocate) -> dict[str, Any]:
+    try:
+        found = await asyncio.to_thread(locate_folder, payload.name, payload.children)
+    except IngestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"candidates": [{"path": c.path, "score": c.score} for c in found]}
 
 
 # --------------------------------------------------------- session linking

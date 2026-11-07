@@ -166,10 +166,19 @@ code details were mis-scored as fabrications.
 Drop files anywhere on a project card (collapsed or expanded) to add them
 as sources — several at once, uploaded one by one with progress and a
 per-file error list (type and the 25 MB limit are checked first). The
-Upload tab also accepts multiple files. Folders can be dropped in the
-desktop app, which resolves the real path via `webUtils.getPathForFile`
-(exposed by the preload as `window.friday.getPathForFile`); a browser tab
-can't see folder paths, so it points you to the Folder tab instead.
+Upload tab also accepts multiple files.
+
+Folders can be dropped too:
+
+- **Desktop app**: the real path comes from `webUtils.getPathForFile`
+  (exposed by the preload as `window.friday.getPathForFile`).
+- **Browser tab**: browsers hide a dropped folder's path, so the page sends
+  the folder's name and its top-level entry names to
+  `POST /api/folders/locate`. The local backend finds folders with that name
+  under `$HOME` (Spotlight via `mdfind`, falling back to a bounded walk)
+  and ranks them by how many of those entries they contain. The folder is
+  added only when one candidate clearly matches (≥80% of entries, no tie);
+  otherwise the error names the candidates and points to the Folder tab.
 
 ## Not built yet
 

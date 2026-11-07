@@ -163,6 +163,47 @@ def test_folder_ingest_rejects_paths_outside_home(home: Path) -> None:
         ingest_folder("/etc")
 
 
+# ------------------------------------------------------- folder locate
+
+
+def test_locate_folder_ranks_by_contents_and_skips_dependency_dirs(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services.context_sources import locate
+
+    monkeypatch.setattr(locate, "_spotlight", lambda _name, _home: None)  # force the walk
+    real = home / "code" / "shop"
+    (real / "src").mkdir(parents=True)
+    (real / "package.json").write_text("{}")
+    (real / "README.md").write_text("x")
+    other = home / "Documents" / "old" / "shop"
+    other.mkdir(parents=True)
+    (other / "README.md").write_text("x")
+    (home / "code" / "node_modules" / "shop").mkdir(parents=True)
+    (home / ".Trash" / "shop").mkdir(parents=True)
+
+    found = locate.locate_folder("shop/", ["src", "package.json", "README.md"])
+    assert [c.path for c in found] == [str(real.resolve()), str(other.resolve())]
+    assert found[0].score == 1.0
+    assert found[1].score == pytest.approx(1 / 3, abs=0.01)
+
+    with pytest.raises(IngestError):
+        locate.locate_folder("../etc", [])
+
+
+def test_locate_endpoint(client: Any, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.context_sources import locate
+
+    monkeypatch.setattr(locate, "_spotlight", lambda _name, _home: None)
+    (home / "work" / "api").mkdir(parents=True)
+    r = client.post("/api/folders/locate", json={"name": "api", "children": []})
+    assert r.status_code == 200
+    assert r.json()["candidates"] == [
+        {"path": str((home / "work" / "api").resolve()), "score": 1.0}
+    ]
+    assert client.post("/api/folders/locate", json={"name": "a/b"}).status_code == 400
+
+
 # -------------------------------------------------------- answer prompt
 
 
