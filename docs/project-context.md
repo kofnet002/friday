@@ -32,7 +32,10 @@ Live question ──▶ ws_answer ──▶ project_context.load_project_context
     `git log`, optionally the diff vs the base branch. Code bodies are not
     inlined; `.env*`, keys and dependency dirs are skipped. Paths must be
     under `$HOME`.
-  - `claude_code.py` — sessions from `~/.claude/projects/`. Keeps your
+  - `claude_code.py` — sessions from every Claude Code profile: each
+    `~/.claude*/projects/` (e.g. `~/.claude-work` set up with
+    `CLAUDE_CONFIG_DIR`) plus `$CLAUDE_CONFIG_DIR` itself when it is under
+    `$HOME`. The picker groups projects by profile. Keeps your
     prompts and Claude's prose, shrinks tool calls to one line
     (`[edited: app/db.py]`), drops tool output and thinking. A 1.9 MB
     transcript condensed to ~17k chars (this feature's own session). Optionally pulls in the repo folder

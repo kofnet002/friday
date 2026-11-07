@@ -25,6 +25,7 @@ from app.settings import settings
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A fake $HOME so path confinement and ~/.claude lookups hit tmp."""
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     return tmp_path
 
 
@@ -124,12 +125,49 @@ def test_claude_code_listing_and_ingest(home: Path) -> None:
     assert listing[0]["path"] == "/Users/me/code/shop"
     assert listing[0]["sessions"][0]["first_prompt"] == "Build cart"
 
-    item = cc.ingest_claude_code("-Users-me-code-shop")
+    assert listing[0]["dir"] == ".claude/-Users-me-code-shop"
+    assert listing[0]["profile"] == "default"
+
+    item = cc.ingest_claude_code(listing[0]["dir"])
     assert "USER: Build cart" in item.text
     assert item.meta["cwd"] == "/Users/me/code/shop"
+    # Older clients send the bare project dir: it means ~/.claude.
+    assert cc.ingest_claude_code("-Users-me-code-shop").meta["profile"] == "default"
 
-    with pytest.raises(IngestError):
-        cc.ingest_claude_code("../../etc")
+    for bad in ("../../etc", ".claude/../../etc", "/etc/x", ".nope/-Users-me-code-shop"):
+        with pytest.raises(IngestError):
+            cc.ingest_claude_code(bad)
+
+
+def test_claude_code_lists_every_profile(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    def session(config: Path, project: str, prompt: str) -> None:
+        d = config / "projects" / project
+        d.mkdir(parents=True)
+        (d / "s.jsonl").write_text(
+            "\n".join(_jsonl({"type": "user", "cwd": "/x", "message": {"content": prompt}}))
+        )
+
+    session(home / ".claude", "-a", "default work")
+    session(home / ".claude-work", "-b", "work account")
+    session(home / "elsewhere" / "claude-cfg", "-c", "env profile")
+    (home / ".claude-empty").mkdir()  # no projects/: not a profile
+    outside = tmp_path_factory.mktemp("outside")
+    session(outside, "-d", "outside home")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "elsewhere" / "claude-cfg"))
+
+    listing = {p["dir"]: p["profile"] for p in cc.list_claude_code_projects()}
+    assert listing == {
+        ".claude/-a": "default",
+        ".claude-work/-b": "work",
+        "elsewhere/claude-cfg/-c": "claude-cfg",
+    }
+    assert "work account" in cc.ingest_claude_code(".claude-work/-b").text
+    assert "env profile" in cc.ingest_claude_code("elsewhere/claude-cfg/-c").text
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(outside))  # outside $HOME: ignored
+    assert all(not p["dir"].startswith(str(outside)) for p in cc.list_claude_code_projects())
 
 
 # ------------------------------------------------------------------ folder

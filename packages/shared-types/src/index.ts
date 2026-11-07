@@ -538,8 +538,12 @@ export interface ClaudeCodeSession {
 
 /** One entry of GET /api/claude-code/projects (~/.claude/projects/*). */
 export interface ClaudeCodeProject {
-  /** Directory name under ~/.claude/projects — pass back as `project_dir`. */
+  /** "<config dir>/<project dir>", e.g. ".claude-work/-Users-me-app" —
+   *  pass back as `project_dir`. */
   dir: string;
+  /** Claude Code profile (config dir) it came from: "default" for
+   *  ~/.claude, "work" for ~/.claude-work. */
+  profile: string;
   /** Working directory the sessions ran in. */
   path: string;
   name: string;

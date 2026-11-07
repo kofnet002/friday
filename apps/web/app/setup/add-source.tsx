@@ -382,6 +382,28 @@ function FolderTab({
   );
 }
 
+/** Projects grouped by Claude Code profile, keeping the API's
+ *  most-recent-first order within and across groups. */
+function groupByProfile(projects: ClaudeCodeProject[]): [string, ClaudeCodeProject[]][] {
+  const groups = new Map<string, ClaudeCodeProject[]>();
+  for (const p of projects) {
+    const list = groups.get(p.profile) ?? [];
+    list.push(p);
+    groups.set(p.profile, list);
+  }
+  return [...groups.entries()];
+}
+
+function projectOption(p: ClaudeCodeProject, withProfile = false) {
+  return (
+    <option key={p.dir} value={p.dir}>
+      {p.name} — {p.path}
+      {/* The closed select shows only the option, not its group. */}
+      {withProfile ? ` · ${p.profile}` : ''}
+    </option>
+  );
+}
+
 function ClaudeCodeTab({
   busy,
   onSubmit,
@@ -443,11 +465,12 @@ function ClaudeCodeTab({
   if (projects.length === 0) {
     return (
       <p className="text-xs text-neutral-500 dark:text-neutral-400">
-        No Claude Code sessions found under ~/.claude/projects.
+        No Claude Code sessions found under ~/.claude*/projects.
       </p>
     );
   }
 
+  const profiles = new Set(projects.map((p) => p.profile)).size;
   const sessions = current?.sessions ?? [];
   const allSelected = sessions.length > 0 && sessions.every((s) => selected.has(s.id));
   const chosen = sessions.filter((s) => selected.has(s.id)).map((s) => s.id);
@@ -456,11 +479,16 @@ function ClaudeCodeTab({
     <div className="flex flex-col gap-3">
       <FieldLabel label="Claude Code project">
         <Select value={dir} onChange={(e) => pickProject(e.target.value)}>
-          {projects.map((p) => (
-            <option key={p.dir} value={p.dir}>
-              {p.name} — {p.path}
-            </option>
-          ))}
+          {groupByProfile(projects).map(([profile, list]) =>
+            // One profile (the usual ~/.claude only): a flat list.
+            profiles > 1 ? (
+              <optgroup key={profile} label={`Profile: ${profile}`}>
+                {list.map((p) => projectOption(p, true))}
+              </optgroup>
+            ) : (
+              list.map((p) => projectOption(p))
+            ),
+          )}
         </Select>
       </FieldLabel>
 

@@ -1,5 +1,9 @@
 """Claude Code session transcripts (~/.claude/projects/<dir>/<session>.jsonl).
 
+Several Claude Code profiles can live side by side (one config dir per
+account via CLAUDE_CONFIG_DIR: ~/.claude, ~/.claude-work, …); every one
+with a projects/ folder is listed, labelled by profile.
+
 The transcript is where the *why* lives: what was asked, what was tried,
 what broke and how it got fixed. We keep the human prompts and Claude's
 prose, shrink every tool call to one line ("edited app/db.py", "ran pytest"),
@@ -10,6 +14,7 @@ almost none of the reasoning.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,8 +27,47 @@ MAX_TEXT_PER_MESSAGE = 12_000
 MAX_SESSION_CHARS = 200_000
 
 
-def claude_projects_root() -> Path:
-    return Path.home() / ".claude" / "projects"
+DEFAULT_CONFIG_DIR = ".claude"
+
+
+def claude_config_dirs() -> dict[str, Path]:
+    """Claude Code config dirs with a projects/ folder, keyed by their path
+    relative to $HOME (".claude", ".claude-work"). Covers ~/.claude* and
+    $CLAUDE_CONFIG_DIR; anything outside $HOME is ignored."""
+    home = Path.home().resolve()
+    candidates = sorted(home.glob(".claude*"))
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env:
+        candidates.append(Path(env).expanduser())
+    found: dict[str, Path] = {}
+    seen: set[Path] = set()
+    for c in candidates:
+        try:
+            real = c.resolve()
+        except OSError:
+            continue
+        if real in seen or home not in real.parents or not (real / "projects").is_dir():
+            continue
+        seen.add(real)
+        found[real.relative_to(home).as_posix()] = real
+    return found
+
+
+def profile_label(config_key: str) -> str:
+    """Profile label: .claude -> "default", .claude-work -> "work"."""
+    if config_key == DEFAULT_CONFIG_DIR:
+        return "default"
+    name = config_key.rsplit("/", 1)[-1]
+    return name.removeprefix(".claude-").removeprefix(".claude_").lstrip(".") or config_key
+
+
+def _split_key(project_key: str) -> tuple[str, str]:
+    """Split "<config dir>/<project dir>" into its two parts. A bare
+    project dir (older clients) means the default ~/.claude."""
+    if "/" in project_key:
+        config_key, project_dir = project_key.rsplit("/", 1)
+        return config_key, project_dir
+    return DEFAULT_CONFIG_DIR, project_key
 
 
 def _decode_dir(name: str) -> str:
@@ -57,9 +101,14 @@ def _session_cwd_and_summary(path: Path) -> tuple[str | None, str | None]:
 
 
 def list_claude_code_projects() -> list[dict[str, Any]]:
-    root = claude_projects_root()
-    if not root.is_dir():
-        return []
+    projects: list[dict[str, Any]] = []
+    for config_key, config_dir in claude_config_dirs().items():
+        projects.extend(_list_profile(config_key, config_dir / "projects"))
+    projects.sort(key=lambda p: p["modified_at"], reverse=True)
+    return projects
+
+
+def _list_profile(config_key: str, root: Path) -> list[dict[str, Any]]:
     projects: list[dict[str, Any]] = []
     for d in sorted(root.iterdir()):
         if not d.is_dir():
@@ -84,14 +133,14 @@ def list_claude_code_projects() -> list[dict[str, Any]]:
         path = cwd or _decode_dir(d.name)
         projects.append(
             {
-                "dir": d.name,
+                "dir": f"{config_key}/{d.name}",
+                "profile": profile_label(config_key),
                 "path": path,
                 "name": Path(path).name,
                 "sessions": rows,
                 "modified_at": rows[0]["modified_at"],
             }
         )
-    projects.sort(key=lambda p: p["modified_at"], reverse=True)
     return projects
 
 
@@ -201,10 +250,14 @@ def _keep_tail(text: str, limit: int) -> str:
     return text[:head] + "\n\n[… middle of session omitted …]\n\n" + text[-tail:]
 
 
-def ingest_claude_code(project_dir: str, session_ids: list[str] | None = None) -> Ingested:
-    root = claude_projects_root()
+def ingest_claude_code(project_key: str, session_ids: list[str] | None = None) -> Ingested:
+    config_key, project_dir = _split_key(project_key)
+    config_dir = claude_config_dirs().get(config_key)
+    if config_dir is None:
+        raise IngestError("unknown Claude Code profile")
+    root = (config_dir / "projects").resolve()
     base = (root / project_dir).resolve()
-    if base.parent != root.resolve() or not base.is_dir():
+    if base.parent != root or not base.is_dir():
         raise IngestError("unknown Claude Code project")
     files = sorted(base.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
     if session_ids:
@@ -239,7 +292,8 @@ def ingest_claude_code(project_dir: str, session_ids: list[str] | None = None) -
         title=f"Claude Code: {name} ({len(parts)} session{'s' if len(parts) != 1 else ''})",
         text=text,
         meta={
-            "dir": project_dir,
+            "dir": project_key,
+            "profile": profile_label(config_key),
             "cwd": cwd,
             "sessions": [f.stem for f in files],
             "truncated": truncated,
