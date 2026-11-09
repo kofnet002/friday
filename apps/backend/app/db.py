@@ -255,6 +255,66 @@ async def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
             return [dict(r) for r in await cursor.fetchall()]
 
 
+async def session_overview(limit: int = 20) -> list[dict[str, Any]]:
+    """Recent sessions with what they've used: answered questions, LLM spend
+    and last activity. Lightweight (no resume text) for the Setup list."""
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT s.session_id, s.job_title, s.company, s.interview_type,
+                   s.created_at,
+                   (s.resume_text IS NOT NULL AND length(s.resume_text) > 0) AS has_resume,
+                   COALESCE(q.qa_count, 0) AS qa_count,
+                   COALESCE(u.cost_usd, 0.0) AS cost_usd,
+                   MAX(s.created_at, COALESCE(q.last_at, 0), COALESCE(u.last_at, 0))
+                       AS last_active_at
+            FROM sessions s
+            LEFT JOIN (
+                SELECT session_id, COUNT(*) AS qa_count, MAX(created_at) AS last_at
+                FROM qa_history GROUP BY session_id
+            ) q ON q.session_id = s.session_id
+            LEFT JOIN (
+                SELECT session_id, SUM(cost_usd) AS cost_usd, MAX(created_at) AS last_at
+                FROM usage_log GROUP BY session_id
+            ) u ON u.session_id = s.session_id
+            ORDER BY last_active_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
+async def fork_session(source_id: str, new_id: str) -> bool:
+    """Start `new_id` with `source_id`'s setup: role, instructions, resume and
+    attached projects. Usage, history and budgets start from zero. False when
+    the source session doesn't exist."""
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO sessions (session_id, job_title, company, language,
+                                  extra_instructions, resume_text,
+                                  interview_type, default_provider, created_at)
+            SELECT ?, job_title, company, language, extra_instructions,
+                   resume_text, interview_type, default_provider, ?
+            FROM sessions WHERE session_id = ?
+            """,
+            (new_id, time.time(), source_id),
+        )
+        if cursor.rowcount == 0:
+            return False
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO session_projects (session_id, project_id)
+            SELECT ?, project_id FROM session_projects WHERE session_id = ?
+            """,
+            (new_id, source_id),
+        )
+        await db.commit()
+        return True
+
+
 async def latest_session() -> dict[str, Any] | None:
     rows = await list_sessions(limit=1)
     return rows[0] if rows else None

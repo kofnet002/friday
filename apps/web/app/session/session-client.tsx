@@ -53,6 +53,7 @@ import {
   fetchSessionUsage,
   getCodingLanguagePreference,
   getOrCreateSessionId,
+  onSessionIdChange,
   getProviderPreference,
   getQdModelPreference,
   patchSessionProvider,
@@ -66,7 +67,7 @@ import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
 
 import { SetupForm } from '../setup/setup-form';
-import { AnswerPanel, type AnswerStatus } from './answer-panel';
+import { AnswerPanel, AudioBudgetPill, type AnswerStatus, type AudioUsage } from './answer-panel';
 import {
   CodingPanel,
   type AgentSessionStats,
@@ -155,6 +156,8 @@ const RECENT_FINALS_JOIN = 8;
 
 export function SessionClient() {
   const [sessionId, setSessionIdState] = useState<string>('');
+  // Same id, readable from callbacks without re-subscribing.
+  const sessionIdRef = useRef('');
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
@@ -276,6 +279,11 @@ export function SessionClient() {
   const [history, setHistory] = useState<QAHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [usage, setUsage] = useState<SessionUsageSummary | null>(null);
+  // Audio minutes this session has used against its per-session cap. Seeded
+  // from /usage, then kept live by the transcribe socket's audio_usage.
+  const [audioUsage, setAudioUsage] = useState<AudioUsage | null>(null);
+  // stop() is declared further down; the transcribe handler reaches it here.
+  const stopRef = useRef<() => Promise<void>>(async () => {});
   const [desktopStatus, setDesktopStatus] = useState<FridayWindowStatus | null>(null);
   const [privacyMode, setPrivacyMode] = useState(false);
   const [desktopToast, setDesktopToast] = useState<string | null>(null);
@@ -343,6 +351,7 @@ export function SessionClient() {
   // On mount: resolve session_id and provider pref, then open the answer WS.
   useEffect(() => {
     const sid = getOrCreateSessionId();
+    sessionIdRef.current = sid;
     setSessionIdState(sid);
     setProvider(getProviderPreference());
     setCodingLanguage(getCodingLanguagePreference());
@@ -615,6 +624,12 @@ export function SessionClient() {
         apply({ status: 'error', error: msg.message });
         streamingIdRef.current = null;
       }
+      if (msg.type === 'limit_exceeded') {
+        // Token budget spent: the backend refused the question outright.
+        answerStartedAtRef.current = null;
+        apply({ status: 'error', error: msg.message });
+        streamingIdRef.current = null;
+      }
       if (msg.type === 'provider_changed') {
         // Backend auto-fell-back to a different provider mid-call (primary
         // returned 503 or similar). Show a small ephemeral toast so the
@@ -650,6 +665,22 @@ export function SessionClient() {
     if (msg.type === 'error') {
       setError(msg.message);
       setStatus('error');
+      return;
+    }
+    if (msg.type === 'audio_usage') {
+      setAudioUsage({ used: msg.used_minutes, limit: msg.limit_minutes });
+      return;
+    }
+    if (msg.type === 'limit_exceeded') {
+      // The backend drops audio from here on, so stop capturing instead of
+      // showing "Listening…" over a dead stream.
+      setAudioUsage({ used: msg.used_minutes, limit: msg.limit_minutes });
+      void stopRef.current().then(() => {
+        setError(
+          `${msg.message} Start a new session from Setup, or raise SESSION_AUDIO_MINUTE_LIMIT.`,
+        );
+        setStatus('error');
+      });
       return;
     }
     if (msg.type === 'transcript') {
@@ -1479,6 +1510,7 @@ export function SessionClient() {
     setStatus('idle');
     closeListenIfOpen();
   };
+  stopRef.current = stop;
 
   const pause = async () => {
     if (inElectron && window.friday) await window.friday.audio.pause();
@@ -1677,6 +1709,34 @@ export function SessionClient() {
     setCodingActive(true);
   };
 
+  // ─── session switching ──────────────────────────────────────────────────────
+  // Setup ("new session" or a pick from the sessions list) changes the current
+  // session id. Everything bound to the old id moves over: the sockets
+  // reconnect under the new id, live capture stops (its stream belongs to the
+  // old session), and per-session panels reset so nothing from the old
+  // session is shown as if it were the new one.
+  const switchSession = async (id: string) => {
+    if (!id || id === sessionIdRef.current) return;
+    if (status === 'recording' || status === 'paused') await stop();
+    if (codingActive) await toggleCodingMode();
+    cancelInFlight();
+    sessionIdRef.current = id;
+    answerRef.current?.switchSession(id);
+    codingWsRef.current?.switchSession(id);
+    setSessionIdState(id);
+    setUsage(null);
+    setAudioUsage(null);
+    setEntries([]);
+    setEntryIndex(-1);
+    setFinals([]);
+    setInterims(EMPTY_INTERIMS);
+    setError(null);
+    showFallbackToast(`Session ${id.slice(0, 8)}`);
+  };
+  const switchSessionRef = useRef(switchSession);
+  switchSessionRef.current = switchSession;
+  useEffect(() => onSessionIdChange((id) => void switchSessionRef.current(id)), []);
+
   const onCodingLanguageChange = (lang: CodingLanguage) => {
     setCodingLanguage(lang);
     setCodingLanguagePreference(lang);
@@ -1793,7 +1853,12 @@ export function SessionClient() {
   const refreshUsage = useCallback(async () => {
     if (!sessionId) return;
     const data = await fetchSessionUsage(sessionId);
-    if (data) setUsage(data);
+    if (data) {
+      setUsage(data);
+      if (data.audio_minutes_limit) {
+        setAudioUsage({ used: data.audio_minutes_used ?? 0, limit: data.audio_minutes_limit });
+      }
+    }
   }, [sessionId]);
 
   const exportSession = () => {
@@ -1969,6 +2034,7 @@ export function SessionClient() {
             onProviderChange={onProviderChange}
             qdModel={qdModel}
             onQdModelChange={onQdModelChange}
+            audioUsage={audioUsage}
             qdState={qdState}
             qdFallbackModel={qdFallbackModel}
             qdError={qdError}
@@ -2197,6 +2263,7 @@ export function SessionClient() {
               answerLatencyProvider={answerLatencyProvider}
               answerLatencyByProvider={answerLatencyByProvider}
               usage={usage}
+              audioUsage={audioUsage}
               sessionId={sessionId}
               activeSecondaryFeature={
                 activeFeature && SECONDARY_FEATURES.some((f) => f.key === activeFeature)
@@ -2759,6 +2826,7 @@ function OverflowMenu({
   answerLatencyProvider,
   answerLatencyByProvider,
   usage,
+  audioUsage,
   sessionId,
   activeSecondaryFeature,
   onSecondaryFeature,
@@ -2781,6 +2849,7 @@ function OverflowMenu({
   answerLatencyProvider: AnswerProvider | null;
   answerLatencyByProvider: Partial<Record<AnswerProvider, number>>;
   usage: SessionUsageSummary | null;
+  audioUsage: AudioUsage | null;
   sessionId: string;
   activeSecondaryFeature: FeatureKey | null;
   onSecondaryFeature: (key: FeatureKey) => void;
@@ -2876,6 +2945,12 @@ function OverflowMenu({
               <span className="text-neutral-600 dark:text-neutral-400">Cost</span>
               <CostPill usage={usage} />
             </div>
+            {audioUsage ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-neutral-600 dark:text-neutral-400">Audio</span>
+                <AudioBudgetPill usage={audioUsage} />
+              </div>
+            ) : null}
             {sessionId ? (
               <div className="flex items-center justify-between gap-2">
                 <span className="text-neutral-600 dark:text-neutral-400">Session</span>

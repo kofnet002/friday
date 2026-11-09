@@ -75,6 +75,21 @@ async def get_audio_seconds(session_id: str) -> float:
         return 0.0
 
 
+async def audio_minutes_by_session(session_ids: list[str]) -> dict[str, float]:
+    """Audio minutes used per session, in one Redis round trip."""
+    client = await get_redis()
+    if client is None or not session_ids:
+        return {}
+    raw = await cast(Awaitable[Any], client.mget([audio_key(s) for s in session_ids]))
+    out: dict[str, float] = {}
+    for sid, value in zip(session_ids, raw, strict=True):
+        try:
+            out[sid] = float(value) / 60.0 if value else 0.0
+        except (TypeError, ValueError):
+            out[sid] = 0.0
+    return out
+
+
 async def check_audio_budget(session_id: str | None) -> BudgetCheck:
     if not session_id:
         return BudgetCheck(True, None, 0.0, float(settings.session_audio_minute_limit))

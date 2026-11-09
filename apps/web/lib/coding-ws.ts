@@ -78,6 +78,33 @@ export class CodingWs {
     }, delay);
   }
 
+  /** Rebind to another session: reopen the socket under the new id right
+   *  away (if it was connected or reconnecting). */
+  switchSession(sessionId: string): void {
+    if (sessionId === this.sessionId) return;
+    this.sessionId = sessionId;
+    const active = this.ws !== null || this.reconnectTimer !== null;
+    if (this.closedByUser || !active) return;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const old = this.ws;
+    this.ws = null;
+    if (old) {
+      old.onclose = null;
+      old.onmessage = null;
+      old.onerror = null;
+      try {
+        old.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.reconnectAttempt = 0;
+    this.open();
+  }
+
   isOpen(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
   }

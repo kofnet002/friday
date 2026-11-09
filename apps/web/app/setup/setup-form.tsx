@@ -1,6 +1,6 @@
 'use client';
 
-import { Briefcase, FileText, FolderKanban, Sparkles, Upload } from 'lucide-react';
+import { Briefcase, FileText, FolderKanban, History, Sparkles, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, type ReactNode } from 'react';
 import type { AnswerProvider, InterviewType } from '@friday/shared-types';
@@ -12,7 +12,9 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   fetchContext,
   fetchLatestSession,
+  forkSession,
   getOrCreateSessionId,
+  onSessionIdChange,
   saveContext,
   setProviderPreference,
   setSessionId,
@@ -21,6 +23,7 @@ import {
 import { cn } from '@/lib/utils';
 
 import { ProjectsLibrary } from './projects-section';
+import { SessionsList } from './sessions-section';
 
 export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
   const router = useRouter();
@@ -40,22 +43,42 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
   >({ kind: 'idle' });
   const [saving, setSaving] = useState(false);
   const [hasPriorSession, setHasPriorSession] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  // One-line confirmation after starting or switching sessions.
+  const [notice, setNotice] = useState<string | null>(null);
+  const [sessionsRefresh, setSessionsRefresh] = useState(0);
+
+  // Fill the form from a saved session. An unsaved id keeps what's typed.
+  const loadSession = (id: string) => {
+    setResumeFile(null);
+    setResumeStatus({ kind: 'idle' });
+    fetchContext(id).then((ctx) => {
+      if (!ctx || !ctx.exists) return;
+      setJobTitle(ctx.job_title ?? '');
+      setCompany(ctx.company ?? '');
+      setLanguage(ctx.language ?? 'en');
+      setExtra(ctx.extra_instructions ?? '');
+      if (ctx.interview_type) setInterviewType(ctx.interview_type);
+      const p = ctx.default_provider;
+      if (p === 'gemini' || p === 'openai' || p === 'deepseek' || p === 'claude') {
+        setDefaultProvider(p);
+      }
+      if (ctx.resume_chars) setResumeStatus({ kind: 'ok', chars: ctx.resume_chars });
+    });
+  };
 
   useEffect(() => {
     const id = getOrCreateSessionId();
     setSid(id);
-    fetchContext(id).then((ctx) => {
-      if (!ctx || !ctx.exists) return;
-      if (ctx.job_title) setJobTitle(ctx.job_title);
-      if (ctx.company) setCompany(ctx.company);
-      if (ctx.language) setLanguage(ctx.language);
-      if (ctx.extra_instructions) setExtra(ctx.extra_instructions);
-      if (ctx.resume_chars) {
-        setResumeStatus({ kind: 'ok', chars: ctx.resume_chars });
-      }
-    });
+    loadSession(id);
     fetchLatestSession().then((latest) => {
       if (latest && latest.session_id !== id) setHasPriorSession(true);
+    });
+    // Follow switches made elsewhere (and our own, via setSessionId).
+    return onSessionIdChange((next) => {
+      setSid(next);
+      loadSession(next);
+      setSessionsRefresh((n) => n + 1);
     });
   }, []);
 
@@ -77,11 +100,24 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
     }
   };
 
-  const regenerateSession = () => {
-    const id = crypto.randomUUID();
+  // A new session keeps this one's setup (role, resume, projects) and starts
+  // fresh history, spend and audio budget. Nothing saved yet → plain new id.
+  const regenerateSession = async () => {
+    setSwitching(true);
+    const forked = sessionId ? await forkSession(sessionId) : null;
+    const id = forked ?? crypto.randomUUID();
     setSessionId(id);
-    setSid(id);
-    setResumeStatus({ kind: 'idle' });
+    setSwitching(false);
+    setNotice(
+      forked
+        ? `New session ${id.slice(0, 8)} started. Role, resume and projects carried over; history, spend and audio start from zero.`
+        : `New session ${id.slice(0, 8)}. Fill in the context and start it.`,
+    );
+  };
+
+  const switchToSession = (id: string) => {
+    setSessionId(id);
+    setNotice(`Switched to session ${id.slice(0, 8)}.`);
   };
 
   const handleResumeChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -211,6 +247,27 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
         <ProjectsLibrary sessionId={sessionId} />
       </Section>
 
+      <Section
+        icon={<History className="h-3.5 w-3.5" aria-hidden />}
+        title="Sessions"
+        description="Each session has its own history, spend and audio budget. Switch to reuse one, or start a new session below."
+      >
+        <SessionsList
+          sessionId={sessionId}
+          refreshKey={sessionsRefresh}
+          onSwitch={switchToSession}
+        />
+      </Section>
+
+      {notice ? (
+        <p
+          role="status"
+          className="rounded-md border border-emerald-400/50 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+        >
+          {notice}
+        </p>
+      ) : null}
+
       <div className="flex flex-col gap-3 border-t border-neutral-200 pt-5 sm:flex-row sm:items-center sm:justify-between dark:border-neutral-800">
         <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
           <span className="rounded-full bg-neutral-100 px-2 py-0.5 font-mono text-[11px] dark:bg-neutral-800">
@@ -218,10 +275,11 @@ export function SetupForm({ onComplete }: { onComplete?: () => void } = {}) {
           </span>
           <button
             type="button"
-            onClick={regenerateSession}
-            className="underline-offset-2 hover:text-neutral-800 hover:underline dark:hover:text-neutral-200"
+            onClick={() => void regenerateSession()}
+            disabled={switching}
+            className="underline-offset-2 hover:text-neutral-800 hover:underline disabled:opacity-50 dark:hover:text-neutral-200"
           >
-            new session
+            {switching ? 'starting…' : 'new session'}
           </button>
           {hasPriorSession ? (
             <button

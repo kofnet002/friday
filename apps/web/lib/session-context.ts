@@ -39,9 +39,28 @@ export function getOrCreateSessionId(): string {
   return id;
 }
 
+const SESSION_CHANGED_EVENT = 'friday:session-changed';
+
 export function setSessionId(id: string): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(SESSION_ID_KEY, id);
+  // The live session page (same window, e.g. Setup opened from the overlay)
+  // holds sockets bound to the old id; tell it to move over.
+  window.dispatchEvent(new CustomEvent<string>(SESSION_CHANGED_EVENT, { detail: id }));
+}
+
+/** Calls `cb` when the current session id changes, in this window or another. */
+export function onSessionIdChange(cb: (id: string) => void): () => void {
+  const local = (e: Event) => cb((e as CustomEvent<string>).detail);
+  const other = (e: StorageEvent) => {
+    if (e.key === SESSION_ID_KEY && e.newValue) cb(e.newValue);
+  };
+  window.addEventListener(SESSION_CHANGED_EVENT, local);
+  window.addEventListener('storage', other);
+  return () => {
+    window.removeEventListener(SESSION_CHANGED_EVENT, local);
+    window.removeEventListener('storage', other);
+  };
 }
 
 export function readSessionId(): string | null {
@@ -169,6 +188,9 @@ export interface SessionUsageSummary {
   total_calls: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  token_limit?: number;
+  audio_minutes_used?: number;
+  audio_minutes_limit?: number;
 }
 
 /**
@@ -224,5 +246,47 @@ export async function uploadResume(
     return { ok: true, chars: data.chars };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export interface SessionOverviewRow {
+  session_id: string;
+  job_title: string | null;
+  company: string | null;
+  interview_type: string | null;
+  created_at: number;
+  last_active_at: number;
+  has_resume: boolean;
+  qa_count: number;
+  cost_usd: number;
+  audio_minutes_used: number;
+}
+
+export interface SessionsOverview {
+  sessions: SessionOverviewRow[];
+  audio_minutes_limit: number;
+}
+
+export async function fetchSessionsOverview(limit = 20): Promise<SessionsOverview | null> {
+  try {
+    const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions/overview?limit=${limit}`);
+    if (!res.ok) return null;
+    return (await res.json()) as SessionsOverview;
+  } catch {
+    return null;
+  }
+}
+
+/** New session id carrying over `sessionId`'s role, resume and projects.
+ *  Null when that session was never saved (nothing to carry over). */
+export async function forkSession(sessionId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${BACKEND_HTTP_URL}/api/sessions/${sessionId}/fork`, {
+      method: 'POST',
+    });
+    if (!res.ok) return null;
+    return ((await res.json()) as { session_id: string }).session_id;
+  } catch {
+    return null;
   }
 }

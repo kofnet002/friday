@@ -48,6 +48,8 @@ async def fetch_context(session_id: str) -> dict[str, Any]:
         "extra_instructions": row.get("extra_instructions"),
         "resume_excerpt": (resume_text[:400] + "…") if resume_text and len(resume_text) > 400 else resume_text,
         "resume_chars": len(resume_text) if resume_text else 0,
+        "interview_type": row.get("interview_type"),
+        "default_provider": row.get("default_provider"),
     }
 
 
