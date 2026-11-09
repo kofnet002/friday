@@ -638,6 +638,11 @@ class QuestionDetector:
         # only so the GC can't collect it mid-await.
         self._state_notify_task = asyncio.create_task(self._on_state(state))
 
+    async def report_call_failed(self) -> None:
+        """A classifier call raised (bad key, provider outage). Used by the
+        Flux turn coordinator, which calls classify() itself."""
+        await self._notify_error("call_failed")
+
     async def _notify_error(self, reason: str) -> None:
         if self._on_error is None:
             return
@@ -741,7 +746,7 @@ class QuestionDetector:
                 model=model_snapshot,
                 error=str(exc),
             )
-            await self._notify_error("call_failed")
+            await self.report_call_failed()
             return
         log.info("question_detection.trigger", session_id=self.session_id, by=triggered_by)
         if not verdict.answerable or verdict.question is None:
@@ -799,14 +804,18 @@ class QuestionDetector:
         model = model_snapshot or self._effective_qd_model()
         if thread is None and use_thread:
             thread = await self.thread_context()
-        raw = await self._call_qd_llm(list(utterances), model, thread=thread)
-        verdict = normalize_classification(raw, model)
+        raw, served = await self._call_qd_llm_served(list(utterances), model, thread=thread)
+        # `served` differs from `model` when a Gemini quota error routed the
+        # call to the fallback model mid-flight; log and stamp the one that
+        # actually answered.
+        verdict = normalize_classification(raw, served)
         log.info(
             "question_detection.result",
             session_id=self.session_id,
             kind=verdict.kind,
             confidence=verdict.confidence,
-            model=model,
+            model=served,
+            picked=model if served != model else None,
             reasoning=verdict.reasoning,
             question=(verdict.question or "")[:120],
         )
@@ -976,7 +985,19 @@ class QuestionDetector:
         *,
         thread: ThreadContext | None = None,
     ) -> dict[str, Any]:
-        """Run QD against the snapshotted model.
+        """Run QD against the snapshotted model; the raw classifier JSON."""
+        raw, _served = await self._call_qd_llm_served(utterances, model_snapshot, thread=thread)
+        return raw
+
+    async def _call_qd_llm_served(
+        self,
+        utterances: list[Utterance],
+        model_snapshot: str,
+        *,
+        thread: ThreadContext | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Run QD against the snapshotted model. Returns the raw classifier
+        JSON and the model that actually served the call.
 
         Routing rules (resolved at the top of _run, not here, so concurrent
         set_qd_model can't change the model mid-call):
@@ -1000,7 +1021,7 @@ class QuestionDetector:
             try:
                 result = await self._call_gemini_with_usage(prompt, probe_model)
                 self._clear_fallback("probe_recovered")
-                return result
+                return result, probe_model
             except Exception as exc:  # noqa: BLE001
                 if _is_quota_error(exc):
                     # Still rate-limited. Reset the counter so we wait
@@ -1023,21 +1044,21 @@ class QuestionDetector:
             if self._fallback_active and model_snapshot == settings.question_detection_fallback_model:
                 # Counts toward the Gemini-recovery probe budget.
                 self._fallback_call_count += 1
-            return await self._call_claude_qd_with_usage(prompt, model_snapshot)
+            return await self._call_claude_qd_with_usage(prompt, model_snapshot), model_snapshot
         if _is_openai_qd_model(model_snapshot):
-            return await self._call_openai_qd_with_usage(prompt, model_snapshot)
+            return await self._call_openai_qd_with_usage(prompt, model_snapshot), model_snapshot
         if self._client is None:
             # No Gemini configured. _run guarantees some client exists, so
             # route through the fallback model and keep fallback active so
             # future calls skip Gemini.
             self._activate_fallback("no_gemini_key")
-            return await self._call_fallback_qd(prompt)
+            return await self._call_fallback_qd(prompt), settings.question_detection_fallback_model
         try:
-            return await self._call_gemini_with_usage(prompt, model_snapshot)
+            return await self._call_gemini_with_usage(prompt, model_snapshot), model_snapshot
         except Exception as exc:  # noqa: BLE001
             if _is_quota_error(exc) and self._fallback_ready():
                 self._activate_fallback("quota")
-                return await self._call_fallback_qd(prompt)
+                return await self._call_fallback_qd(prompt), settings.question_detection_fallback_model
             raise
 
     def _fallback_ready(self) -> bool:

@@ -683,6 +683,8 @@ export function SessionClient() {
       return;
     }
     if (msg.type === 'question_detected') {
+      // A detection just succeeded, so an earlier failed call no longer applies.
+      setQdError(null);
       // Confirms the speculative answer already streaming for this question:
       // reveal it (usually with tokens already in) instead of asking again.
       if (msg.candidate_id && revealPending(msg.candidate_id, msg.question)) {

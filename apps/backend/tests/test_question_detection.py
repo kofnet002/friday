@@ -791,3 +791,28 @@ async def test_claude_pick_survives_gemini_fallback(monkeypatch: pytest.MonkeyPa
     assert det._effective_qd_model() == "claude-opus-5-5"
     # ...and it never wastes a probe on Gemini.
     assert det._should_probe_gemini() is False
+
+
+async def test_classify_reports_the_model_that_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Gemini 429 mid-call routes to the fallback; the verdict (and the
+    result log) must name the fallback model, not the Gemini pick."""
+    det, _rec = _make_detector(monkeypatch)
+
+    async def gemini_quota_error(_p: str, _m: str) -> dict[str, Any]:
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: free-tier quota")
+
+    async def openai_qd(_p: str, _m: str) -> dict[str, Any]:
+        return {"kind": "new_question", "extracted_question": "Why Postgres?", "confidence": 0.9}
+
+    monkeypatch.setattr(det, "_call_gemini_with_usage", gemini_quota_error)
+    monkeypatch.setattr(det, "_call_openai_qd_with_usage", openai_qd)
+    det._openai_client = object()  # type: ignore[assignment]
+
+    verdict = await det.classify(
+        [Utterance(text="Why Postgres?", speaker=None)],
+        model_snapshot="gemini-2.5-flash-lite",
+        use_thread=False,
+    )
+    assert verdict.question == "Why Postgres?"
+    assert verdict.model == "gpt-4o-mini"
+

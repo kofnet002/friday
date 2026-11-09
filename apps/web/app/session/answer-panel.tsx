@@ -751,7 +751,9 @@ function QdErrorBadge({ reason }: { reason: string }) {
   const label =
     reason === 'both_providers_unavailable'
       ? 'QD paused — pick another model'
-      : `QD paused — ${reason}`;
+      : reason === 'call_failed'
+        ? 'QD model failed — check its key or pick another'
+        : `QD paused — ${reason}`;
   return (
     <span
       className="inline-flex items-center rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-red-700 dark:text-red-400"

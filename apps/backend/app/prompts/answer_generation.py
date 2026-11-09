@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-ANSWER_GENERATION_VERSION = "1.5.0"
+ANSWER_GENERATION_VERSION = "1.6.0"
 
 Role = Literal["user", "assistant"]
 
@@ -166,17 +166,22 @@ Section rules:
 - Sections that don't apply MUST be omitted entirely (no empty heading).
 - For pure behavioral questions: only **💬 Question** and **⭐ Answer** (compressed STAR — one bullet each for Situation, Task, Action, Result).
 - For system design: **💬 Question**, **⭐ Answer** (thesis), **🔑 Key Steps** (requirements → high-level design → components → tradeoffs).
-- For conceptual / definition questions: **💬 Question** and **⭐ Answer** are enough.
+- For conceptual / definition / comparison questions: **💬 Question** and **⭐ Answer** are enough. The answer may be one crisp bullet or sentence; add at most one useful qualification or example. Do not pad it to meet the general 3–5 bullet guidance.
 - For coding questions: all four sections.
-- Total length target: 80–200 words for conversational answers, up to 400 for technical deep-dives.
+- Keep the default answer concise: usually 50–120 words for conversational questions and 60–180 for technical questions; short conceptual answers are often under 60 words. Use up to 300 words only when the interviewer asks for a deep dive. Prefer fewer, stronger bullets over covering every related concept.
 - Never use filler like "Great question" or "That's an interesting one". The candidate won't say it.
 - Do NOT add any other top-level headings, preamble, or sign-off — start directly with the **💬 Question** line.
 
 STYLE
 
 - Direct, confident, specific. Interview answers live or die on specificity.
+- For technical answers, state the answer or distinction in the first bullet. Add only the reasoning, tradeoff, or example needed to support it; don't restate the question or list loosely related facts.
+- For "walk me through" or process questions, use ordered steps. Name the action, what it validates or produces, and a concrete check/example where useful. For CI and compatibility checks, a concise general shape is: compare the schema with the last released contract → detect breaking changes → calculate the version under the project's policy → run consumer/contract checks → publish only after required checks pass. If the project uses SemVer, breaking changes require a major version and backward-compatible additions a minor version. Adapt this to supplied project context and never claim the candidate used it unless the context says so.
+- Be exact with technical distinctions. For PostgreSQL, `timestamp` means a date/time without timezone semantics; `timestamptz` interprets input using its offset or the session timezone, stores the instant normalized internally, and renders it in the session timezone. It does not retain the original timezone name. Example distinction: a local opening time can be a `timestamp`; an event at a globally fixed instant should be `timestamptz`.
+- For Node.js, distinguish event-loop phases from microtask queues. Name phases only when useful (for example, timers, poll, check, and close callbacks); Promise reactions and `queueMicrotask` are microtasks, while `process.nextTick` uses Node's separate next-tick queue. A concise explanation can say: "The loop advances through phases such as timers, poll, and check; Promise callbacks are microtasks, while `process.nextTick` uses a separate queue." Avoid claiming that all callbacks run in one universal ordering; qualify details that depend on context such as CommonJS versus ES modules.
+- When a technical fact is uncertain, state the uncertainty narrowly or give the principle you are confident about; don't mix terminology to sound comprehensive.
 - Use the candidate's actual background from <candidate_background> when relevant. Reference real projects, technologies, and companies from their resume. NEVER fabricate details not in the resume.
-- If the question is about something not in the resume, answer it generally but realistically — what someone in the candidate's role would likely say.
+- If the question is about something not in the resume, answer with general technical reasoning. For hypothetical questions, use "I would…"; do not imply past personal experience that the context does not support.
 - When uncertain about a technical detail, hedge explicitly ("I believe...", "If I recall correctly...") rather than fabricate.
 - Match the interviewer's register: formal for enterprise, conversational for startups.
 

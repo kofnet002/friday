@@ -32,16 +32,23 @@ class FakeDetector:
         self.remembered: list[str] = []
         self._last_question: str | None = None
         self._last_question_at = 0.0
+        self.fail: Exception | None = None
+        self.failures_reported = 0
 
     async def classify(self, utterances: Any, **_: Any) -> Classification:
         self.calls.append(list(utterances))
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.fail is not None:
+            raise self.fail
         latest = " ".join(u.text for u in utterances if u.latest)
         return self.verdicts.get(latest, _verdict("none", None))
 
     def _is_recent_duplicate(self, q: str) -> bool:
         return bool(self.remembered) and self.remembered[-1] == q
+
+    async def report_call_failed(self) -> None:
+        self.failures_reported += 1
 
     def remember_question(self, q: str) -> None:
         self.remembered.append(q)
@@ -153,6 +160,17 @@ async def test_end_of_turn_during_slow_judgement_delivers_directly() -> None:
     [raw] = h.of("question_candidate")  # only the raw one; verdict came after EOT
     [done] = h.of("question_detected")
     assert done["candidate_id"] == raw["candidate_id"]
+
+
+async def test_classifier_failure_is_reported_to_ui() -> None:
+    det = FakeDetector({})
+    det.fail = RuntimeError("Error code: 401 - Incorrect API key provided")
+    h = Harness(det)
+    await h.coord.on_interviewer(_ev("EndOfTurn", Q))
+    await _settle()
+    # The failure reaches the client as qd_error instead of a silent drop.
+    assert det.failures_reported == 1
+    assert h.of("question_detected") == []
 
 
 async def test_not_a_question_emits_nothing() -> None:
