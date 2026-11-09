@@ -70,6 +70,18 @@ export type WsServerMessage =
    *  duplicate of the most recent fire (within the cooldown). Lets the
    *  UI show a subtle "heard it" pulse without spawning a new entry. */
   | { type: 'qd_dedup'; question: string }
+  /** The session's audio budget so far: sent on `start` and about once a
+   *  second while audio flows. */
+  | { type: 'audio_usage'; used_minutes: number; limit_minutes: number }
+  /** The session's audio budget is spent; the backend drops audio from here
+   *  on. Also sent on `start` when the session was already over. */
+  | {
+      type: 'limit_exceeded';
+      kind: 'audio';
+      message: string;
+      used_minutes: number;
+      limit_minutes: number;
+    }
   | { type: 'error'; message: string };
 
 export interface TranscriptEvent {
@@ -244,6 +256,8 @@ export interface SessionContextResponse {
   extra_instructions?: string | null;
   resume_excerpt?: string | null;
   resume_chars?: number;
+  interview_type?: InterviewType | null;
+  default_provider?: string | null;
 }
 
 export type InterviewType = 'technical' | 'behavioral' | 'system_design' | 'mixed';

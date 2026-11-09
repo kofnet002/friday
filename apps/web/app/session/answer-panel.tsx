@@ -44,6 +44,8 @@ export interface AnswerPanelProps {
    *  detection fires more often. */
   qdModel: QdModel;
   onQdModelChange: (m: QdModel) => void;
+  /** Audio minutes used against this session's cap; null until known. */
+  audioUsage?: AudioUsage | null;
   /** Lifecycle state of the per-session question detector. Drives the
    *  status dot next to the connection pill. */
   qdState: QdState;
@@ -105,6 +107,7 @@ export function AnswerPanel({
   onProviderChange,
   qdModel,
   onQdModelChange,
+  audioUsage = null,
   qdState,
   qdFallbackModel,
   qdError,
@@ -245,6 +248,7 @@ export function AnswerPanel({
             {connected ? 'live' : 'offline'}
           </span>
           <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
+          {audioUsage ? <AudioBudgetPill usage={audioUsage} /> : null}
           <div className="ml-auto flex items-center gap-1.5">
             <Select
               value={qdModel}
@@ -320,7 +324,14 @@ export function AnswerPanel({
           which meant the mic went live the moment the user peeked at the
           panel. Now starting is an explicit act. Hidden once live so the
           panel reads the same as before mid-session. */}
-      {!listening ? <StartListeningCta starting={starting} onStart={onStart} /> : null}
+      {!listening ? (
+        <StartListeningCta
+          starting={starting}
+          onStart={onStart}
+          audioSpent={!!audioUsage && audioUsage.used >= audioUsage.limit}
+          audioLimit={audioUsage?.limit ?? 0}
+        />
+      ) : null}
 
       {/* Error banner hidden in privacyMode — error text could itself leak
           context (provider names, model names, quota details) to a viewer. */}
@@ -687,7 +698,36 @@ function MenuItem({
   );
 }
 
-function StartListeningCta({ starting, onStart }: { starting: boolean; onStart: () => void }) {
+function StartListeningCta({
+  starting,
+  onStart,
+  audioSpent,
+  audioLimit,
+}: {
+  starting: boolean;
+  onStart: () => void;
+  /** The session's audio budget is used up; starting would capture nothing. */
+  audioSpent: boolean;
+  audioLimit: number;
+}) {
+  if (audioSpent) {
+    return (
+      <div
+        role="alert"
+        className="flex items-center gap-3 rounded-xl border border-red-400/50 bg-red-50 px-3 py-2.5 dark:border-red-500/30 dark:bg-red-950/40"
+      >
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-red-700 dark:text-red-300">
+            Audio limit reached for this session
+          </p>
+          <p className="mt-0.5 text-xs text-red-700/80 dark:text-red-300/80">
+            All {Math.round(audioLimit)} minutes are used, so nothing more can be transcribed. Start
+            a new session from Setup, or raise SESSION_AUDIO_MINUTE_LIMIT.
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-3 rounded-xl border border-neutral-200/80 bg-white/50 px-3 py-2.5 dark:border-neutral-800 dark:bg-neutral-900/40">
       <div className="min-w-0 flex-1">
@@ -744,6 +784,44 @@ function QdFallbackBadge({ model }: { model: string }) {
   );
 }
 
+export interface AudioUsage {
+  used: number; // minutes
+  limit: number; // minutes
+}
+
+/** Session audio used vs the per-session cap, as a small bar. Turns amber
+ *  past 75% and red past 90%, so the cap never arrives as a surprise. */
+export function AudioBudgetPill({ usage }: { usage: AudioUsage }) {
+  const ratio = usage.limit > 0 ? Math.min(usage.used / usage.limit, 1) : 0;
+  const left = Math.max(usage.limit - usage.used, 0);
+  const tone =
+    ratio >= 0.9
+      ? 'bg-red-500/15 text-red-700 dark:text-red-400'
+      : ratio >= 0.75
+        ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+        : 'bg-black/5 text-neutral-600 dark:bg-white/5 dark:text-neutral-300';
+  const bar = ratio >= 0.9 ? 'bg-red-500' : ratio >= 0.75 ? 'bg-amber-500' : 'bg-emerald-500';
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 font-mono text-[10px]',
+        tone,
+      )}
+      title={`Session audio: ${usage.used.toFixed(1)} of ${usage.limit.toFixed(0)} min used, ${left.toFixed(1)} min left. Each session has its own budget (SESSION_AUDIO_MINUTE_LIMIT); start a new session from Setup for a fresh one.`}
+      role="meter"
+      aria-label="Session audio used"
+      aria-valuemin={0}
+      aria-valuemax={usage.limit}
+      aria-valuenow={Math.min(usage.used, usage.limit)}
+    >
+      <span className="h-1 w-10 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+        <span className={cn('block h-full', bar)} style={{ width: `${ratio * 100}%` }} />
+      </span>
+      {Math.floor(usage.used)}/{Math.round(usage.limit)} min
+    </span>
+  );
+}
+
 function QdErrorBadge({ reason }: { reason: string }) {
   // Both providers unavailable — QD has effectively stopped. Surfaced as
   // critical so the user can take action (pick a different model, wait
@@ -751,7 +829,9 @@ function QdErrorBadge({ reason }: { reason: string }) {
   const label =
     reason === 'both_providers_unavailable'
       ? 'QD paused — pick another model'
-      : `QD paused — ${reason}`;
+      : reason === 'call_failed'
+        ? 'QD model failed — check its key or pick another'
+        : `QD paused — ${reason}`;
   return (
     <span
       className="inline-flex items-center rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-red-700 dark:text-red-400"

@@ -216,6 +216,30 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
     audio_frame_count = 0
     audio_budget_blocked = False
 
+    async def report_audio_budget() -> bool:
+        """Send the session's audio usage (or the limit hit) to the client.
+        Returns False once the budget is spent."""
+        check = await check_audio_budget(effective_session_id)
+        if not check.ok:
+            await send_json_safe(
+                {
+                    "type": "limit_exceeded",
+                    "kind": "audio",
+                    "message": check.message,
+                    "used_minutes": check.used,
+                    "limit_minutes": check.limit,
+                }
+            )
+            return False
+        await send_json_safe(
+            {
+                "type": "audio_usage",
+                "used_minutes": check.used,
+                "limit_minutes": check.limit,
+            }
+        )
+        return True
+
     try:
         while True:
             message = await websocket.receive()
@@ -241,18 +265,8 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
                         effective_session_id,
                         AUDIO_FRAME_SECONDS * AUDIO_TRACK_FLUSH_EVERY,
                     )
-                    check = await check_audio_budget(effective_session_id)
-                    if not check.ok:
+                    if not await report_audio_budget():
                         audio_budget_blocked = True
-                        await send_json_safe(
-                            {
-                                "type": "limit_exceeded",
-                                "kind": "audio",
-                                "message": check.message,
-                                "used_minutes": check.used,
-                                "limit_minutes": check.limit,
-                            }
-                        )
                 continue
             if "text" in message and message["text"] is not None:
                 try:
@@ -269,6 +283,10 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
                     if nova is not None:
                         await nova.stop_keepalive()
                     log.info("ws.start", session_id=effective_session_id, tagged_audio=tagged_audio)
+                    # Tell the client up front, so a session that is already
+                    # out of audio fails loudly instead of "listening" forever.
+                    if not await report_audio_budget():
+                        audio_budget_blocked = True
                 elif kind == "pause":
                     paused = True
                     await suspend_streams()

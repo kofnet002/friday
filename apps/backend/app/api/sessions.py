@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,15 +12,19 @@ from pydantic import BaseModel
 
 from app.db import (
     append_qa,
+    fork_session,
     get_session,
     latest_session,
     list_coding_solutions,
     list_qa,
     list_sessions,
+    session_overview,
     session_usage_summary,
     upsert_session,
 )
 from app.redis_client import recent_transcript_entries
+from app.services.limits import audio_minutes_by_session, check_audio_budget
+from app.settings import settings
 
 router = APIRouter(prefix="/api/sessions")
 
@@ -73,6 +78,30 @@ async def get_sessions(limit: int = 20) -> dict[str, Any]:
     return {"sessions": await list_sessions(limit=min(max(1, limit), 100))}
 
 
+@router.get("/overview")
+async def get_sessions_overview(limit: int = 20) -> dict[str, Any]:
+    """Recent sessions with their usage, for the Setup sessions list."""
+    rows = await session_overview(limit=min(max(1, limit), 100))
+    audio = await audio_minutes_by_session([r["session_id"] for r in rows])
+    for r in rows:
+        r["has_resume"] = bool(r["has_resume"])
+        r["audio_minutes_used"] = round(audio.get(r["session_id"], 0.0), 2)
+    return {
+        "sessions": rows,
+        "audio_minutes_limit": float(settings.session_audio_minute_limit),
+    }
+
+
+@router.post("/{session_id}/fork")
+async def fork(session_id: str) -> dict[str, Any]:
+    """New session that keeps this one's setup (role, resume, projects) with
+    fresh history and budgets."""
+    new_id = str(uuid.uuid4())
+    if not await fork_session(session_id, new_id):
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"session_id": new_id}
+
+
 @router.get("/latest")
 async def get_latest() -> dict[str, Any]:
     return {"session": await latest_session()}
@@ -81,12 +110,14 @@ async def get_latest() -> dict[str, Any]:
 @router.get("/{session_id}/usage")
 async def get_session_usage(session_id: str) -> dict[str, Any]:
     """Aggregate LLM spend for a session — used by the descriptive cost pill
-    in the floating bar. Cheap query (single GROUP BY against usage_log)."""
+    in the floating bar. Cheap query (single GROUP BY against usage_log),
+    plus the session's audio budget (one Redis GET)."""
     rows = await session_usage_summary(session_id)
     total_cost = sum((r.get("cost_usd") or 0.0) for r in rows)
     total_calls = sum(int(r.get("calls") or 0) for r in rows)
     total_input = sum(int(r.get("input_tokens") or 0) for r in rows)
     total_output = sum(int(r.get("output_tokens") or 0) for r in rows)
+    audio = await check_audio_budget(session_id)
     return {
         "session_id": session_id,
         "rows": rows,
@@ -94,6 +125,9 @@ async def get_session_usage(session_id: str) -> dict[str, Any]:
         "total_calls": total_calls,
         "total_input_tokens": total_input,
         "total_output_tokens": total_output,
+        "token_limit": settings.session_token_limit,
+        "audio_minutes_used": audio.used,
+        "audio_minutes_limit": audio.limit,
     }
 
 

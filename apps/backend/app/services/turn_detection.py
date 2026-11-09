@@ -529,6 +529,9 @@ class TurnCoordinator:
             return await self._detector.classify(utterances_from_entries(rows, latest_from=latest))
         except Exception as exc:  # noqa: BLE001
             log.error("turn.judge_failed", session_id=self.session_id, error=str(exc))
+            # Same signal as the timer path: without it the UI shows the raw
+            # candidate, then retracts it with no hint that the model failed.
+            await self._detector.report_call_failed()
             return None
 
     def _is_duplicate(self, question: str) -> bool:
