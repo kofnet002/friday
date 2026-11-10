@@ -16,7 +16,10 @@ const fs = require('node:fs');
 
 const { AudioSupervisor } = require('./audio');
 const { CodingCapture } = require('./coding');
+const bundledServices = require('./services');
 const stealth = require('./stealth');
+const { autoUpdater } = require('electron-updater');
+const { setupAutoUpdates } = require('./updater');
 
 const DEV_URL = process.env.FRIDAY_WEB_URL || 'http://127.0.0.1:3333';
 const OPACITY_STEP = 0.1;
@@ -36,11 +39,13 @@ const DEFAULT_WINDOW_STATE = Object.freeze({
     dockHidden: true,
     visibleOnAllWorkspaces: true,
     hideWindowControls: true,
+    stealthEnabled: DEFAULT_STEALTH_ENABLED,
     // Opt-in: when stealth enables, snap the cursor to a screen corner
     // so it doesn't sit over the Friday window during a screen-share.
     // Off by default because moving the cursor unprompted is disorienting
     // — flip it on in Settings if the gain is worth the surprise.
     moveCursorOnStealth: false,
+    codingDisplayId: null,
   },
 });
 
@@ -65,6 +70,11 @@ let windowState = null;
 let Store = null;
 let stealthEnabled = DEFAULT_STEALTH_ENABLED;
 let stealthStatus = stealth.statusShape({ enabled: DEFAULT_STEALTH_ENABLED });
+let bundledRedisAvailable = null;
+let finishingServiceShutdown = false;
+let checkForUpdates = async () => null;
+let updatesInitialized = false;
+let screenPermissionReminderShown = false;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -162,6 +172,7 @@ function buildStatusPayload() {
     dockHidden: getDockHidden(),
     accessoryApp: getAccessoryActive(),
     stealth: stealthStatus,
+    redisAvailable: bundledRedisAvailable,
   };
 }
 
@@ -300,9 +311,45 @@ function registerGlobalHotkeys() {
     ['CommandOrControl+Shift+-', () => adjustOpacity(-OPACITY_STEP)],
     ['CommandOrControl+Shift+=', () => adjustOpacity(OPACITY_STEP)],
     ['CommandOrControl+Shift+0', resetWindowState],
+    [
+      'CommandOrControl+Shift+S',
+      () => {
+        if (coding.scanning) coding.finishGuidedScan();
+        else coding.startGuidedScan(getWindowState().preferences.codingDisplayId);
+      },
+    ],
   ];
   for (const [accelerator, handler] of bindings) {
     globalShortcut.register(accelerator, handler);
+  }
+}
+
+async function startPackagedServices() {
+  try {
+    const result = await bundledServices.startBundledServices({
+      resourcesPath: process.resourcesPath,
+      userDataPath: app.getPath('userData'),
+      logsPath: app.getPath('logs'),
+      electronPath: process.execPath,
+      onUnexpectedExit: async (message) => {
+        await dialog.showMessageBox({ type: 'error', title: 'Friday stopped working', message });
+        app.quit();
+      },
+    });
+    bundledRedisAvailable = result.redisAvailable;
+    return true;
+  } catch (error) {
+    if (error instanceof bundledServices.ServicesStoppedError) return false;
+    await bundledServices.stopBundledServices();
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'Friday could not start',
+      message: error instanceof Error ? error.message : String(error),
+      detail:
+        'Check that the web and backend services are not already running, then relaunch Friday.',
+    });
+    app.quit();
+    return false;
   }
 }
 
@@ -325,6 +372,12 @@ function createTray() {
         },
       },
       {
+        label: 'Check for Updates…',
+        click: () => {
+          void checkForUpdates();
+        },
+      },
+      {
         label: 'Quit',
         click: () => app.quit(),
       },
@@ -343,6 +396,7 @@ audio.on('exit', (info) => broadcast('audio:exit', info));
 
 coding.on('frame_processed', (info) => broadcast('coding:frame_processed', info));
 coding.on('extraction_result', (payload) => broadcast('coding:extraction_result', payload));
+coding.on('scan_state', (payload) => broadcast('coding:scan_state', payload));
 coding.on('error', (msg) => broadcast('coding:error', msg));
 coding.on('log', (msg) => broadcast('coding:log', msg));
 
@@ -358,21 +412,20 @@ async function ensureMicrophoneAccess() {
   }
 }
 
-async function ensurePermissions() {
-  // Microphone (separate TCC bucket from screen recording)
-  await ensureMicrophoneAccess();
-  // Screen capture access status (covers system audio via ScreenCaptureKit)
+async function remindAboutScreenPermissionOnCaptureStart() {
+  if (process.platform !== 'darwin' || screenPermissionReminderShown) return;
   const screenStatus = systemPreferences.getMediaAccessStatus('screen');
-  if (screenStatus !== 'granted') {
-    dialog.showMessageBox({
-      type: 'info',
-      title: 'Screen & System Audio Permission',
-      message: 'Friday needs Screen & System Audio Recording permission to transcribe app audio.',
-      detail:
-        'Open System Settings → Privacy & Security → Screen & System Audio Recording, then enable Friday. The first audio:start call will also trigger the system prompt.',
-      buttons: ['OK'],
-    });
-  }
+  if (screenStatus === 'granted') return;
+
+  screenPermissionReminderShown = true;
+  await dialog.showMessageBox({
+    type: 'info',
+    title: 'Screen & System Audio Permission',
+    message: 'Friday needs Screen & System Audio Recording permission to transcribe app audio.',
+    detail:
+      'Open System Settings → Privacy & Security → Screen & System Audio Recording, then enable Friday. Friday will now try to start audio capture.',
+    buttons: ['Continue'],
+  });
 }
 
 function createWindow() {
@@ -430,10 +483,15 @@ function createWindow() {
   mainWindow.webContents.on('did-finish-load', () => {
     applyStealthProtection();
     publishStatus();
+    if (!updatesInitialized) {
+      updatesInitialized = true;
+      ({ checkForUpdates } = setupAutoUpdates({ app, autoUpdater, dialog }));
+    }
   });
 }
 
 ipcMain.handle('audio:start', async (_e, opts) => {
+  await remindAboutScreenPermissionOnCaptureStart();
   const startOpts = { mic: Boolean(opts && opts.mic) };
   if (startOpts.mic && !(await ensureMicrophoneAccess())) {
     startOpts.mic = false;
@@ -469,10 +527,33 @@ ipcMain.handle('coding:set_provider', (_evt, provider) => {
   coding.setProvider(provider);
   return { ok: true, provider: coding.provider };
 });
+ipcMain.handle('coding:scan:start', (_evt, displayId) =>
+  coding.startGuidedScan(displayId || getWindowState().preferences.codingDisplayId),
+);
+ipcMain.handle('coding:scan:finish', () => coding.finishGuidedScan());
+ipcMain.handle('coding:scan:cancel', () => coding.cancelGuidedScan());
+ipcMain.handle('coding:scan:displays', () => coding.listDisplays());
+ipcMain.handle('coding:scan:display', (_evt, displayId) => {
+  if (windowState) windowState.set('preferences.codingDisplayId', displayId || null);
+  return { ok: true };
+});
+ipcMain.handle(
+  'coding:scan:get_display',
+  () => getWindowState().preferences.codingDisplayId || null,
+);
 ipcMain.handle('window:status', () => buildStatusPayload());
 ipcMain.handle('window:toggle_visibility', () => {
   toggleWindowVisibility();
   return buildStatusPayload();
+});
+ipcMain.handle('app:quit', () => {
+  app.quit();
+  return { ok: true };
+});
+ipcMain.handle('app:restart', () => {
+  app.relaunch();
+  app.quit();
+  return { ok: true };
 });
 ipcMain.handle('window:center', () => {
   showWindow();
@@ -593,10 +674,12 @@ ipcMain.handle('window:set_opacity', (_evt, value) => {
 });
 ipcMain.handle('stealth:enable', () => {
   stealthEnabled = true;
+  windowState?.set('preferences.stealthEnabled', true);
   return applyStealthProtection();
 });
 ipcMain.handle('stealth:disable', () => {
   stealthEnabled = false;
+  windowState?.set('preferences.stealthEnabled', false);
   return applyStealthProtection();
 });
 ipcMain.handle('stealth:status', () => stealthStatus);
@@ -604,6 +687,9 @@ ipcMain.handle('stealth:status', () => stealthStatus);
 app.whenReady().then(async () => {
   ({ default: Store } = await import('electron-store'));
   windowState = createWindowStateStore();
+  stealthEnabled = getWindowState().preferences.stealthEnabled;
+  stealthStatus = stealth.statusShape({ enabled: stealthEnabled });
+  if (app.isPackaged && !(await startPackagedServices())) return;
   applyShellPreferences();
   // Dev dock icon — packaged builds use build/icon.icns via the bundle, but
   // `electron .` falls back to the default Electron icon unless we set it.
@@ -619,7 +705,6 @@ app.whenReady().then(async () => {
       }
     }
   }
-  await ensurePermissions();
   createWindow();
   createTray();
   registerGlobalHotkeys();
@@ -636,8 +721,17 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   audio.stop();
   coding.stop();
   globalShortcut.unregisterAll();
+  if (app.isPackaged && !finishingServiceShutdown && bundledServices.hasRunningServices()) {
+    event.preventDefault();
+    finishingServiceShutdown = true;
+    void bundledServices.stopBundledServices().finally(() => app.quit());
+  }
 });
+
+if (app.isPackaged) {
+  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => app.quit());
+}

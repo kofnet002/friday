@@ -99,6 +99,24 @@ async def recent_transcript_text(session_id: str, window_seconds: float) -> str:
 QD_STATE_TTL_S = 60 * 60 * 2
 
 
+async def set_screen_context(session_id: str, content: str) -> None:
+    """Store extracted screen text transiently for the current interview session."""
+    client = await get_redis()
+    if client is None:
+        return
+    await cast(Awaitable[Any], client.set(
+        f"session:{session_id}:screen_context", content[:20_000], ex=QD_STATE_TTL_S
+    ))
+
+
+async def get_screen_context(session_id: str) -> str | None:
+    client = await get_redis()
+    if client is None:
+        return None
+    raw = await cast(Awaitable[str | None], client.get(f"session:{session_id}:screen_context"))
+    return raw if isinstance(raw, str) and raw else None
+
+
 async def set_qd_fallback(session_id: str, model: str | None) -> None:
     """Persist (or clear) the active fallback model for this session.
 

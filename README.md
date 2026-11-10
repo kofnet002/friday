@@ -145,3 +145,36 @@ Per-session safety budgets (configurable in `.env`):
 - Zoom should be kept on the latest version. For the most reliable
   `setContentProtection` behavior, enable `Use hardware acceleration for
 screen sharing` in Zoom's advanced video settings.
+
+## Packaged Apple Silicon app
+
+Friday.app bundles the FastAPI backend, Next.js standalone server, Swift audio helper, and Electron shell. Open Friday from the installed app; it starts its backend and web services itself and shuts them down when it quits. You do not need `pnpm run dev` or the editor open. The backend health smoke check runs as part of packaging so a missing runtime dependency such as `uvicorn` stops the build from shipping.
+
+On first launch, Friday creates a private `.env` file under its user data directory. Add at least one model API key (and `DEEPGRAM_API_KEY` for transcription), then quit and relaunch. SQLite data and service logs also live in the per-user application directories. Redis remains optional; without it, Friday starts with reduced transient screen, transcript, and detector context.
+
+### Build a local DMG
+
+On an Apple Silicon Mac with Xcode Command Line Tools, Node 20+, pnpm, and uv installed:
+
+```bash
+pnpm install
+pnpm package:mac
+```
+
+This rebuilds `apps/desktop/dist/Friday-<version>-arm64.dmg` and its `.zip` updater artifact from the current checkout. The build does not publish a release or overwrite a copy of the DMG elsewhere, such as your Desktop.
+
+### Publish an automatic update
+
+The packaged app checks public GitHub Releases for [`kofnet002/friday`](https://github.com/kofnet002/friday) on launch, downloads a newer version in the background, and asks whether to restart and install it. **Check for Updates…** in the menu bar tray can trigger a check manually. If you choose Later, Friday installs the downloaded update on a later quit.
+
+Before every release, bump `version` in `apps/desktop/package.json`. Publishing requires a `GH_TOKEN` with repository release write access, a Developer ID Application signing identity (`CSC_NAME` or `CSC_LINK`, plus `CSC_KEY_PASSWORD` when applicable), and Apple notarization credentials. Supply notarization credentials as `APPLE_API_KEY`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`, or as `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`. Keep these values in the release environment or CI secrets; they are not embedded in Friday.
+
+Run the release command explicitly after setting the required credentials:
+
+```bash
+pnpm release:mac
+```
+
+It builds the current version and publishes the ARM64 DMG, ZIP, and updater metadata to GitHub Releases. The current Desktop DMG uses an ad-hoc signature; install the first Developer ID signed release manually over it. Later signed versions from the same Apple Developer Team can update in-app. Local `pnpm package:mac` builds use an ad-hoc signature and cannot receive signed automatic updates.
+
+During a long screen question or coding task, start **Scan screen**, scroll through the page yourself, then choose **Finish scan** or press `⌘⇧S`. Friday captures up to ten distinct views for 90 seconds, merges them, and reports incomplete reads for review.

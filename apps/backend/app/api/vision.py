@@ -4,13 +4,14 @@ import base64 as _base64
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import session_bus
 from app.logging import log
+from app.models.coding import ExtractedProblem
 from app.prompts.coding_extraction import EXTRACTION_MIN_CONFIDENCE
 from app.prompts.function_call_extraction import FUNCTION_CALL_EXTRACTION_MIN_CONFIDENCE
-from app.redis_client import add_seen_problem_fingerprint, set_current_problem
+from app.redis_client import add_seen_problem_fingerprint, set_current_problem, set_screen_context
 from app.services import function_call_extraction as fc_extraction
 from app.services.coding_extraction import (
     arm_cooldown,
@@ -27,29 +28,78 @@ router = APIRouter(prefix="/api/vision")
 
 
 class ExtractRequest(BaseModel):
-    image_base64: str = Field(min_length=16)
+    image_base64: str | None = Field(default=None, min_length=16)
+    images_base64: list[str] | None = None
     session_id: str = Field(min_length=1)
     force: bool = False
     # Optional override of the provider used for vision extraction. When
     # absent the service resolves it from the session's default_provider,
     # so the user-selected model in the Coding panel reaches the OCR step.
     provider: str | None = None
+    scan_cropped: bool = False
+    scan_incomplete: bool = False
+
+    @model_validator(mode="after")
+    def exactly_one_source(self) -> "ExtractRequest":
+        if (self.image_base64 is None) == (self.images_base64 is None):
+            raise ValueError("provide exactly one of image_base64 or images_base64")
+        if self.images_base64 is not None and not self.images_base64:
+            raise ValueError("images_base64 must contain at least one image")
+        return self
+
+
+MAX_SCAN_IMAGES = 12
+MAX_SCAN_BYTES = 32 * 1024 * 1024
+
+
+def decode_images(encoded_images: list[str]) -> list[bytes]:
+    if len(encoded_images) > MAX_SCAN_IMAGES:
+        raise ValueError(f"guided scan supports at most {MAX_SCAN_IMAGES} images")
+    decoded: list[bytes] = []
+    total = 0
+    for encoded in encoded_images:
+        payload = encoded.split(",", 1)[1] if encoded.startswith("data:") else encoded
+        try:
+            image_bytes = _base64.b64decode(payload, validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"invalid base64 image: {exc}") from exc
+        if not image_bytes:
+            raise ValueError("empty image")
+        total += len(image_bytes)
+        if total > MAX_SCAN_BYTES:
+            raise ValueError("guided scan exceeds 32 MiB decoded image data")
+        decoded.append(image_bytes)
+    return decoded
+
+
+def mark_scan_incomplete(problem: ExtractedProblem) -> ExtractedProblem:
+    """Make an extraction partial when capture ended at a hard scan limit."""
+    problem.completeness = "partial"
+    marker = "remaining page content may not have been captured"
+    if marker not in problem.missing_sections:
+        problem.missing_sections.append(marker)
+    return problem
+
+
+def should_emit_screen_question(problem: ExtractedProblem) -> bool:
+    return bool(
+        problem.is_screen_question
+        and not problem.is_coding_problem
+        and problem.question
+        and problem.confidence >= EXTRACTION_MIN_CONFIDENCE
+    )
 
 
 @router.post("/extract")
 async def extract(request: ExtractRequest) -> dict[str, Any]:
+    is_scan = request.images_base64 is not None
     try:
-        payload = (
-            request.image_base64.split(",", 1)[1]
-            if request.image_base64.startswith("data:")
-            else request.image_base64
-        )
-        image_bytes = _base64.b64decode(payload, validate=False)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"invalid base64: {exc}") from exc
-
-    if not image_bytes:
-        raise HTTPException(status_code=400, detail="empty image")
+        encoded_images = request.images_base64 or [request.image_base64 or ""]
+        image_list = decode_images(encoded_images)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    image_bytes = image_list[0]
+    image_base64 = request.image_base64 or encoded_images[0]
 
     # No panel listening → a detection would just be dropped (emitted=False),
     # so don't pay for the vision model. This is the common "app was left open
@@ -65,7 +115,7 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
 
     # Server-side dedup: if we've processed this exact image in the last 60s
     # for this session, return the cached result (unless force=true).
-    if not request.force:
+    if not request.force and not is_scan:
         cached = await cached_result(request.session_id, image_hash)
         if cached is not None:
             log.info("vision.cache_hit", session_id=request.session_id, hash=image_hash[:12])
@@ -93,7 +143,7 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
 
     try:
         problem = await extract_problem(
-            request.image_base64,
+            image_base64 if not is_scan else image_list,
             request.session_id,
             provider=request.provider,
         )
@@ -101,9 +151,34 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         log.error("vision.extract_error", session_id=request.session_id, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)[:500]) from exc
 
-    await store_result(request.session_id, image_hash, problem)
+    if is_scan and request.scan_incomplete:
+        problem = mark_scan_incomplete(problem)
+
+    if not is_scan:
+        await store_result(request.session_id, image_hash, problem)
+
+    screen_text = problem.question if problem.is_screen_question else (
+        problem.problem_statement if problem.is_coding_problem else None
+    )
+    if screen_text or problem.screen_code:
+        await set_screen_context(
+            request.session_id,
+            "\n\n".join(part for part in (screen_text, problem.screen_code) if part),
+        )
 
     emitted = False
+    if should_emit_screen_question(problem):
+        emitted = await session_bus.publish(
+            request.session_id,
+            {
+                "type": "screen_question_detected",
+                "question": problem.question,
+                "screen_code": problem.screen_code,
+                "completeness": problem.completeness,
+                "missing_sections": problem.missing_sections,
+                "source": "guided_scan" if is_scan else "single_frame",
+            },
+        )
     if (
         problem.is_coding_problem
         and problem.confidence >= EXTRACTION_MIN_CONFIDENCE
@@ -130,6 +205,7 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
                 "type": "coding_problem_detected",
                 "problem": problem.model_dump(),
                 "fingerprint": fingerprint,
+                "source": "guided_scan" if is_scan else "single_frame",
             },
         )
         log.info(
@@ -155,9 +231,9 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
     # that happens, give the frame a second look for a "pick the tool + build
     # the payload" test. Runs ONLY here — coding frames never pay for it.
     function_call: dict[str, Any] | None = None
-    if not emitted and settings.function_call_detection_enabled:
+    if not emitted and not is_scan and settings.function_call_detection_enabled:
         function_call = await _maybe_detect_function_call(
-            request.session_id, request.image_base64, image_hash, force=request.force
+            request.session_id, image_base64, image_hash, force=request.force or is_scan
         )
 
     return {
@@ -166,6 +242,7 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         "function_call": function_call,
         "cached": False,
         "image_hash": image_hash,
+        "source": "guided_scan" if is_scan else "single_frame",
     }
 
 

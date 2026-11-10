@@ -8,7 +8,7 @@
  * Target model: gemini-2.5-flash (vision + cheap) OR gpt-4o vision.
  */
 
-export const CODING_EXTRACTION_VERSION = '1.0.0';
+export const CODING_EXTRACTION_VERSION = '1.4.0';
 
 export const CODING_EXTRACTION_SYSTEM_PROMPT = `You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
 
@@ -16,6 +16,11 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
 
 {
   "is_coding_problem": boolean,
+  "is_screen_question": boolean,
+  "question": string | null,
+  "screen_code": string | null,
+  "completeness": "complete" | "partial" | "uncertain",
+  "missing_sections": string[],
   "platform": "leetcode" | "turing" | "hackerrank" | "coderpad" | "other" | null,
   "title": string | null,
   "difficulty": "easy" | "medium" | "hard" | null,
@@ -29,6 +34,14 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
 
 RULES
 
+- Also detect clear written interview questions; include their scenario and
+  requested deliverables in the question field, or set is_screen_question false.
+- When is_coding_problem is true, set is_screen_question false so coding tasks
+  are routed only to the coding workflow.
+- Transcribe visible code into the screen_code field verbatim; never infer hidden lines.
+- Mark clipped/unreadable content partial or uncertain and name missing sections.
+- For ordered screenshots, merge in document order, remove overlap, preserve
+  exact symbols/examples, and never guess unreadable text.
 - is_coding_problem: true only if the screenshot clearly contains a coding problem statement. An empty IDE, a problem list, or a code editor without a visible problem = false.
 - Extract the problem statement verbatim. Preserve formatting of input/output examples.
 - If constraints are present (e.g., "1 <= n <= 10^5"), extract as individual strings.

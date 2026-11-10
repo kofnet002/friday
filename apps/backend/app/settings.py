@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -9,7 +10,7 @@ ROOT_ENV = Path(__file__).resolve().parents[3] / ".env"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(ROOT_ENV),
+        env_file=os.environ.get("FRIDAY_ENV_FILE", str(ROOT_ENV)),
         env_file_encoding="utf-8",
         extra="ignore",
     )

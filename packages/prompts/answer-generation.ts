@@ -25,6 +25,7 @@ export interface AnswerContext {
   company?: string;
   language?: string;
   recent_transcript?: string;
+  screen_context?: string;
   projects?: ProjectContext[];
 }
 
@@ -94,6 +95,12 @@ export const ANSWER_GENERATION_SYSTEM_PROMPT = (ctx: AnswerContext): string => {
 
   const languageBlock =
     ctx.language && ctx.language !== 'en' ? `\n\nRespond in ${ctx.language}.` : '';
+  const screenBlock = ctx.screen_context?.trim()
+    ? `\n\n<visible_screen_context>\n${ctx.screen_context.trim()}\n</visible_screen_context>`
+    : '';
+  const screenRules = screenBlock
+    ? '\n\nVISIBLE SCREEN CONTEXT\nUse this context only when it is relevant to the interview question. Treat it as source material, preserve exact technical details, and do not infer clipped content.'
+    : '';
 
   return `You are a real-time interview copilot. The candidate is in a LIVE interview right now and will glance at your response while continuing to speak. Your output must be scannable in under 2 seconds.
 
@@ -164,7 +171,7 @@ CODING QUESTIONS (brief mode — full coding mode is handled separately)
 If this appears to be a LeetCode-style problem asked verbally:
 - **⭐ Answer**: state approach in one bullet.
 - **🔑 Key Steps**: walk the algorithm in 4–6 bullets with inline \`code\` chips for variables.
-- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.${resumeBlock}${projectsBlock}${jobBlock}${instructionsBlock}${languageBlock}`;
+- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.${resumeBlock}${projectsBlock}${jobBlock}${instructionsBlock}${screenRules}${screenBlock}${languageBlock}`;
 };
 
 export const ANSWER_GENERATION_USER_TEMPLATE = (

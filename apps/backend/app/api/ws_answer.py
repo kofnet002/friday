@@ -9,7 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.db import append_qa, get_session
 from app.logging import log
 from app.prompts.answer_generation import AnswerContext, PriorTurn
-from app.redis_client import recent_transcript_text, set_last_answer
+from app.redis_client import get_screen_context, recent_transcript_text, set_last_answer
 from app.services import latency
 from app.services.answer import Provider, claude_answer_model, stream_answer
 from app.services.limits import check_token_budget
@@ -156,6 +156,12 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 recent_transcript = None
 
         projects = await load_project_contexts(session_id)
+        screen_context = override.get("screen_context")
+        if not screen_context and session_id:
+            try:
+                screen_context = await get_screen_context(session_id)
+            except Exception:  # noqa: BLE001 - screen context is optional
+                screen_context = None
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
@@ -165,6 +171,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             company=override.get("company") or persisted.get("company"),
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
+            screen_context=screen_context,
             prior_turns=prior_turns,
             projects=projects,
             code_refs=await find_code_refs(

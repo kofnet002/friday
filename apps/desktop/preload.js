@@ -10,6 +10,7 @@ const audioListeners = {
 const codingListeners = {
   frame_processed: new Set(),
   extraction_result: new Set(),
+  scan_state: new Set(),
   error: new Set(),
   log: new Set(),
 };
@@ -41,6 +42,9 @@ ipcRenderer.on('coding:frame_processed', (_evt, info) => {
 });
 ipcRenderer.on('coding:extraction_result', (_evt, payload) => {
   for (const cb of codingListeners.extraction_result) cb(payload);
+});
+ipcRenderer.on('coding:scan_state', (_evt, payload) => {
+  for (const cb of codingListeners.scan_state) cb(payload);
 });
 ipcRenderer.on('coding:error', (_evt, msg) => {
   for (const cb of codingListeners.error) cb(msg);
@@ -90,6 +94,12 @@ contextBridge.exposeInMainWorld('friday', {
     start: (sessionId) => ipcRenderer.invoke('coding:start', sessionId),
     stop: () => ipcRenderer.invoke('coding:stop'),
     forceExtract: () => ipcRenderer.invoke('coding:force_extract'),
+    startGuidedScan: (displayId) => ipcRenderer.invoke('coding:scan:start', displayId),
+    finishGuidedScan: () => ipcRenderer.invoke('coding:scan:finish'),
+    cancelGuidedScan: () => ipcRenderer.invoke('coding:scan:cancel'),
+    listDisplays: () => ipcRenderer.invoke('coding:scan:displays'),
+    setScanDisplay: (displayId) => ipcRenderer.invoke('coding:scan:display', displayId),
+    getScanDisplay: () => ipcRenderer.invoke('coding:scan:get_display'),
     isActive: () => ipcRenderer.invoke('coding:isActive'),
     setProvider: (provider) => ipcRenderer.invoke('coding:set_provider', provider),
     onFrameProcessed: (cb) => {
@@ -99,6 +109,10 @@ contextBridge.exposeInMainWorld('friday', {
     onExtractionResult: (cb) => {
       codingListeners.extraction_result.add(cb);
       return () => codingListeners.extraction_result.delete(cb);
+    },
+    onScanState: (cb) => {
+      codingListeners.scan_state.add(cb);
+      return () => codingListeners.scan_state.delete(cb);
     },
     onError: (cb) => {
       codingListeners.error.add(cb);
@@ -111,6 +125,8 @@ contextBridge.exposeInMainWorld('friday', {
   },
   appWindow: {
     status: () => ipcRenderer.invoke('window:status'),
+    quit: () => ipcRenderer.invoke('app:quit'),
+    restart: () => ipcRenderer.invoke('app:restart'),
     toggleVisibility: () => ipcRenderer.invoke('window:toggle_visibility'),
     center: () => ipcRenderer.invoke('window:center'),
     updatePreferences: (patch) => ipcRenderer.invoke('window:update_preferences', patch),

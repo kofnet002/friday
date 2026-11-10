@@ -22,6 +22,21 @@ declare global {
     bytes: number;
   }
 
+  interface FridayScanState {
+    state: 'capturing' | 'combining' | 'complete' | 'partial' | 'failed' | 'cancelled';
+    frames: number;
+    displayId?: string;
+    limitReached?: boolean;
+    partial?: boolean;
+    error?: string;
+  }
+
+  interface FridayScanDisplay {
+    displayId: string;
+    label: string;
+    isPrimary: boolean;
+  }
+
   interface FridayCodingFrameInfo {
     changed_bits: number;
     changed: boolean;
@@ -32,6 +47,13 @@ declare global {
     start: (sessionId: string) => Promise<{ ok: boolean; error?: string }>;
     stop: () => Promise<{ ok: boolean }>;
     forceExtract: () => Promise<{ ok: boolean; error?: string }>;
+    startGuidedScan: (displayId?: string | null) => Promise<{ ok: boolean; error?: string }>;
+    finishGuidedScan: () => Promise<{ ok: boolean; error?: string; partial?: boolean }>;
+    cancelGuidedScan: () => Promise<{ ok: boolean; error?: string }>;
+    listDisplays: () => Promise<FridayScanDisplay[]>;
+    setScanDisplay: (displayId: string | null) => Promise<{ ok: boolean }>;
+    getScanDisplay: () => Promise<string | null>;
+    onScanState: (cb: (state: FridayScanState) => void) => () => void;
     isActive: () => Promise<boolean>;
     setProvider: (provider: AnswerProvider) => Promise<{ ok: boolean; provider: string | null }>;
     onFrameProcessed: (cb: (info: FridayCodingFrameInfo) => void) => () => void;
@@ -46,6 +68,7 @@ declare global {
     dockHidden: boolean;
     visibleOnAllWorkspaces: boolean;
     hideWindowControls: boolean;
+    stealthEnabled: boolean;
     /** Snap the OS cursor to the bottom-right corner on the OFF→ON
      *  stealth transition. Off by default; surprises users on first use. */
     moveCursorOnStealth: boolean;
@@ -65,6 +88,7 @@ declare global {
     };
     preferences: FridayWindowPreferences;
     stealth: FridayStealthStatus;
+    redisAvailable?: boolean | null;
   }
 
   interface FridayWindowToast {
@@ -74,6 +98,8 @@ declare global {
 
   interface FridayWindowApi {
     status: () => Promise<FridayWindowStatus>;
+    quit: () => Promise<{ ok: boolean }>;
+    restart: () => Promise<{ ok: boolean }>;
     toggleVisibility: () => Promise<FridayWindowStatus>;
     center: () => Promise<FridayWindowStatus>;
     updatePreferences: (patch: Partial<FridayWindowPreferences>) => Promise<FridayWindowStatus>;

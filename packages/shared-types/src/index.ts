@@ -305,6 +305,11 @@ export interface CodingExample {
 /** Mirrors backend app.models.coding.ExtractedProblem. */
 export interface ExtractedProblem {
   is_coding_problem: boolean;
+  is_screen_question?: boolean;
+  question?: string | null;
+  screen_code?: string | null;
+  completeness?: 'complete' | 'partial' | 'uncertain';
+  missing_sections?: string[];
   platform?: CodingPlatform | null;
   title?: string | null;
   difficulty?: CodingDifficulty | null;
@@ -321,6 +326,16 @@ export interface CodingProblemDetectedEvent {
   type: 'coding_problem_detected';
   problem: ExtractedProblem;
   fingerprint: string;
+  source?: 'single_frame' | 'guided_scan';
+}
+
+export interface ScreenQuestionDetectedEvent {
+  type: 'screen_question_detected';
+  question: string;
+  screen_code?: string | null;
+  completeness: 'complete' | 'partial' | 'uncertain';
+  missing_sections: string[];
+  source: 'single_frame' | 'guided_scan';
 }
 
 /** Operating modes for /ws/coding-solution. `solve` is the existing
@@ -407,6 +422,7 @@ export type CodingSolutionServerMessage =
    *  (perf gate / edge cases); the final message replaces it if improved. */
   | { type: 'agent_solution'; text: string; provisional?: boolean }
   | CodingProblemDetectedEvent
+  | ScreenQuestionDetectedEvent
   | FunctionCallDetectedEvent;
 
 // ─── function-calling assessments ────────────────────────────────────────────

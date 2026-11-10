@@ -10,6 +10,7 @@
     "typecheck": "uv run mypy app",
     "test": "uv run pytest",
     "build": "echo 'no build step for backend'",
+    "build:binary": "uv run --group build pyinstaller --noconfirm --distpath dist --workpath build/pyinstaller packaging/friday-backend.spec && python3 packaging/smoke_test.py",
     "postinstall": "uv sync"
   }
 }

@@ -19,6 +19,8 @@ from app.prompts.coding_extraction import (
     EXTRACTION_MAX_OUTPUT_TOKENS,
     EXTRACTION_TEMPERATURE,
 )
+
+SCAN_EXTRACTION_MAX_OUTPUT_TOKENS = max(EXTRACTION_MAX_OUTPUT_TOKENS, 6000)
 from app.redis_client import get_redis
 from app.services.claude_agent_auth import claude_available
 from app.services.claude_api import claude_vision
@@ -150,15 +152,19 @@ async def _resolve_provider(session_id: str, override: str | None) -> Provider:
 
 
 async def extract_problem(
-    image_base64: str,
+    image_base64: str | list[bytes],
     session_id: str,
     provider: str | None = None,
 ) -> ExtractedProblem:
     """Run vision extraction using the user-selected provider. DeepSeek has
     no native vision model so it transparently falls back to Gemini (logged)."""
-    # Allow data-URI prefix ("data:image/jpeg;base64,…") as well as raw base64.
-    payload = image_base64.split(",", 1)[1] if image_base64.startswith("data:") else image_base64
-    image_bytes = base64.b64decode(payload)
+    if isinstance(image_base64, list):
+        images = image_base64
+        if not images:
+            raise ValueError("scan requires at least one image")
+    else:
+        payload = image_base64.split(",", 1)[1] if image_base64.startswith("data:") else image_base64
+        images = [base64.b64decode(payload, validate=True)]
 
     chosen = await _resolve_provider(session_id, provider)
     if chosen == "deepseek":
@@ -197,13 +203,11 @@ async def extract_problem(
             )
         try:
             if prov == "claude":
-                problem, output_tokens, model_used = await _extract_claude(
-                    image_bytes, session_id
-                )
+                problem, output_tokens, model_used = await _extract_claude(images, session_id)
             elif prov == "openai":
-                problem, output_tokens, model_used = await _extract_openai(image_bytes)
+                problem, output_tokens, model_used = await _extract_openai(images)
             else:
-                problem, output_tokens, model_used = await _extract_gemini(image_bytes)
+                problem, output_tokens, model_used = await _extract_gemini(images)
             chosen = prov
             break
         except Exception as exc:  # try the next provider
@@ -253,20 +257,25 @@ def _parse_extraction_json(text: str) -> ExtractedProblem:
         raise RuntimeError(f"extraction schema invalid: {exc}") from exc
 
 
-async def _extract_gemini(image_bytes: bytes) -> tuple[ExtractedProblem, int | None, str]:
+async def _extract_gemini(image_bytes: bytes | list[bytes]) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     client = genai.Client(api_key=settings.gemini_api_key)
     model = settings.vision_extraction_model
+    images = image_bytes if isinstance(image_bytes, list) else [image_bytes]
+    max_output_tokens = SCAN_EXTRACTION_MAX_OUTPUT_TOKENS if len(images) > 1 else EXTRACTION_MAX_OUTPUT_TOKENS
+    prompt = CODING_EXTRACTION_SYSTEM_PROMPT
+    if len(images) > 1:
+        prompt += "\n\nGUIDED SCAN: The ordered images are sequential views of one page. Merge overlapping text once in document order. Use the clearest occurrence, preserve exact code and examples, and mark missing or unreadable sections instead of guessing."
     response = await client.aio.models.generate_content(
         model=model,
         contents=[
-            genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            *[genai_types.Part.from_bytes(data=data, mime_type="image/jpeg") for data in images],
         ],
         config=genai_types.GenerateContentConfig(
-            system_instruction=CODING_EXTRACTION_SYSTEM_PROMPT,
+            system_instruction=prompt,
             temperature=EXTRACTION_TEMPERATURE,
-            max_output_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            max_output_tokens=max_output_tokens,
             response_mime_type="application/json",
         ),
     )
@@ -292,20 +301,25 @@ def _strip_json_fence(text: str) -> str:
 
 
 async def _extract_claude(
-    image_bytes: bytes, session_id: str
+    image_bytes: bytes | list[bytes], session_id: str
 ) -> tuple[ExtractedProblem, int | None, str]:
     """Vision extraction via Claude — the API (image block) or the
     subscription CLI (Claude Code reads the screenshot), per CLAUDE_TRANSPORT."""
+    image_list = image_bytes if isinstance(image_bytes, list) else [image_bytes]
+    max_output_tokens = SCAN_EXTRACTION_MAX_OUTPUT_TOKENS if len(image_list) > 1 else EXTRACTION_MAX_OUTPUT_TOKENS
+    system_prompt = CODING_EXTRACTION_SYSTEM_PROMPT
+    if len(image_list) > 1:
+        system_prompt += "\n\nGUIDED SCAN: The ordered images are sequential views of one page. Merge overlap once in document order. Preserve exact code and examples; mark missing or unreadable sections instead of guessing."
     raw, output_tokens, model_used = await claude_vision(
         image_bytes=image_bytes,
-        system=CODING_EXTRACTION_SYSTEM_PROMPT,
+        system=system_prompt,
         prompt=(
             "Extract the coding problem shown in the screenshot. Reply with ONLY"
             " a single JSON object matching the schema — no markdown fences, no"
             " commentary."
         ),
         model=settings.claude_vision_model,
-        max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+        max_tokens=max_output_tokens,
         session_id=session_id,
     )
     return _parse_extraction_json(_strip_json_fence(raw)), output_tokens, model_used
@@ -324,6 +338,11 @@ class _StrictExample(BaseModel):
 
 class _StrictExtraction(BaseModel):
     is_coding_problem: bool
+    is_screen_question: bool
+    question: str | None
+    screen_code: str | None
+    completeness: Literal["complete", "partial", "uncertain"]
+    missing_sections: list[str]
     platform: str | None
     title: str | None
     difficulty: str | None
@@ -335,7 +354,7 @@ class _StrictExtraction(BaseModel):
     confidence: float
 
 
-async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | None, str]:
+async def _extract_openai(image_bytes: bytes | list[bytes]) -> tuple[ExtractedProblem, int | None, str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
     # Fail fast: default SDK timeout is 10min with retries — a network blip
@@ -343,8 +362,12 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
     # takes over.
     client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=20.0, max_retries=1)
     model = settings.openai_model  # gpt-4o supports vision via chat completions
-    image_b64 = base64.b64encode(image_bytes).decode("ascii")
-    image_url = f"data:image/jpeg;base64,{image_b64}"
+    images = image_bytes if isinstance(image_bytes, list) else [image_bytes]
+    max_output_tokens = SCAN_EXTRACTION_MAX_OUTPUT_TOKENS if len(images) > 1 else EXTRACTION_MAX_OUTPUT_TOKENS
+    image_urls = [f"data:image/jpeg;base64,{base64.b64encode(data).decode('ascii')}" for data in images]
+    prompt = "Extract the coding problem from the screenshot(s) as strict JSON matching the schema."
+    if len(images) > 1:
+        prompt += " These are ordered sequential views of one page; merge overlap once in document order and mark unreadable/missing content rather than guessing."
     messages: list[Any] = [
         {"role": "system", "content": CODING_EXTRACTION_SYSTEM_PROMPT},
         {
@@ -352,10 +375,9 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
             "content": [
                 {
                     "type": "text",
-                    "text": "Extract the coding problem from this screenshot"
-                    " as strict JSON matching the schema.",
+                    "text": prompt,
                 },
-                {"type": "image_url", "image_url": {"url": image_url}},
+                *[{"type": "image_url", "image_url": {"url": url}} for url in image_urls],
             ],
         },
     ]
@@ -368,7 +390,7 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
             model=model,
             messages=messages,
             temperature=EXTRACTION_TEMPERATURE,
-            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            max_tokens=max_output_tokens,
             response_format=_StrictExtraction,
         )
         message = parsed_response.choices[0].message
@@ -388,7 +410,7 @@ async def _extract_openai(image_bytes: bytes) -> tuple[ExtractedProblem, int | N
         model=model,
         messages=messages,
         temperature=EXTRACTION_TEMPERATURE,
-        max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+        max_tokens=max_output_tokens,
         response_format={"type": "json_object"},
     )
     if not response.choices:
