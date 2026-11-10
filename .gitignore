@@ -40,7 +40,10 @@ pnpm-debug.log*
 
 # Electron
 apps/desktop/dist/
+apps/desktop/bundle/
 apps/desktop/app/
+apps/backend/build/
+apps/backend/dist/
 
 # apps/desktop/build/ holds versioned icon.svg + icon.icns. Everything else
 # under it is regenerable: Release/ is Swift output (build:swift),
