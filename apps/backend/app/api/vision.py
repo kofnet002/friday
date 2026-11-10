@@ -157,14 +157,22 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
     if not is_scan:
         await store_result(request.session_id, image_hash, problem)
 
-    screen_text = problem.question if problem.is_screen_question else (
-        problem.problem_statement if problem.is_coding_problem else None
-    )
-    if screen_text or problem.screen_code:
-        await set_screen_context(
-            request.session_id,
-            "\n\n".join(part for part in (screen_text, problem.screen_code) if part),
+    screen_text = "\n\n".join(
+        part
+        for part in (
+            problem.question if problem.is_screen_question else None,
+            problem.problem_statement if problem.is_coding_problem else None,
+            problem.visible_context,
         )
+        if part
+    )
+    # Always replace the prior screen context. Keeping the previous value
+    # when a new screen has no extractable question/code can make a spoken
+    # question get answered against stale content from an earlier screen.
+    await set_screen_context(
+        request.session_id,
+        "\n\n".join(part for part in (screen_text or None, problem.screen_code) if part),
+    )
 
     emitted = False
     if should_emit_screen_question(problem):

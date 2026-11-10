@@ -157,7 +157,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
 
         projects = await load_project_contexts(session_id)
         screen_context = override.get("screen_context")
-        if not screen_context and session_id:
+        if "screen_context" not in override and session_id:
             try:
                 screen_context = await get_screen_context(session_id)
             except Exception:  # noqa: BLE001 - screen context is optional

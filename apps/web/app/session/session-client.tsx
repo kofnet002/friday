@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import type { ReactNode } from 'react';
 import {
   ChevronDown,
   ChevronUp,
@@ -69,6 +70,7 @@ import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
 import { screenQuestionAction } from '@/lib/screen-question-routing';
 
+import { AssistPanel, type AssistView } from './assist-panel';
 import { SetupForm } from '../setup/setup-form';
 import { AnswerPanel, AudioBudgetPill, type AnswerStatus, type AudioUsage } from './answer-panel';
 import {
@@ -162,6 +164,8 @@ export function SessionClient() {
   // Same id, readable from callbacks without re-subscribing.
   const sessionIdRef = useRef('');
   const [status, setStatus] = useState<Status>('idle');
+  const audioStatusRef = useRef<Status>(status);
+  audioStatusRef.current = status;
   const [error, setError] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   // Per-provider latency for the answer stream. answerLatencyByProvider
@@ -215,6 +219,9 @@ export function SessionClient() {
 
   // Coding panel state
   const [codingActive, setCodingActive] = useState(false);
+  const [codingPaused, setCodingPaused] = useState(false);
+  const [codingStarting, setCodingStarting] = useState(false);
+  const codingStartingRef = useRef(false);
   const [codingLanguage, setCodingLanguage] = useState<CodingLanguage>('Python');
   const [codingTabs, setCodingTabs] = useState<CodingProblemTab[]>([]);
   const [activeFingerprint, setActiveFingerprint] = useState<string | null>(null);
@@ -223,6 +230,11 @@ export function SessionClient() {
     interval_ms: number;
   } | null>(null);
   const [codingError, setCodingError] = useState<string | null>(null);
+  const screenContextRef = useRef<string | null>(null);
+  const screenCaptureActiveRef = useRef(false);
+  const answerScreenContext = () => ({
+    screen_context: screenCaptureActiveRef.current ? (screenContextRef.current ?? '') : '',
+  });
   const [scanState, setScanState] = useState<FridayScanState | null>(null);
   const [pendingScreenQuestion, setPendingScreenQuestion] = useState<{
     question: string;
@@ -278,6 +290,7 @@ export function SessionClient() {
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
+  const [assistView, setAssistView] = useState<AssistView>('answers');
 
   // Recording timer
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -730,7 +743,8 @@ export function SessionClient() {
       // reveal it (usually with tokens already in) instead of asking again.
       if (msg.candidate_id && revealPending(msg.candidate_id, msg.question)) {
         markAskedLine();
-        setActiveFeature('listen');
+        setAssistView('answers');
+        setActiveFeature('assist');
         return;
       }
       if (suppressAutoQuestion(msg.question)) return;
@@ -743,7 +757,8 @@ export function SessionClient() {
       } else {
         askAnswer(msg.question, { autoDetected: true, candidateId: msg.candidate_id });
       }
-      setActiveFeature('listen');
+      setAssistView('answers');
+      setActiveFeature('assist');
     }
   }, []);
 
@@ -760,15 +775,21 @@ export function SessionClient() {
         : undefined;
       const action = screenQuestionAction(msg.question, msg.completeness, recentQuestion);
       if (action === 'answer') {
+        // During a combined session, the spoken question is the trigger and
+        // the extracted screen text is supporting context for that answer.
+        // Avoid racing it with a second answer generated from the screen alone.
+        if (audioStatusRef.current === 'recording') return;
         askAnswerRef.current(msg.question, { autoDetected: true });
-        setActiveFeature('listen');
+        setAssistView('answers');
+        setActiveFeature('assist');
       } else if (action === 'review' && msg.completeness !== 'complete') {
         setPendingScreenQuestion({
           question: msg.question,
           completeness: msg.completeness,
           missingSections: msg.missing_sections ?? [],
         });
-        setActiveFeature('coding');
+        if (audioStatusRef.current !== 'recording') setAssistView('screen');
+        setActiveFeature('assist');
       }
       return;
     }
@@ -789,7 +810,8 @@ export function SessionClient() {
           ? prev
           : { assessment: msg.assessment, fingerprint: msg.fingerprint },
       );
-      setActiveFeature('coding');
+      if (audioStatusRef.current !== 'recording') setAssistView('screen');
+      setActiveFeature('assist');
       return;
     }
     // `saved` only fires for solve mode (other modes are ephemeral on the
@@ -1132,7 +1154,8 @@ export function SessionClient() {
       const next = [...prev, tab];
       return next.length > MAX_CODING_TABS ? next.slice(-MAX_CODING_TABS) : next;
     });
-    setActiveFeature('coding');
+    if (audioStatusRef.current !== 'recording') setAssistView('screen');
+    setActiveFeature('assist');
     // Keep focus on the in-flight solve; only jump to the new problem when we
     // actually start solving it (or it already exists as the active target).
     if (shouldAutoSolve || existing) {
@@ -1277,6 +1300,7 @@ export function SessionClient() {
       provider: providerRef.current,
       auto_detected: true,
       candidate_id: msg.candidate_id,
+      session_context: answerScreenContext(),
       speculative: true,
     });
   };
@@ -1393,6 +1417,7 @@ export function SessionClient() {
       provider: providerRef.current,
       auto_detected: opts.autoDetected,
       candidate_id: opts.candidateId,
+      session_context: answerScreenContext(),
     });
   };
   askAnswerRef.current = askAnswer;
@@ -1415,7 +1440,8 @@ export function SessionClient() {
     if (!pendingScreenQuestion) return;
     askAnswerRef.current(pendingScreenQuestion.question);
     setPendingScreenQuestion(null);
-    setActiveFeature('listen');
+    setAssistView('answers');
+    setActiveFeature('assist');
   };
 
   const followUp = (q: string, opts: { candidateId?: string } = {}) => {
@@ -1468,11 +1494,12 @@ export function SessionClient() {
       thread_id: current.threadId,
       provider: providerRef.current,
       candidate_id: opts.candidateId,
+      session_context: answerScreenContext(),
     });
   };
 
   // ─── transcribe lifecycle ──────────────────────────────────────────────────
-  const start = async () => {
+  const start = async (): Promise<boolean> => {
     setError(null);
     setStatus('starting');
     setLatencyMs(null);
@@ -1515,13 +1542,13 @@ export function SessionClient() {
     if (!inElectron || !window.friday) {
       setError('Audio capture is only available inside the Friday desktop window.');
       setStatus('error');
-      return;
+      return false;
     }
     const result = await window.friday.audio.start({ mic: CAPTURE_MIC });
     if (!result.ok) {
       setError(result.error ?? 'audio start failed');
       setStatus('error');
-      return;
+      return false;
     }
 
     const offFrame = window.friday.audio.onFrame((chunk, source) => {
@@ -1537,9 +1564,11 @@ export function SessionClient() {
     });
     audioUnsubsRef.current = [offFrame, offError, offExit];
     setStatus('recording');
-    // Pop the Listen panel as soon as we start capturing so the user can
+    // Open the unified workspace as soon as audio starts so the user can
     // see transcript + answers without an extra click.
-    setActiveFeature('listen');
+    setAssistView('answers');
+    setActiveFeature('assist');
+    return true;
   };
 
   const teardownAudioListeners = () => {
@@ -1547,8 +1576,10 @@ export function SessionClient() {
     audioUnsubsRef.current = [];
   };
 
-  const closeListenIfOpen = () => {
-    setActiveFeature((prev) => (prev === 'listen' ? null : prev));
+  const closeAssistIfIdle = () => {
+    setActiveFeature((prev) =>
+      prev === 'assist' && assistView === 'answers' && !codingActive ? null : prev,
+    );
   };
 
   const stop = async () => {
@@ -1559,19 +1590,25 @@ export function SessionClient() {
     transcribeRef.current?.close();
     transcribeRef.current = null;
     setStatus('idle');
-    closeListenIfOpen();
+    closeAssistIfIdle();
   };
   stopRef.current = stop;
 
   const pause = async () => {
-    if (inElectron && window.friday) await window.friday.audio.pause();
+    const actions: Promise<unknown>[] = [];
+    if (inElectron && window.friday) actions.push(window.friday.audio.pause());
+    if (codingActive && !codingPaused) actions.push(pauseScreenCapture());
+    await Promise.all(actions);
     transcribeRef.current?.sendControl({ type: 'pause' });
     setStatus('paused');
-    closeListenIfOpen();
+    closeAssistIfIdle();
   };
 
   const resume = async () => {
-    if (inElectron && window.friday) await window.friday.audio.resume();
+    const actions: Promise<unknown>[] = [];
+    if (inElectron && window.friday) actions.push(window.friday.audio.resume());
+    if (codingActive && codingPaused) actions.push(resumeScreenCapture());
+    await Promise.all(actions);
     transcribeRef.current?.sendControl({ type: 'start', audio_format: audioFormatRef.current });
     setStatus('recording');
   };
@@ -1674,7 +1711,8 @@ export function SessionClient() {
         if (recent) {
           lastForceAskAtRef.current = Date.now();
           askAnswer(recent);
-          setActiveFeature('listen');
+          setAssistView('answers');
+          setActiveFeature('assist');
         } else {
           setPanelError('no transcript yet');
         }
@@ -1721,44 +1759,112 @@ export function SessionClient() {
     };
   }, []);
 
-  const toggleCodingMode = async () => {
+  const toggleCodingMode = async (): Promise<boolean> => {
     const fridayApi = window.friday;
     if (!fridayApi?.coding) {
       setCodingError('Coding mode only works inside the Friday desktop window.');
-      return;
+      return false;
     }
     if (codingActive) {
       await fridayApi.coding.stop();
+      screenCaptureActiveRef.current = false;
       for (const off of codingUnsubsRef.current) off();
       codingUnsubsRef.current = [];
       setCodingActive(false);
+      setCodingPaused(false);
       setCodingFrame(null);
-      return;
+      screenContextRef.current = null;
+      return true;
     }
+    if (codingStartingRef.current) return false;
+    screenContextRef.current = null;
     const sid = getOrCreateSessionId();
-    const result = await fridayApi.coding.start(sid);
-    if (!result.ok) {
-      setCodingError(result.error ?? 'failed to start coding capture');
-      return;
-    }
-    // Push the renderer's currently-selected provider into the desktop
-    // capture so the very first vision/extract uses the user's pick.
-    void fridayApi.coding.setProvider?.(providerRef.current);
-    setCodingError(null);
-    const offFrame = fridayApi.coding.onFrameProcessed((info) => {
-      setCodingFrame({ changed_bits: info.changed_bits, interval_ms: info.interval_ms });
-    });
-    const offExt = fridayApi.coding.onExtractionResult((payload) => {
-      // The real "problem detected" pathway is the transcribe WS event; this
-      // callback is purely informational (e.g., for debugging cache hits).
-      if (!payload.emitted && payload.problem?.is_coding_problem === false) {
-        // No-op: ignore non-problem frames.
+    codingStartingRef.current = true;
+    setCodingStarting(true);
+    try {
+      const result = await fridayApi.coding.start(sid);
+      if (!result.ok) {
+        setCodingError(result.error ?? 'failed to start coding capture');
+        return false;
       }
-    });
-    const offErr = fridayApi.coding.onError((msg) => setCodingError(msg));
-    const offScan = fridayApi.coding.onScanState((state) => setScanState(state));
-    codingUnsubsRef.current = [offFrame, offExt, offErr, offScan];
-    setCodingActive(true);
+      screenCaptureActiveRef.current = true;
+      setCodingPaused(false);
+      // Push the renderer's currently-selected provider into the desktop
+      // capture so the very first vision/extract uses the user's pick.
+      void fridayApi.coding.setProvider?.(providerRef.current);
+      setCodingError(null);
+      const offFrame = fridayApi.coding.onFrameProcessed((info) => {
+        setCodingFrame({ changed_bits: info.changed_bits, interval_ms: info.interval_ms });
+      });
+      const offExt = fridayApi.coding.onExtractionResult((payload) => {
+        const problem = payload.problem;
+        if (!problem) {
+          screenContextRef.current = null;
+          return;
+        }
+        const parts = [
+          problem.question,
+          problem.visible_context,
+          problem.title,
+          problem.problem_statement,
+          problem.function_signature,
+          problem.screen_code,
+          ...(problem.constraints ?? []).map((item) => `Constraint: ${item}`),
+          ...(problem.examples ?? []).map(
+            (example) => `Example: ${example.input} → ${example.output}`,
+          ),
+        ].filter((part): part is string => Boolean(part?.trim()));
+        screenContextRef.current = parts.join('\n\n').slice(0, 20_000) || null;
+      });
+      const offErr = fridayApi.coding.onError((msg) => setCodingError(msg));
+      const offScan = fridayApi.coding.onScanState((state) => setScanState(state));
+      codingUnsubsRef.current = [offFrame, offExt, offErr, offScan];
+      setCodingActive(true);
+      return true;
+    } finally {
+      codingStartingRef.current = false;
+      setCodingStarting(false);
+    }
+  };
+
+  const pauseScreenCapture = async () => {
+    if (!codingActive || codingPaused) return true;
+    const result = await window.friday?.coding.pause();
+    if (!result?.ok) {
+      setCodingError('Could not pause screen analysis.');
+      return false;
+    }
+    setCodingPaused(true);
+    return true;
+  };
+
+  const resumeScreenCapture = async () => {
+    if (!codingActive || !codingPaused) return true;
+    const result = await window.friday?.coding.resume();
+    if (!result?.ok) {
+      setCodingError('Could not resume screen analysis.');
+      return false;
+    }
+    setCodingPaused(false);
+    return true;
+  };
+
+  const startAssistTogether = async () => {
+    if (audioStatusRef.current === 'starting') return;
+    setAssistView('answers');
+    setActiveFeature('assist');
+
+    const starts: Promise<boolean>[] = [];
+    if (audioStatusRef.current === 'paused') {
+      starts.push(resume().then(() => true));
+    } else if (audioStatusRef.current !== 'recording') {
+      starts.push(start());
+    }
+    if (!codingActive) starts.push(toggleCodingMode());
+    else if (codingPaused && audioStatusRef.current !== 'paused') {
+      starts.push(resumeScreenCapture());
+    }
+    await Promise.all(starts);
   };
 
   // ─── session switching ──────────────────────────────────────────────────────
@@ -2074,13 +2180,28 @@ export function SessionClient() {
   const isLive = isRecording || isPaused;
   const elapsedDisplay = formatElapsed(elapsedMs);
 
-  const renderFeatureContent = (key: FeatureKey) => {
+  const renderFeatureContent = (key: FeatureKey | 'listen' | 'coding'): ReactNode => {
+    if (key === 'assist') {
+      return (
+        <AssistPanel
+          view={assistView}
+          onViewChange={setAssistView}
+          onStartTogether={startAssistTogether}
+          audioStatus={isRecording ? 'live' : isPaused ? 'paused' : 'off'}
+          screenStatus={codingActive ? (codingPaused ? 'paused' : 'live') : 'off'}
+          starting={status === 'starting' || codingStarting}
+          privacyMode={privacyMode}
+        >
+          {renderFeatureContent(assistView === 'answers' ? 'listen' : 'coding')}
+        </AssistPanel>
+      );
+    }
     if (key === 'setup') {
       return <SetupForm onComplete={() => setActiveFeature(null)} />;
     }
     if (key === 'listen') {
       return (
-        <PanelErrorBoundary label="Listen">
+        <PanelErrorBoundary label="AI Help">
           <AnswerPanel
             provider={provider}
             onProviderChange={onProviderChange}
@@ -2274,11 +2395,11 @@ export function SessionClient() {
                   // button — peeking at the panel must never hot-mic the user.
                   onChange={setActiveFeature}
                   badges={{
-                    listen:
+                    assist:
                       entries.some((e) => e.status === 'streaming') ||
+                      codingTabs.some((t) => t.status === 'streaming') ||
                       (isLive &&
                         (finals.length > 0 || Boolean(interims.interviewer || interims.candidate))),
-                    coding: codingTabs.some((t) => t.status === 'streaming'),
                   }}
                 />
               </>
@@ -2293,6 +2414,7 @@ export function SessionClient() {
                 <ClusterDivider />
                 <CaptureCluster
                   status={status}
+                  screenActive={codingActive}
                   elapsedDisplay={elapsedDisplay}
                   onPause={pause}
                   onResume={resume}
@@ -2374,7 +2496,7 @@ export function SessionClient() {
               }}
               aria-label="Restart Friday"
               title={`Restart Friday · Stealth will stay ${stealthMode ? 'on' : 'off'}`}
-              className="flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-neutral-500 transition-[background-color,color,transform] duration-150 hover:bg-white/60 hover:text-neutral-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 active:scale-[0.96] motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
             >
               <RotateCcw className="h-4 w-4" aria-hidden />
             </button>
@@ -2386,7 +2508,7 @@ export function SessionClient() {
               }}
               aria-label="Quit Friday"
               title="Quit Friday"
-              className="flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-red-500/10 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 dark:text-neutral-400 dark:hover:bg-red-400/10 dark:hover:text-red-300"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-neutral-500 transition-[background-color,color,transform] duration-150 hover:bg-red-500/10 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 active:scale-[0.96] motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-neutral-400 dark:hover:bg-red-400/10 dark:hover:text-red-300"
             >
               <X className="h-4 w-4" aria-hidden />
             </button>
@@ -2424,7 +2546,7 @@ export function SessionClient() {
               className={cn(
                 'pointer-events-auto z-50 resize overflow-auto rounded-2xl border border-white/40 bg-white/85 p-5 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-2xl backdrop-saturate-150',
                 'h-[68vh] min-h-[20rem] min-w-[24rem] max-h-[92vh]',
-                'data-[state=open]:animate-in data-[state=closed]:animate-out',
+                'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:slide-in-from-top-1 motion-reduce:animate-none',
                 'data-[state=open]:fade-in data-[state=closed]:fade-out',
                 'data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95',
                 'duration-150',
@@ -2526,12 +2648,14 @@ function FridayMark({ className }: { className?: string }) {
 
 function CaptureCluster({
   status,
+  screenActive,
   elapsedDisplay,
   onPause,
   onResume,
   onStop,
 }: {
   status: Status;
+  screenActive: boolean;
   elapsedDisplay: string;
   onPause: () => void;
   onResume: () => void;
@@ -2541,6 +2665,7 @@ function CaptureCluster({
   const isPaused = status === 'paused';
   const isLive = isRecording || isPaused;
   const isStarting = status === 'starting';
+  const captureName = screenActive ? 'Assist' : 'listening';
 
   if (!isLive) {
     // Idle: nothing here — the session is started from the AI Help panel's
@@ -2583,7 +2708,7 @@ function CaptureCluster({
     <div
       className={cn('inline-flex h-8 items-center gap-0.5 rounded-full border p-0.5', tone.wrap)}
       role="group"
-      aria-label={isRecording ? 'Listening' : 'Paused'}
+      aria-label={isRecording ? `${captureName} active` : `${captureName} paused`}
     >
       <span
         className={cn(
@@ -2597,8 +2722,8 @@ function CaptureCluster({
       <button
         type="button"
         onClick={isRecording ? onPause : onResume}
-        aria-label={isRecording ? 'Pause' : 'Resume'}
-        title={isRecording ? 'Pause' : 'Resume'}
+        aria-label={isRecording ? `Pause ${captureName}` : `Resume ${captureName}`}
+        title={isRecording ? `Pause ${captureName}` : `Resume ${captureName}`}
         className={cn(
           'flex h-6 w-6 items-center justify-center rounded-full transition-colors',
           tone.text,

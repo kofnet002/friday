@@ -1,10 +1,10 @@
 'use client';
 
-import { Clock, Code2, Headphones, Settings2, UserCog, type LucideIcon } from 'lucide-react';
+import { Clock, Sparkles, Settings2, UserCog, type LucideIcon } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
-export type FeatureKey = 'setup' | 'listen' | 'coding' | 'history' | 'settings';
+export type FeatureKey = 'setup' | 'assist' | 'history' | 'settings';
 
 interface FeatureDef {
   key: FeatureKey;
@@ -16,21 +16,12 @@ interface FeatureDef {
   primary: boolean;
 }
 
-// Hero ("AI Help" / "Analyze Screen") vs overflow ("⋮"). Listen and Coding
-// are the two pipelines the bar exists for; everything else lives in the
-// overflow menu to keep the main bar at one short row.
+// Assist brings audio answers and screen analysis into one workspace.
 export const FEATURES: readonly FeatureDef[] = [
   {
-    key: 'listen',
-    label: 'AI Help',
-    icon: Headphones,
-    width: 'w-[50rem] max-w-[96vw]',
-    primary: true,
-  },
-  {
-    key: 'coding',
-    label: 'Analyze Screen',
-    icon: Code2,
+    key: 'assist',
+    label: 'Assist',
+    icon: Sparkles,
     width: 'w-[52rem] max-w-[96vw]',
     primary: true,
   },
@@ -81,7 +72,7 @@ export function FeatureBar({ active, onChange, badges }: FeatureBarProps) {
             data-feature-trigger
             onClick={() => onChange(isActive ? null : f.key)}
             className={cn(
-              'group/feature relative inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-medium transition-all',
+              'group/feature relative inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-[color,background-color,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100',
               // Parakeet: dashed outline = active, no fill. Inactive is bare text
               // with a soft hover bg. The dashed effect uses outline (not ring)
               // because Tailwind's ring doesn't support dashed styles.
@@ -99,7 +90,7 @@ export function FeatureBar({ active, onChange, badges }: FeatureBarProps) {
                 className="absolute right-1 top-1 flex h-1.5 w-1.5"
                 aria-label={`${f.label} updated`}
               >
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75" />
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-75 motion-reduce:animate-none" />
                 <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-sky-500" />
               </span>
             ) : null}

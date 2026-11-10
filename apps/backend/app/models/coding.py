@@ -29,6 +29,7 @@ class ExtractedProblem(BaseModel):
     is_coding_problem: bool
     is_screen_question: bool = False
     question: str | None = None
+    visible_context: str | None = None
     screen_code: str | None = None
     completeness: Completeness = "uncertain"
     missing_sections: list[str] = Field(default_factory=list)

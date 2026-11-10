@@ -93,6 +93,8 @@ contextBridge.exposeInMainWorld('friday', {
   coding: {
     start: (sessionId) => ipcRenderer.invoke('coding:start', sessionId),
     stop: () => ipcRenderer.invoke('coding:stop'),
+    pause: () => ipcRenderer.invoke('coding:pause'),
+    resume: () => ipcRenderer.invoke('coding:resume'),
     forceExtract: () => ipcRenderer.invoke('coding:force_extract'),
     startGuidedScan: (displayId) => ipcRenderer.invoke('coding:scan:start', displayId),
     finishGuidedScan: () => ipcRenderer.invoke('coding:scan:finish'),
