@@ -87,6 +87,7 @@ class CodingCapture extends EventEmitter {
   constructor() {
     super();
     this.active = false;
+    this.paused = false;
     this.sessionId = null;
     this.timer = null;
     this.inflightId = 0;
@@ -136,6 +137,7 @@ class CodingCapture extends EventEmitter {
     if (this.active) return { ok: true };
     if (!sessionId) return { ok: false, error: 'missing session_id' };
     this.active = true;
+    this.paused = false;
     this.sessionId = sessionId;
     this.lastHash = null;
     this.lastExtractAt = 0;
@@ -147,6 +149,7 @@ class CodingCapture extends EventEmitter {
   stop() {
     if (!this.active) return;
     this.active = false;
+    this.paused = false;
     this.sessionId = null;
     if (this.timer) {
       clearTimeout(this.timer);
@@ -159,6 +162,26 @@ class CodingCapture extends EventEmitter {
     this.emit('log', 'coding capture stopped');
   }
 
+  pause() {
+    if (!this.active || this.paused) return { ok: true };
+    this.paused = true;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.timer = null;
+    this.scanTimer = null;
+    this.emit('log', 'screen capture paused');
+    return { ok: true };
+  }
+
+  resume() {
+    if (!this.active || !this.paused) return { ok: true };
+    this.paused = false;
+    this.emit('log', 'screen capture resumed');
+    if (this.scanning) void this._scanTick();
+    else this._schedule(0);
+    return { ok: true };
+  }
+
   async forceExtract() {
     if (!this.active || !this.sessionId) {
       return { ok: false, error: 'coding mode not active' };
@@ -168,13 +191,13 @@ class CodingCapture extends EventEmitter {
   }
 
   _schedule(delay = SAMPLE_INTERVAL_MS) {
-    if (!this.active || this.scanning) return;
+    if (!this.active || this.paused || this.scanning) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this._tick({ force: false }).catch(() => {}), delay);
   }
 
   async _tick({ force }) {
-    if (!this.active || this.scanning) return;
+    if (!this.active || this.paused || this.scanning) return;
     try {
       const img = await captureScreen();
       if (!img) {
@@ -218,6 +241,7 @@ class CodingCapture extends EventEmitter {
 
   async startGuidedScan(displayId) {
     if (!this.active || !this.sessionId) return { ok: false, error: 'coding mode not active' };
+    if (this.paused) return { ok: false, error: 'resume Assist before starting a guided scan' };
     if (this.scanning) return { ok: false, error: 'guided scan already active' };
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
@@ -230,9 +254,10 @@ class CodingCapture extends EventEmitter {
   }
 
   async _scanTick() {
-    if (!this.scanning) return;
+    if (!this.scanning || this.paused) return;
     try {
       const img = await captureScreen(this.scanDisplayId);
+      if (!this.scanning || this.paused) return;
       if (!img) throw new Error('No screen available for guided scan');
       const png = img.toPNG();
       const hash = await computeAverageHash(png);
@@ -247,7 +272,8 @@ class CodingCapture extends EventEmitter {
         await this._submitGuidedScan({ partial: true, limitReached: true });
         return;
       }
-      this.scanTimer = setTimeout(() => this._scanTick(), SCAN_SAMPLE_INTERVAL_MS);
+      if (!this.paused)
+        this.scanTimer = setTimeout(() => this._scanTick(), SCAN_SAMPLE_INTERVAL_MS);
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       this.emit('error', message);
@@ -260,7 +286,7 @@ class CodingCapture extends EventEmitter {
   async finishGuidedScan() {
     if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
     try {
-      const img = await captureScreen(this.scanDisplayId);
+      const img = this.paused ? null : await captureScreen(this.scanDisplayId);
       if (img) {
         const hash = await computeAverageHash(img.toPNG());
         this.scan.finish({ hash, ...(await toJpegBase64(img)) });

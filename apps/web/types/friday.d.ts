@@ -16,7 +16,7 @@ declare global {
   }
 
   interface FridayCodingExtractionResult {
-    problem: ExtractedProblem;
+    problem: ExtractedProblem | null;
     emitted: boolean;
     cached: boolean;
     bytes: number;
@@ -46,6 +46,8 @@ declare global {
   interface FridayCodingApi {
     start: (sessionId: string) => Promise<{ ok: boolean; error?: string }>;
     stop: () => Promise<{ ok: boolean }>;
+    pause: () => Promise<{ ok: boolean }>;
+    resume: () => Promise<{ ok: boolean }>;
     forceExtract: () => Promise<{ ok: boolean; error?: string }>;
     startGuidedScan: (displayId?: string | null) => Promise<{ ok: boolean; error?: string }>;
     finishGuidedScan: () => Promise<{ ok: boolean; error?: string; partial?: boolean }>;

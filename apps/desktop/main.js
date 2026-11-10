@@ -521,6 +521,8 @@ ipcMain.handle('coding:stop', () => {
   coding.stop();
   return { ok: true };
 });
+ipcMain.handle('coding:pause', () => coding.pause());
+ipcMain.handle('coding:resume', () => coding.resume());
 ipcMain.handle('coding:force_extract', () => coding.forceExtract());
 ipcMain.handle('coding:isActive', () => coding.isActive());
 ipcMain.handle('coding:set_provider', (_evt, provider) => {

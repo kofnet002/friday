@@ -8,7 +8,7 @@
  * Target model: gemini-2.5-flash (vision + cheap) OR gpt-4o vision.
  */
 
-export const CODING_EXTRACTION_VERSION = '1.4.0';
+export const CODING_EXTRACTION_VERSION = '1.5.0';
 
 export const CODING_EXTRACTION_SYSTEM_PROMPT = `You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
 
@@ -18,6 +18,7 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
   "is_coding_problem": boolean,
   "is_screen_question": boolean,
   "question": string | null,
+  "visible_context": string | null,
   "screen_code": string | null,
   "completeness": "complete" | "partial" | "uncertain",
   "missing_sections": string[],
@@ -36,6 +37,11 @@ RULES
 
 - Also detect clear written interview questions; include their scenario and
   requested deliverables in the question field, or set is_screen_question false.
+- Extract relevant visible material from the current screen into
+  \`visible_context\`, including technical prose, diagrams and labels, code,
+  errors, and command output. Preserve exact names and details, omit unrelated
+  app chrome, and do not infer clipped or unreadable content. Keep it under
+  6,000 characters.
 - When is_coding_problem is true, set is_screen_question false so coding tasks
   are routed only to the coding workflow.
 - Transcribe visible code into the screen_code field verbatim; never infer hidden lines.

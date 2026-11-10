@@ -155,6 +155,8 @@ export interface AnswerSessionContext {
   company?: string;
   language?: string;
   recent_transcript?: string;
+  /** Latest extracted content from the user's active screen. */
+  screen_context?: string;
 }
 
 /** A single turn in an Answer thread. The tail of `messages` is always the
@@ -307,6 +309,7 @@ export interface ExtractedProblem {
   is_coding_problem: boolean;
   is_screen_question?: boolean;
   question?: string | null;
+  visible_context?: string | null;
   screen_code?: string | null;
   completeness?: 'complete' | 'partial' | 'uncertain';
   missing_sections?: string[];
