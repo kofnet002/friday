@@ -142,6 +142,17 @@ export interface CodingPanelProps {
   onScratchChange: (patch: Partial<CodingScratchState>) => void;
   onRunScratch: () => void;
   onCancelScratch: () => void;
+  scanState: FridayScanState | null;
+  onStartScan: (displayId?: string) => void;
+  onFinishScan: () => void;
+  onCancelScan: () => void;
+  pendingScreenQuestion: {
+    question: string;
+    completeness: 'partial' | 'uncertain';
+    missingSections: string[];
+  } | null;
+  onAnswerCapturedQuestion: () => void;
+  onScanQuestionAgain: () => void;
 }
 
 export function CodingPanel({
@@ -171,8 +182,33 @@ export function CodingPanel({
   onScratchChange,
   onRunScratch,
   onCancelScratch,
+  scanState,
+  onStartScan,
+  onFinishScan,
+  onCancelScan,
+  pendingScreenQuestion,
+  onAnswerCapturedQuestion,
+  onScanQuestionAgain,
 }: CodingPanelProps) {
   const activeTab = tabs.find((t) => t.fingerprint === activeFingerprint) ?? null;
+  const [displays, setDisplays] = useState<FridayScanDisplay[]>([]);
+  const [selectedDisplay, setSelectedDisplay] = useState('');
+
+  useEffect(() => {
+    const api = window.friday?.coding;
+    if (!api) return;
+    void Promise.all([api.listDisplays(), api.getScanDisplay()])
+      .then(([available, saved]) => {
+        setDisplays(available);
+        setSelectedDisplay(
+          saved ||
+            available.find((display) => display.isPrimary)?.displayId ||
+            available[0]?.displayId ||
+            '',
+        );
+      })
+      .catch(() => setDisplays([]));
+  }, []);
 
   const isSolveMode = mode === 'solve';
 
@@ -230,6 +266,102 @@ export function CodingPanel({
       ) : null}
 
       {!privacyMode ? <ModeStrip mode={mode} onModeChange={onModeChange} /> : null}
+
+      {isSolveMode ? (
+        <div
+          className="flex flex-wrap items-center gap-2 rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2 dark:border-sky-900 dark:bg-sky-950/25"
+          data-interactive
+        >
+          {displays.length > 1 ? (
+            <Select
+              aria-label="Screen to scan"
+              className="h-8 max-w-44 text-xs"
+              value={selectedDisplay}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSelectedDisplay(value);
+                void window.friday?.coding.setScanDisplay(value || null);
+              }}
+              disabled={scanState?.state === 'capturing' || scanState?.state === 'combining'}
+            >
+              {displays.map((display) => (
+                <option key={display.displayId} value={display.displayId}>
+                  {display.label}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+          {scanState?.state === 'capturing' ? (
+            <>
+              <span role="status" aria-live="polite" className="text-xs">
+                Scanning · {scanState.frames} views
+              </span>
+              <Button type="button" size="sm" onClick={onFinishScan}>
+                Finish scan
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={onCancelScan}>
+                Cancel
+              </Button>
+            </>
+          ) : scanState?.state === 'combining' ? (
+            <span role="status" aria-live="polite" className="text-xs">
+              Reading {scanState.frames} views…
+            </span>
+          ) : (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => onStartScan(selectedDisplay || undefined)}
+                disabled={!active || typeof window === 'undefined' || !window.friday?.coding}
+                aria-label="Start guided screen scan"
+              >
+                Scan screen
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                Scroll the page as you normally would · ⌘⇧S starts or finishes
+              </span>
+            </>
+          )}
+          {scanState?.state === 'partial' ? (
+            <span role="status" className="w-full text-xs text-amber-700 dark:text-amber-300">
+              Partial scan{scanState.limitReached ? ' · capture limit reached' : ''}. Review the
+              extracted text or scan again.
+            </span>
+          ) : null}
+          {scanState?.state === 'failed' ? (
+            <span role="alert" className="w-full text-xs text-destructive">
+              Scan failed: {scanState.error || 'Try again.'}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {pendingScreenQuestion ? (
+        <div
+          className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/30"
+          data-interactive
+        >
+          <p className="font-medium">
+            Screen question needs review · {pendingScreenQuestion.completeness}
+          </p>
+          <p className="mt-1 whitespace-pre-wrap">{pendingScreenQuestion.question}</p>
+          {pendingScreenQuestion.missingSections.length ? (
+            <p className="mt-1 text-xs">
+              Could not read: {pendingScreenQuestion.missingSections.join(', ')}
+            </p>
+          ) : null}
+          <div className="mt-2 flex gap-2">
+            <Button size="sm" onClick={onAnswerCapturedQuestion}>
+              Answer captured text
+            </Button>
+            <Button size="sm" variant="outline" onClick={onScanQuestionAgain}>
+              Scan again
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {!isSolveMode ? (
         <ScratchView
@@ -344,9 +476,11 @@ export function CodingPanel({
       {isSolveMode && activeTab ? (
         <ActiveProblemView
           tab={activeTab}
+          active={active}
           provider={provider}
           onRegenerate={onRegenerate}
           onReExtract={onReExtract}
+          onStartScan={() => onStartScan(selectedDisplay || undefined)}
           onCancel={onCancel}
           onRefine={onRefine}
           onAgentSolve={onAgentSolve}
@@ -564,9 +698,11 @@ function DifficultyBadge({ difficulty }: { difficulty: string | null }) {
 
 function ActiveProblemView({
   tab,
+  active,
   provider,
   onRegenerate,
   onReExtract,
+  onStartScan,
   onCancel,
   onRefine,
   onAgentSolve,
@@ -574,9 +710,11 @@ function ActiveProblemView({
   privacyMode,
 }: {
   tab: CodingProblemTab;
+  active: boolean;
   provider: AnswerProvider;
   onRegenerate: () => void;
   onReExtract: () => void;
+  onStartScan: () => void;
   onCancel: () => void;
   onRefine: (feedback: string) => void;
   onAgentSolve: () => void;
@@ -618,7 +756,9 @@ function ActiveProblemView({
   // emit, the page probably extended below the viewport. Surface a hint
   // pointing at Re-extract so the user knows the recovery path.
   const looksTruncated =
-    !problem.examples?.length && !problem.constraints?.length && !problem.function_signature;
+    problem.completeness === 'partial' ||
+    problem.completeness === 'uncertain' ||
+    (!problem.examples?.length && !problem.constraints?.length && !problem.function_signature);
 
   return (
     <div className="flex flex-col gap-4">
@@ -628,11 +768,25 @@ function ActiveProblemView({
             !
           </span>
           <div className="flex flex-col gap-1">
-            <span className="font-medium">Looks like the problem was partially captured.</span>
-            <span className="text-amber-900/80 dark:text-amber-100/80">
-              Screen capture only sees the visible viewport — scroll the LeetCode page so the
-              examples / constraints / editor are on screen, then click <b>Re-extract</b>.
+            <span className="font-medium">
+              {problem.completeness === 'complete'
+                ? 'Looks like the problem was partially captured.'
+                : `Problem capture: ${problem.completeness ?? 'incomplete'}.`}
             </span>
+            <span className="text-amber-900/80 dark:text-amber-100/80">
+              {problem.missing_sections?.length
+                ? `Could not read: ${problem.missing_sections.join(', ')}. Use guided scan to capture the remaining page.`
+                : 'Use guided scan to capture the remaining prompt, examples, constraints, or editor.'}
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => onStartScan()}
+              disabled={!active}
+            >
+              Scan remaining page
+            </Button>
           </div>
         </div>
       ) : null}
@@ -658,6 +812,11 @@ function ActiveProblemView({
               <p className="whitespace-pre-wrap leading-relaxed text-neutral-800 dark:text-neutral-200">
                 {problem.problem_statement}
               </p>
+            ) : null}
+            {problem.screen_code ? (
+              <pre className="overflow-x-auto rounded-md bg-neutral-100 p-2 text-[11px] dark:bg-neutral-900">
+                <code>{problem.screen_code}</code>
+              </pre>
             ) : null}
             {problem.examples?.length ? (
               <div className="overflow-x-auto">

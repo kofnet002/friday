@@ -155,13 +155,15 @@ def image_media_type(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-def _content(text: str, image: tuple[bytes, str] | None) -> str | list[dict[str, Any]]:
+def _content(
+    text: str, image: tuple[bytes, str] | list[tuple[bytes, str]] | None
+) -> str | list[dict[str, Any]]:
     if image is None:
         return text
     import base64
 
-    data, media_type = image
-    return [
+    images = image if isinstance(image, list) else [image]
+    blocks = [
         {
             "type": "image",
             "source": {
@@ -169,9 +171,11 @@ def _content(text: str, image: tuple[bytes, str] | None) -> str | list[dict[str,
                 "media_type": media_type,
                 "data": base64.standard_b64encode(data).decode("ascii"),
             },
-        },
-        {"type": "text", "text": text},
+        }
+        for data, media_type in images
     ]
+    blocks.append({"type": "text", "text": text})
+    return blocks
 
 
 async def stream_claude_api(
@@ -182,7 +186,7 @@ async def stream_claude_api(
     max_tokens: int,
     effort: Effort | None,
     prior: Iterable[tuple[str, str]] = (),
-    image: tuple[bytes, str] | None = None,
+    image: tuple[bytes, str] | list[tuple[bytes, str]] | None = None,
     cache_system: bool = False,
     thinking: bool = True,
 ) -> AsyncIterator[str]:
@@ -233,7 +237,7 @@ async def complete_claude_api(
     model: str,
     max_tokens: int,
     effort: Effort | None,
-    image: tuple[bytes, str] | None = None,
+    image: tuple[bytes, str] | list[tuple[bytes, str]] | None = None,
     thinking: bool = True,
 ) -> tuple[str, int, int]:
     """One-shot completion → (text, input_tokens, output_tokens).
@@ -265,7 +269,7 @@ async def complete_claude_api(
 
 async def claude_vision(
     *,
-    image_bytes: bytes,
+    image_bytes: bytes | list[bytes],
     system: str,
     prompt: str,
     model: str,
@@ -278,10 +282,12 @@ async def claude_vision(
     usage and labels the model ``claude-code:<model>`` (unpriced)."""
     transport = claude_transport()
     if transport == "cli":
+        if isinstance(image_bytes, list) and len(image_bytes) > 1:
+            raise RuntimeError("Claude CLI vision transport cannot merge multiple scan frames")
         from app.services.claude_cli import run_claude_cli_vision
 
         raw = await run_claude_cli_vision(
-            image_bytes=image_bytes,
+            image_bytes=image_bytes[0] if isinstance(image_bytes, list) else image_bytes,
             system=system,
             prompt=prompt,
             model=model,
@@ -296,6 +302,10 @@ async def claude_vision(
         model=model,
         max_tokens=max_tokens,
         effort=settings.anthropic_effort,
-        image=(image_bytes, image_media_type(image_bytes)),
+        image=(
+            [(data, image_media_type(data)) for data in image_bytes]
+            if isinstance(image_bytes, list)
+            else (image_bytes, image_media_type(image_bytes))
+        ),
     )
     return text, output_tokens, model

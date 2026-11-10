@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 Platform = Literal["leetcode", "turing", "hackerrank", "coderpad", "other"]
 Difficulty = Literal["easy", "medium", "hard"]
+Completeness = Literal["complete", "partial", "uncertain"]
 
 
 class CodingExample(BaseModel):
@@ -26,6 +27,11 @@ class CodingExample(BaseModel):
 
 class ExtractedProblem(BaseModel):
     is_coding_problem: bool
+    is_screen_question: bool = False
+    question: str | None = None
+    screen_code: str | None = None
+    completeness: Completeness = "uncertain"
+    missing_sections: list[str] = Field(default_factory=list)
     platform: Platform | None = None
     title: str | None = None
     difficulty: Difficulty | None = None

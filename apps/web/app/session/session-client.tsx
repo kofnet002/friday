@@ -21,9 +21,11 @@ import {
   Move,
   Pause,
   Play,
+  RotateCcw,
   ShieldAlert,
   ShieldCheck,
   Square,
+  X,
 } from 'lucide-react';
 import type {
   AnswerMessage,
@@ -65,6 +67,7 @@ import {
 } from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
+import { screenQuestionAction } from '@/lib/screen-question-routing';
 
 import { SetupForm } from '../setup/setup-form';
 import { AnswerPanel, AudioBudgetPill, type AnswerStatus, type AudioUsage } from './answer-panel';
@@ -220,6 +223,13 @@ export function SessionClient() {
     interval_ms: number;
   } | null>(null);
   const [codingError, setCodingError] = useState<string | null>(null);
+  const [scanState, setScanState] = useState<FridayScanState | null>(null);
+  const [pendingScreenQuestion, setPendingScreenQuestion] = useState<{
+    question: string;
+    completeness: 'partial' | 'uncertain';
+    missingSections: string[];
+  } | null>(null);
+  const askAnswerRef = useRef<(q: string, opts?: { autoDetected?: boolean }) => void>(() => {});
   const [codingConnected, setCodingConnected] = useState(false);
   // Coding panel mode (solve / explain / debug / tests). Each non-solve
   // mode keeps its OWN scratch buffer — switching from Explain to Debug
@@ -743,6 +753,25 @@ export function SessionClient() {
   };
 
   const onCodingSolutionMessage = useCallback((msg: CodingSolutionServerMessage) => {
+    if (msg.type === 'screen_question_detected') {
+      const lastEntry = entriesRef.current[entriesRef.current.length - 1];
+      const recentQuestion = lastEntry
+        ? [...lastEntry.messages].reverse().find((m) => m.role === 'user')?.content
+        : undefined;
+      const action = screenQuestionAction(msg.question, msg.completeness, recentQuestion);
+      if (action === 'answer') {
+        askAnswerRef.current(msg.question, { autoDetected: true });
+        setActiveFeature('listen');
+      } else if (action === 'review' && msg.completeness !== 'complete') {
+        setPendingScreenQuestion({
+          question: msg.question,
+          completeness: msg.completeness,
+          missingSections: msg.missing_sections ?? [],
+        });
+        setActiveFeature('coding');
+      }
+      return;
+    }
     // Problem-detected events are pushed from /api/vision/extract via
     // session_bus and arrive on this socket (it's always open while /session
     // is mounted, unlike /ws/transcribe which requires Start).
@@ -1366,6 +1395,28 @@ export function SessionClient() {
       candidate_id: opts.candidateId,
     });
   };
+  askAnswerRef.current = askAnswer;
+
+  const startGuidedScan = async (displayId?: string) => {
+    const api = window.friday?.coding;
+    if (!api) return;
+    setCodingError(null);
+    const result = await api.startGuidedScan(displayId || undefined);
+    if (!result.ok) setCodingError(result.error || 'Could not start guided scan.');
+  };
+
+  const finishGuidedScan = () => {
+    void window.friday?.coding.finishGuidedScan();
+  };
+  const cancelGuidedScan = () => {
+    void window.friday?.coding.cancelGuidedScan();
+  };
+  const answerCapturedScreenQuestion = () => {
+    if (!pendingScreenQuestion) return;
+    askAnswerRef.current(pendingScreenQuestion.question);
+    setPendingScreenQuestion(null);
+    setActiveFeature('listen');
+  };
 
   const followUp = (q: string, opts: { candidateId?: string } = {}) => {
     const ws = answerRef.current;
@@ -1705,7 +1756,8 @@ export function SessionClient() {
       }
     });
     const offErr = fridayApi.coding.onError((msg) => setCodingError(msg));
-    codingUnsubsRef.current = [offFrame, offExt, offErr];
+    const offScan = fridayApi.coding.onScanState((state) => setScanState(state));
+    codingUnsubsRef.current = [offFrame, offExt, offErr, offScan];
     setCodingActive(true);
   };
 
@@ -2121,6 +2173,16 @@ export function SessionClient() {
             onScratchChange={updateCodingScratch}
             onRunScratch={runCodingScratch}
             onCancelScratch={cancelCodingScratch}
+            scanState={scanState}
+            onStartScan={startGuidedScan}
+            onFinishScan={finishGuidedScan}
+            onCancelScan={cancelGuidedScan}
+            pendingScreenQuestion={pendingScreenQuestion}
+            onAnswerCapturedQuestion={answerCapturedScreenQuestion}
+            onScanQuestionAgain={() => {
+              setPendingScreenQuestion(null);
+              void startGuidedScan();
+            }}
           />
         </PanelErrorBoundary>
       );
@@ -2239,7 +2301,7 @@ export function SessionClient() {
               </>
             ) : null}
 
-            {/* Trailing trio: ⋮ overflow · ✥ move · ^ collapse */}
+            {/* Trailing controls: overflow, window actions, drag and collapse. */}
             <span aria-hidden className="mx-0.5 h-5 w-px bg-neutral-300/60 dark:bg-white/10" />
 
             <OverflowMenu
@@ -2304,6 +2366,30 @@ export function SessionClient() {
             >
               <Move className="h-3.5 w-3.5" aria-hidden />
             </span>
+
+            <button
+              type="button"
+              onClick={() => {
+                void window.friday?.appWindow.restart();
+              }}
+              aria-label="Restart Friday"
+              title={`Restart Friday · Stealth will stay ${stealthMode ? 'on' : 'off'}`}
+              className="flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-white/60 hover:text-neutral-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+            >
+              <RotateCcw className="h-4 w-4" aria-hidden />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                void window.friday?.appWindow.quit();
+              }}
+              aria-label="Quit Friday"
+              title="Quit Friday"
+              className="flex h-9 w-9 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-red-500/10 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 dark:text-neutral-400 dark:hover:bg-red-400/10 dark:hover:text-red-300"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </button>
 
             <button
               type="button"
@@ -2624,6 +2710,14 @@ const StealthIndicator = forwardRef<
               value={desktopStatus?.accessoryApp ? 'Yes' : 'No'}
               tone={desktopStatus?.accessoryApp ? 'good' : 'bad'}
             />
+            {desktopStatus?.redisAvailable !== null &&
+            desktopStatus?.redisAvailable !== undefined ? (
+              <StatusRow
+                label="Redis session context"
+                value={desktopStatus.redisAvailable ? 'Available' : 'Unavailable · reduced context'}
+                tone={desktopStatus.redisAvailable ? 'good' : 'bad'}
+              />
+            ) : null}
           </div>
         </div>
       ) : null}

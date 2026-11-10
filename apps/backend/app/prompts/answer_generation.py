@@ -47,6 +47,7 @@ class AnswerContext:
     company: str | None = None
     language: str | None = None
     recent_transcript: str | None = None
+    screen_context: str | None = None
     # Earlier turns in the same thread, oldest first. Excludes the current
     # user turn (that's `question` in answer_user_prompt). Empty list for a
     # one-shot question.
@@ -126,6 +127,16 @@ def answer_system_prompt(ctx: AnswerContext) -> str:
     language_block = (
         f"\n\nRespond in {ctx.language}." if ctx.language and ctx.language != "en" else ""
     )
+    screen_block = (
+        f"\n\n<visible_screen_context>\n{ctx.screen_context.strip()}\n</visible_screen_context>"
+        if ctx.screen_context and ctx.screen_context.strip()
+        else ""
+    )
+    screen_rules = (
+        "\n\nVISIBLE SCREEN CONTEXT\nUse this context only when it is relevant to the interview question. Treat it as source material, preserve exact technical details, and do not infer clipped content."
+        if screen_block
+        else ""
+    )
 
     return f"""\
 You are a real-time interview copilot. The candidate is in a LIVE interview right now and will glance at your response while continuing to speak. Your output must be scannable in under 2 seconds.
@@ -197,7 +208,7 @@ CODING QUESTIONS (brief mode — full coding mode is handled separately)
 If this appears to be a LeetCode-style problem asked verbally:
 - **⭐ Answer**: state approach in one bullet.
 - **🔑 Key Steps**: walk the algorithm in 4–6 bullets with inline `code` chips for variables.
-- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.{resume_block}{projects_block}{job_block}{instructions_block}{language_block}"""
+- **💻 Code**: complexity line + clean implementation in the requested language (default Python if unspecified). Skip dry-run / walkthrough — that's the candidate's job to narrate.{resume_block}{projects_block}{job_block}{instructions_block}{screen_rules}{screen_block}{language_block}"""
 
 
 def _code_refs_block(refs: tuple[CodeRef, ...] | None) -> str:

@@ -4,14 +4,18 @@
 // threshold constants mirror CODING_EXTRACTION_CONFIG from
 // packages/prompts/coding-extraction.ts.
 
-const { desktopCapturer, nativeImage } = require('electron');
+const { desktopCapturer, screen } = require('electron');
 const { EventEmitter } = require('node:events');
 const sharp = require('sharp');
+const { ScanSelector } = require('./scan');
 
 // Mirrors packages/prompts/coding-extraction.ts CODING_EXTRACTION_CONFIG.
 const SAMPLE_INTERVAL_MS = 1000;
 const FRAME_CHANGE_THRESHOLD = 0.15;
 const MIN_API_INTERVAL_MS = 2000;
+const SCAN_SAMPLE_INTERVAL_MS = 400;
+const SCAN_MAX_DURATION_MS = 90_000;
+const SCAN_MAX_FRAMES = 10;
 const MAX_WIDTH_PX = 1920;
 const JPEG_QUALITY = 80;
 
@@ -51,15 +55,19 @@ function hammingDistance(a, b) {
   return dist;
 }
 
-async function captureScreen() {
+async function captureScreen(displayId) {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
     thumbnailSize: { width: MAX_WIDTH_PX, height: MAX_WIDTH_PX },
     fetchWindowIcons: false,
   });
   if (!sources.length) return null;
-  // Primary display is the first entry.
-  const primary = sources[0];
+  const primaryId = String(screen.getPrimaryDisplay().id);
+  const selected = displayId
+    ? sources.find((source) => source.display_id === String(displayId))
+    : null;
+  const primary =
+    selected || sources.find((source) => source.display_id === primaryId) || sources[0];
   const img = primary.thumbnail;
   if (img.isEmpty()) return null;
   return img;
@@ -88,10 +96,27 @@ class CodingCapture extends EventEmitter {
     // selection in the renderer; left null until the renderer pushes one,
     // in which case the backend resolves it from session.default_provider.
     this.provider = null;
+    this.scan = null;
+    this.scanTimer = null;
+    this.scanStartedAt = 0;
+    this.scanDisplayId = null;
   }
 
   isActive() {
     return this.active;
+  }
+
+  async listDisplays() {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      fetchWindowIcons: false,
+    });
+    const primaryId = String(screen.getPrimaryDisplay().id);
+    return sources.map((source) => ({
+      displayId: source.display_id,
+      label: source.name,
+      isPrimary: source.display_id === primaryId,
+    }));
   }
 
   setProvider(provider) {
@@ -129,6 +154,7 @@ class CodingCapture extends EventEmitter {
     }
     // Any in-flight extract call will see active=false and discard its result.
     this.inflightId++;
+    if (this.scanning) this.cancelGuidedScan();
     this.lastHash = null;
     this.emit('log', 'coding capture stopped');
   }
@@ -142,13 +168,13 @@ class CodingCapture extends EventEmitter {
   }
 
   _schedule(delay = SAMPLE_INTERVAL_MS) {
-    if (!this.active) return;
+    if (!this.active || this.scanning) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this._tick({ force: false }).catch(() => {}), delay);
   }
 
   async _tick({ force }) {
-    if (!this.active) return;
+    if (!this.active || this.scanning) return;
     try {
       const img = await captureScreen();
       if (!img) {
@@ -184,6 +210,136 @@ class CodingCapture extends EventEmitter {
     } finally {
       this._schedule();
     }
+  }
+
+  get scanning() {
+    return Boolean(this.scan);
+  }
+
+  async startGuidedScan(displayId) {
+    if (!this.active || !this.sessionId) return { ok: false, error: 'coding mode not active' };
+    if (this.scanning) return { ok: false, error: 'guided scan already active' };
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.scan = new ScanSelector({ maxFrames: SCAN_MAX_FRAMES });
+    this.scanDisplayId = displayId || null;
+    this.scanStartedAt = Date.now();
+    this._emitScanState('capturing');
+    await this._scanTick();
+    return { ok: true };
+  }
+
+  async _scanTick() {
+    if (!this.scanning) return;
+    try {
+      const img = await captureScreen(this.scanDisplayId);
+      if (!img) throw new Error('No screen available for guided scan');
+      const png = img.toPNG();
+      const hash = await computeAverageHash(png);
+      const frame = { hash, ...(await toJpegBase64(img)) };
+      const result = this.scan.add(frame);
+      this._emitScanState('capturing');
+      if (result.limitReached) {
+        await this._submitGuidedScan({ partial: true, limitReached: true });
+        return;
+      }
+      if (Date.now() - this.scanStartedAt >= SCAN_MAX_DURATION_MS) {
+        await this._submitGuidedScan({ partial: true, limitReached: true });
+        return;
+      }
+      this.scanTimer = setTimeout(() => this._scanTick(), SCAN_SAMPLE_INTERVAL_MS);
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      this.emit('error', message);
+      this.scan = null;
+      this._emitScanState('failed', { error: message });
+      this._schedule(0);
+    }
+  }
+
+  async finishGuidedScan() {
+    if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
+    try {
+      const img = await captureScreen(this.scanDisplayId);
+      if (img) {
+        const hash = await computeAverageHash(img.toPNG());
+        this.scan.finish({ hash, ...(await toJpegBase64(img)) });
+      }
+      return await this._submitGuidedScan({ partial: false, limitReached: false });
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      this.scan = null;
+      this._emitScanState('failed', { error: message });
+      this._schedule(0);
+      return { ok: false, error: message };
+    }
+  }
+
+  cancelGuidedScan() {
+    if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = null;
+    this.scan = null;
+    this._emitScanState('cancelled');
+    this._schedule(0);
+    return { ok: true };
+  }
+
+  async _submitGuidedScan({ partial, limitReached }) {
+    if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = null;
+    const selector = this.scan;
+    this.scan = null;
+    this._emitScanState('combining', { limitReached, frames: selector.frames.length });
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/vision/extract`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          images_base64: selector.frames.map((frame) => frame.base64),
+          session_id: this.sessionId,
+          force: true,
+          scan_incomplete: Boolean(partial),
+          provider: this.provider || undefined,
+        }),
+      });
+      if (!response.ok)
+        throw new Error(`vision ${response.status}: ${(await response.text()).slice(0, 200)}`);
+      const data = await response.json();
+      this.emit('extraction_result', {
+        problem: data.problem,
+        emitted: data.emitted,
+        cached: false,
+        bytes: selector.frames.reduce((sum, frame) => sum + frame.bytes, 0),
+      });
+      this._emitScanState(
+        data.problem?.completeness === 'complete' && !partial ? 'complete' : 'partial',
+        {
+          frames: selector.frames.length,
+          limitReached,
+          partial: partial || data.problem?.completeness !== 'complete',
+        },
+      );
+      return { ok: true, partial };
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      this.emit('error', message);
+      this._emitScanState('failed', { error: message });
+      return { ok: false, error: message };
+    } finally {
+      this.scanDisplayId = null;
+      this._schedule(0);
+    }
+  }
+
+  _emitScanState(state, extra = {}) {
+    this.emit('scan_state', {
+      state,
+      frames: this.scan ? this.scan.frames.length : extra.frames || 0,
+      displayId: this.scanDisplayId || undefined,
+      ...extra,
+    });
   }
 
   async _sendExtract(base64, bytes, force) {
