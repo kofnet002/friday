@@ -740,7 +740,13 @@ function StartListeningCta({
             : 'Start to transcribe the conversation and auto-detect questions.'}
         </p>
       </div>
-      <Button type="button" onClick={onStart} disabled={starting} aria-label="Start listening">
+      <Button
+        type="button"
+        size="sm"
+        onClick={onStart}
+        disabled={starting}
+        aria-label="Start listening"
+      >
         {starting ? (
           <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" aria-hidden />
         ) : (

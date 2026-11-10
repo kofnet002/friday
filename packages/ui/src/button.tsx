@@ -7,7 +7,7 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ variant = 'default', className = '', ...rest }, ref) => {
     const base =
-      'inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none px-4 py-2';
+      'inline-flex items-center justify-center rounded-md text-sm font-medium transition-[background-color,color,transform,box-shadow] duration-150 disabled:opacity-50 disabled:pointer-events-none active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100 px-3 py-1.5';
     const styles =
       variant === 'ghost'
         ? 'bg-transparent hover:bg-neutral-200 dark:hover:bg-neutral-800'
