@@ -36,7 +36,6 @@ import type {
   CodingLanguage,
   CodingMode,
   CodingSolutionServerMessage,
-  ExtractedFunctionCall,
   ExtractedProblem,
   Project,
   QAHistoryRow,
@@ -49,7 +48,6 @@ import type {
 
 import { Button } from '@/components/ui/button';
 import { PanelErrorBoundary } from '@/components/error-boundary';
-import { FunctionCallView } from './function-call-view';
 import { AnswerWs } from '@/lib/answer-ws';
 import { CodingWs } from '@/lib/coding-ws';
 import {
@@ -295,12 +293,6 @@ export function SessionClient() {
   // spend is visible the way the cost pill shows API spend.
   const [agentStats, setAgentStats] = useState<AgentSessionStats>({ runs: 0, totalMs: 0 });
   const agentRunStartRef = useRef<number>(0);
-  // Latest function-calling assessment detected on-screen (or null). Rendered
-  // at the top of the coding panel; the view owns its own solve+verify fetch.
-  const [functionCall, setFunctionCall] = useState<{
-    assessment: ExtractedFunctionCall;
-    fingerprint: string;
-  } | null>(null);
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
@@ -829,20 +821,6 @@ export function SessionClient() {
     // is mounted, unlike /ws/transcribe which requires Start).
     if (msg.type === 'coding_problem_detected') {
       onCodingProblemDetected(msg.problem, msg.fingerprint);
-      return;
-    }
-    // Function-calling assessment detected on-screen (a frame the coding
-    // detector rejected). Surface it at the top of the coding panel; the
-    // FunctionCallView auto-solves + self-verifies. Dedup by fingerprint so a
-    // re-detect of the same screen doesn't re-trigger the solve.
-    if (msg.type === 'function_call_detected') {
-      setFunctionCall((prev) =>
-        prev?.fingerprint === msg.fingerprint
-          ? prev
-          : { assessment: msg.assessment, fingerprint: msg.fingerprint },
-      );
-      if (audioStatusRef.current !== 'recording') setAssistView('screen');
-      setActiveFeature('assist');
       return;
     }
     // `saved` only fires for solve mode (other modes are ephemeral on the
@@ -2289,17 +2267,6 @@ export function SessionClient() {
     if (key === 'coding') {
       return (
         <PanelErrorBoundary label="Coding mode">
-          {functionCall ? (
-            <div className="mb-3">
-              <FunctionCallView
-                assessment={functionCall.assessment}
-                fingerprint={functionCall.fingerprint}
-                provider={provider}
-                sessionId={sessionId}
-                onDismiss={() => setFunctionCall(null)}
-              />
-            </div>
-          ) : null}
           <CodingPanel
             active={codingActive}
             onToggle={toggleCodingMode}

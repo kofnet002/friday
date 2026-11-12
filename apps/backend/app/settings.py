@@ -126,12 +126,6 @@ class Settings(BaseSettings):
     # A NEW problem appearing is still caught within this window's tail; hit
     # Re-extract to bypass immediately. Set 0 to disable the cooldown.
     vision_cooldown_s: int = Field(default=25)
-    # Also try to detect function-calling assessments ("pick the tool + build
-    # the payload") from the same frames. Runs a SECOND vision call ONLY on
-    # frames the coding detector rejected (never adds cost to coding frames),
-    # and only while a panel is listening. Its own dedup cache + cooldown bound
-    # the churn on idle screens. Set false to disable this entirely.
-    function_call_detection_enabled: bool = Field(default=True)
 
     # ─── Agentic coding ("Claude Code" in-app) ─────────────────────────────
     # Drives the local `claude` CLI headlessly to solve hard problems with a

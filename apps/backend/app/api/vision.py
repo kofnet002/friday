@@ -10,7 +10,6 @@ from app import session_bus
 from app.logging import log
 from app.models.coding import ExtractedProblem
 from app.prompts.coding_extraction import EXTRACTION_MIN_CONFIDENCE
-from app.prompts.function_call_extraction import FUNCTION_CALL_EXTRACTION_MIN_CONFIDENCE
 from app.redis_client import (
     add_seen_problem_fingerprint,
     get_screen_references,
@@ -18,7 +17,6 @@ from app.redis_client import (
     set_screen_context,
     set_screen_references,
 )
-from app.services import function_call_extraction as fc_extraction
 from app.services.claude_api import normalize_claude_model
 from app.services.coding_extraction import (
     arm_cooldown,
@@ -301,70 +299,11 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
             has_statement=bool(problem.problem_statement),
         )
 
-    # Function-calling assessments aren't coding problems, so the coding
-    # detector rejects them (is_coding_problem=false → emitted=false). When
-    # that happens, give the frame a second look for a "pick the tool + build
-    # the payload" test. Runs ONLY here — coding frames never pay for it.
-    function_call: dict[str, Any] | None = None
-    if not emitted and not is_scan and settings.function_call_detection_enabled:
-        function_call = await _maybe_detect_function_call(
-            request.session_id, image_base64, image_hash, force=request.force or is_scan
-        )
-
     return {
         "problem": problem.model_dump(),
         "emitted": emitted,
-        "function_call": function_call,
         "cached": False,
         "image_hash": image_hash,
         "source": "guided_scan" if is_scan else "single_frame",
     }
 
-
-async def _maybe_detect_function_call(
-    session_id: str, image_base64: str, image_hash: str, *, force: bool
-) -> dict[str, Any] | None:
-    """Second-pass detection for function-calling assessments. Returns a small
-    summary (`{detected, emitted, fingerprint}`) or None when detection was
-    skipped/failed. Best-effort: never raises into the vision response — a
-    coding detection already succeeded or legitimately found nothing, and a FC
-    detection error must not 502 the frame."""
-    # Own dedup cache + cooldown (separate Redis namespace from coding) so we
-    # don't re-run the model every frame while the same assessment sits on
-    # screen. A force re-extract bypasses both.
-    if not force:
-        if await fc_extraction.cached_result(session_id, image_hash) is not None:
-            return None
-        if settings.vision_cooldown_s > 0 and await fc_extraction.cooldown_detection(session_id):
-            return None
-
-    try:
-        fc = await fc_extraction.extract_function_call(image_base64, session_id)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("fc_extraction.failed", session_id=session_id, error=str(exc)[:200])
-        return None
-
-    await fc_extraction.store_result(session_id, image_hash, fc)
-
-    if not (fc.is_function_call and fc.confidence >= FUNCTION_CALL_EXTRACTION_MIN_CONFIDENCE):
-        log.info(
-            "fc.not_emitted",
-            session_id=session_id,
-            is_function_call=fc.is_function_call,
-            confidence=fc.confidence,
-        )
-        return None
-
-    if settings.vision_cooldown_s > 0:
-        await fc_extraction.arm_cooldown(session_id, fc)
-    fingerprint = fc_extraction.function_call_fingerprint(fc)
-    emitted = await session_bus.publish(
-        session_id,
-        {
-            "type": "function_call_detected",
-            "assessment": fc.model_dump(),
-            "fingerprint": fingerprint,
-        },
-    )
-    log.info("fc.emitted", session_id=session_id, fingerprint=fingerprint, emitted=emitted)
-    return {"detected": True, "emitted": emitted, "fingerprint": fingerprint}
