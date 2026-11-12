@@ -412,6 +412,13 @@ export function SessionClient() {
   const currentEntry = entryIndex >= 0 && entryIndex < entries.length ? entries[entryIndex] : null;
 
   const inElectron = typeof window !== 'undefined' && Boolean(window.friday);
+  // Decided after mount: the server can't see window.friday, so rendering
+  // the browser-only banner from `inElectron` made the server and the
+  // Electron client disagree (hydration mismatch).
+  const [showBrowserBanner, setShowBrowserBanner] = useState(false);
+  useEffect(() => {
+    setShowBrowserBanner(!window.friday);
+  }, []);
 
   // On mount: resolve session_id and provider pref, then open the answer WS.
   useEffect(() => {
@@ -2646,7 +2653,7 @@ export function SessionClient() {
       </Popover.Root>
 
       {/* Banners */}
-      {!inElectron ? (
+      {showBrowserBanner ? (
         <div
           data-interactive="true"
           className="pointer-events-auto rounded-md border border-amber-400/50 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-200"
