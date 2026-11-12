@@ -65,7 +65,8 @@ test('guided scan finish submits ordered frames and resumes normal capture', asy
   const originalFetch = global.fetch;
   let body;
   global.fetch = async (_url, options) => {
-    body = JSON.parse(options.body);
+    const parsed = JSON.parse(options.body);
+    if (!parsed.speculative) body = parsed;
     return {
       ok: true,
       json: async () => ({ problem: { completeness: 'complete' }, emitted: true }),
@@ -96,7 +97,9 @@ test('guided scan finish submits ordered frames and resumes normal capture', asy
 test('guided scan cancellation clears frames without submitting them', async () => {
   const originalFetch = global.fetch;
   let calls = 0;
-  global.fetch = async () => {
+  global.fetch = async (_url, options) => {
+    // Background (speculative) reads are fine; the final submission is not.
+    if (JSON.parse(options.body).speculative) return { ok: true, json: async () => ({}) };
     calls++;
     throw new Error('must not submit');
   };
@@ -128,6 +131,32 @@ test('failed scan submission reports failure and resumes the watcher', async () 
     assert.equal(states.at(-1).state, 'failed');
     assert.match(states.at(-1).error, /502/);
     assert.ok(capture.timer);
+  } finally {
+    capture.stop();
+    global.fetch = originalFetch;
+  }
+});
+
+test('a scan reads its first view in the background and the final read shares its scan id', async () => {
+  const originalFetch = global.fetch;
+  const bodies = [];
+  global.fetch = async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return {
+      ok: true,
+      json: async () => ({ problem: { completeness: 'complete' }, emitted: true }),
+    };
+  };
+  const capture = activeCapture();
+  try {
+    await capture.startGuidedScan();
+    const speculative = bodies.filter((body) => body.speculative);
+    assert.equal(speculative.length, 1);
+    assert.equal(speculative[0].images_base64.length, 1);
+    await capture.finishGuidedScan();
+    const final = bodies.find((body) => !body.speculative);
+    assert.ok(final.scan_id);
+    assert.equal(final.scan_id, speculative[0].scan_id);
   } finally {
     capture.stop();
     global.fetch = originalFetch;

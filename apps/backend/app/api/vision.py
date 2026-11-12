@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64 as _base64
+import hashlib
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -46,6 +50,12 @@ class ExtractRequest(BaseModel):
     claude_model: str | None = None
     scan_cropped: bool = False
     scan_incomplete: bool = False
+    # Guided-scan id shared by every request of one scan. `speculative` reads
+    # run while the user is still scrolling: they answer fully visible
+    # questions early, and the final request reuses their result when it
+    # covers the same views.
+    scan_id: str | None = Field(default=None, max_length=64)
+    speculative: bool = False
 
     @model_validator(mode="after")
     def exactly_one_source(self) -> "ExtractRequest":
@@ -78,6 +88,54 @@ def decode_images(encoded_images: list[str]) -> list[bytes]:
             raise ValueError("guided scan exceeds 32 MiB decoded image data")
         decoded.append(image_bytes)
     return decoded
+
+
+def scan_digest(images: list[bytes]) -> str:
+    """Identity of an ordered set of scan views."""
+    digest = hashlib.sha256()
+    for image in images:
+        digest.update(len(image).to_bytes(8, "big"))
+        digest.update(image)
+    return digest.hexdigest()
+
+
+class ScanExtractionCache:
+    """Shares one vision read per (session, views) between the speculative
+    request made while the user scrolls and the final request at the end.
+    In-process and small: entries only need to live for the length of a scan.
+    A failed read is dropped so the next request retries it."""
+
+    def __init__(self, max_entries: int = 16) -> None:
+        self._max_entries = max_entries
+        self._tasks: OrderedDict[tuple[str, str], asyncio.Task[ExtractedProblem]] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+    async def run(
+        self,
+        key: tuple[str, str],
+        extract: Callable[[], Awaitable[ExtractedProblem]],
+    ) -> ExtractedProblem:
+        task = self._tasks.get(key)
+        if task is None:
+            task = asyncio.ensure_future(extract())
+            self._tasks[key] = task
+            while len(self._tasks) > self._max_entries:
+                self._tasks.popitem(last=False)
+        try:
+            # shield: a cancelled caller (client went away) must not cancel
+            # the read another request is waiting on.
+            problem = await asyncio.shield(task)
+        except Exception:
+            if self._tasks.get(key) is task:
+                del self._tasks[key]
+            raise
+        # Callers mutate their copy (e.g. mark_scan_incomplete).
+        return problem.model_copy(deep=True)
+
+
+_scan_extractions = ScanExtractionCache()
 
 
 def mark_scan_incomplete(problem: ExtractedProblem) -> ExtractedProblem:
@@ -144,15 +202,24 @@ def should_emit_screen_question(problem: ExtractedProblem) -> bool:
     )
 
 
-def screen_question_event(problem: ExtractedProblem, *, is_scan: bool) -> dict[str, Any]:
+def screen_question_event(
+    problem: ExtractedProblem,
+    *,
+    is_scan: bool,
+    speculative: bool = False,
+    scan_id: str | None = None,
+) -> dict[str, Any]:
     return {
         "type": "screen_question_detected",
         "question": problem.question,
         "questions": problem.questions,
         "screen_code": problem.screen_code,
-        "completeness": problem.completeness,
+        # Mid-scan the page isn't fully read yet, whatever the model says.
+        "completeness": "partial" if speculative else problem.completeness,
         "missing_sections": problem.missing_sections,
         "source": "guided_scan" if is_scan else "single_frame",
+        "speculative": speculative,
+        "scan_id": scan_id,
     }
 
 
@@ -215,13 +282,23 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
                     "image_hash": image_hash,
                 }
 
-    try:
-        problem = await extract_problem(
+    speculative = is_scan and request.speculative
+
+    async def run_extraction() -> ExtractedProblem:
+        return await extract_problem(
             image_base64 if not is_scan else image_list,
             request.session_id,
             provider=request.provider,
             claude_model=normalize_claude_model(request.claude_model),
         )
+
+    try:
+        if is_scan:
+            problem = await _scan_extractions.run(
+                (request.session_id, scan_digest(image_list)), run_extraction
+            )
+        else:
+            problem = await run_extraction()
     except Exception as exc:  # noqa: BLE001 - surface the provider error to the client
         log.error("vision.extract_error", session_id=request.session_id, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)[:500]) from exc
@@ -270,8 +347,22 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
     emitted = False
     if should_emit_screen_question(problem):
         emitted = await session_bus.publish(
-            request.session_id, screen_question_event(problem, is_scan=is_scan)
+            request.session_id,
+            screen_question_event(
+                problem, is_scan=is_scan, speculative=speculative, scan_id=request.scan_id
+            ),
         )
+    if speculative:
+        # A coding problem can still be cut off mid-scroll; leave solving to
+        # the final request so a truncated problem never opens a tab.
+        return {
+            "problem": problem.model_dump(),
+            "emitted": emitted,
+            "cached": False,
+            "image_hash": image_hash,
+            "source": "guided_scan",
+            "speculative": True,
+        }
     if (
         problem.is_coding_problem
         and problem.confidence >= EXTRACTION_MIN_CONFIDENCE

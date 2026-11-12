@@ -32,6 +32,8 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { friendlyError } from '@/lib/error-messages';
 import { Markdown } from '@/lib/markdown';
+import { extractQuestionAnswers } from '@/lib/question-answers';
+import { isScreenQuestionPrompt } from '@/lib/screen-question-routing';
 import { cn } from '@/lib/utils';
 
 export type AnswerStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error';
@@ -583,6 +585,17 @@ function AnswerBody({
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= ANSWER_PIN_THRESHOLD_PX;
   };
 
+  // Per-question answers from a grouped screen answer (all turns of the
+  // thread), for one-click / one-key copy.
+  const assistantTexts = [
+    ...messages
+      .slice(0, -1)
+      .filter((m) => m.role === 'assistant')
+      .map((m) => m.content),
+    answer,
+  ];
+  const questionAnswers = extractQuestionAnswers(assistantTexts);
+
   return (
     <div
       ref={scrollRef}
@@ -595,6 +608,9 @@ function AnswerBody({
         privacyMode && 'select-none blur-md',
       )}
     >
+      {questionAnswers.length > 0 && !privacyMode ? (
+        <QuestionCopyBar questionAnswers={questionAnswers} />
+      ) : null}
       {priorTurns.length > 0 ? (
         <div className="mb-4 flex flex-col gap-3 border-b border-neutral-200/70 pb-3 dark:border-neutral-800/70">
           {priorTurns.map((turn, i) => (
@@ -642,7 +658,92 @@ function AnswerBody({
   );
 }
 
+function QuestionCopyBar({
+  questionAnswers,
+}: {
+  questionAnswers: { label: string; answer: string; check: boolean }[];
+}) {
+  const [copied, setCopied] = useState<string | null>(null);
+  const answersRef = useRef(questionAnswers);
+  answersRef.current = questionAnswers;
+
+  const copy = async (index: number) => {
+    const qa = answersRef.current[index];
+    if (!qa) return;
+    try {
+      await navigator.clipboard.writeText(qa.answer);
+      setCopied(qa.label);
+      window.setTimeout(
+        () => setCopied((current) => (current === qa.label ? null : current)),
+        1500,
+      );
+    } catch {
+      /* clipboard unavailable — nothing to do */
+    }
+  };
+
+  // Keys 1–9 copy Q1–Q9's answer while you're not typing somewhere.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      ) {
+        return;
+      }
+      if (!/^[1-9]$/.test(event.key)) return;
+      const index = answersRef.current.findIndex((qa) => qa.label === `Q${event.key}`);
+      if (index < 0) return;
+      event.preventDefault();
+      void copy(index);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  return (
+    <div
+      className="sticky top-0 z-10 mb-3 flex flex-wrap items-center gap-1.5 bg-white/90 py-1 backdrop-blur dark:bg-neutral-950/80"
+      aria-label="Copy an answer"
+    >
+      <span className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">Copy</span>
+      {questionAnswers.map((qa, index) => (
+        <button
+          key={qa.label}
+          type="button"
+          onClick={() => void copy(index)}
+          title={`${qa.label}: ${qa.answer}${qa.check ? ' (double-check)' : ''} — press ${qa.label.slice(1)}`}
+          aria-label={`Copy ${qa.label} answer: ${qa.answer}`}
+          className={cn(
+            'inline-flex max-w-[14rem] items-center gap-1 rounded-md border px-2 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500',
+            copied === qa.label
+              ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300'
+              : 'border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800',
+          )}
+        >
+          <span className="font-semibold">{qa.label}</span>
+          <span className="truncate">{copied === qa.label ? 'Copied' : qa.answer}</span>
+          {qa.check ? (
+            <span aria-label="double-check" className="text-amber-600">
+              ⚠️
+            </span>
+          ) : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ThreadTurn({ turn }: { turn: AnswerMessage }) {
+  if (turn.role === 'user' && isScreenQuestionPrompt(turn.content)) {
+    return (
+      <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-sky-700 dark:text-sky-300">
+        More questions from the screen
+      </div>
+    );
+  }
   if (turn.role === 'user') {
     return (
       <div className="flex items-start gap-2">

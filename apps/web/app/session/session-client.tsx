@@ -70,11 +70,7 @@ import {
 } from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
-import {
-  combineScreenQuestions,
-  normalizeQuestion,
-  planScreenQuestions,
-} from '@/lib/screen-question-routing';
+import { normalizeQuestion, planScreenAnswer } from '@/lib/screen-question-routing';
 
 import { AssistPanel, type AssistView } from './assist-panel';
 import { SetupForm } from '../setup/setup-form';
@@ -252,8 +248,27 @@ export function SessionClient() {
     missingSections: string[];
   } | null>(null);
   const askAnswerRef = useRef<
-    (q: string, opts?: { autoDetected?: boolean; fromScreen?: boolean }) => void
-  >(() => {});
+    (q: string, opts?: { autoDetected?: boolean; fromScreen?: boolean }) => string | undefined
+  >(() => undefined);
+  // The answer page the current guided scan is filling, so questions found
+  // later in the scan join it instead of opening a new page.
+  const scanAnswerRef = useRef<{ scanId: string; entryId: string } | null>(null);
+  // Screen follow-ups waiting for the current answer to finish streaming
+  // (starting one would cancel the stream in flight).
+  const pendingScreenFollowUpsRef = useRef<{ entryId: string; text: string }[]>([]);
+  const followUpRef = useRef<(q: string, opts?: { entryId?: string }) => void>(() => {});
+  const flushScreenFollowUps = () => {
+    // Deferred so a terminal stream message finishes updating state first.
+    setTimeout(() => {
+      if (streamingIdRef.current) return;
+      const next = pendingScreenFollowUpsRef.current.shift();
+      if (next) followUpRef.current(next.text, { entryId: next.entryId });
+    }, 0);
+  };
+  const sendScreenFollowUp = (entryId: string, text: string) => {
+    pendingScreenFollowUpsRef.current.push({ entryId, text });
+    flushScreenFollowUps();
+  };
   // Threads started from questions read off the screen. Their answers (and
   // follow-ups) use the Screen panel's Claude model, not AI Help's.
   const screenThreadIdsRef = useRef<Set<string>>(new Set());
@@ -665,18 +680,21 @@ export function SessionClient() {
         answerStartedAtRef.current = null;
         apply({ status: 'done' });
         streamingIdRef.current = null;
+        flushScreenFollowUps();
         return;
       }
       if (msg.type === 'cancelled') {
         answerStartedAtRef.current = null;
         apply({ status: 'cancelled' });
         streamingIdRef.current = null;
+        flushScreenFollowUps();
         return;
       }
       if (msg.type === 'error') {
         answerStartedAtRef.current = null;
         apply({ status: 'error', error: msg.message });
         streamingIdRef.current = null;
+        flushScreenFollowUps();
       }
       if (msg.type === 'limit_exceeded') {
         // Token budget spent: the backend refused the question outright.
@@ -815,18 +833,34 @@ export function SessionClient() {
         : undefined;
       const skip = new Set(answeredScreenRef.current);
       if (recentQuestion) skip.add(normalizeQuestion(recentQuestion));
-      const plan = planScreenQuestions(
-        msg.questions?.length ? msg.questions : [msg.question],
-        msg.completeness,
-        skip,
-      );
-      const combined = combineScreenQuestions(plan.answer);
-      if (combined) {
-        for (const question of plan.answer) {
+      // One answer page per guided scan: answers found mid-scan start it,
+      // questions found later in the same scan are added to it.
+      const scanEntry =
+        msg.scan_id && scanAnswerRef.current?.scanId === msg.scan_id
+          ? entriesRef.current.find((e) => e.id === scanAnswerRef.current?.entryId)
+          : undefined;
+      const plan = planScreenAnswer({
+        questions: msg.questions?.length ? msg.questions : [msg.question],
+        completeness: msg.completeness,
+        speculative: Boolean(msg.speculative),
+        answered: skip,
+        hasScanEntry: Boolean(scanEntry),
+      });
+      if (plan.text) {
+        for (const question of plan.questions) {
           answeredScreenRef.current.add(normalizeQuestion(question));
         }
-        // All questions from one page go out as one request → one answer page.
-        askAnswerRef.current(combined, { autoDetected: true, fromScreen: true });
+        if (plan.mode === 'followup' && scanEntry) {
+          sendScreenFollowUp(scanEntry.id, plan.text);
+        } else {
+          const entryId = askAnswerRef.current(plan.text, {
+            autoDetected: true,
+            fromScreen: true,
+          });
+          if (msg.scan_id && entryId) {
+            scanAnswerRef.current = { scanId: msg.scan_id, entryId };
+          }
+        }
         setAssistView('answers');
         setActiveFeature('assist');
       }
@@ -836,7 +870,7 @@ export function SessionClient() {
           completeness: msg.completeness,
           missingSections: msg.missing_sections ?? [],
         });
-        if (!plan.answer.length) setAssistView('screen');
+        if (!plan.text) setAssistView('screen');
         setActiveFeature('assist');
       }
       return;
@@ -1405,7 +1439,7 @@ export function SessionClient() {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
-      return;
+      return undefined;
     }
     // Cancel any in-flight stream before starting a new thread — tokens
     // route by streamingIdRef so otherwise the old entry would hang in
@@ -1458,6 +1492,7 @@ export function SessionClient() {
       session_context: answerScreenContext(),
       claude_model: screenClaudeModelFor(threadId),
     });
+    return id;
   };
   askAnswerRef.current = askAnswer;
 
@@ -1483,7 +1518,7 @@ export function SessionClient() {
     setActiveFeature('assist');
   };
 
-  const followUp = (q: string, opts: { candidateId?: string } = {}) => {
+  const followUp = (q: string, opts: { candidateId?: string; entryId?: string } = {}) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
@@ -1494,7 +1529,10 @@ export function SessionClient() {
     // is currently viewing, not the one they were viewing at first
     // render. Falls back to the newest entry when nothing is selected.
     const idx = entryIndexRef.current >= 0 ? entryIndexRef.current : entriesRef.current.length - 1;
-    const current = entriesRef.current[idx];
+    // A screen follow-up names the scan's answer page explicitly.
+    const current = opts.entryId
+      ? entriesRef.current.find((e) => e.id === opts.entryId)
+      : entriesRef.current[idx];
     if (!current) {
       // No active thread — treat as a fresh ask. Matches what a user
       // probably means when they hit "More detail" on an empty panel.
@@ -1537,6 +1575,7 @@ export function SessionClient() {
       claude_model: screenClaudeModelFor(current.threadId),
     });
   };
+  followUpRef.current = followUp;
 
   // ─── transcribe lifecycle ──────────────────────────────────────────────────
   const start = async (): Promise<boolean> => {

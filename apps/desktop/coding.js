@@ -6,6 +6,7 @@
 
 const { desktopCapturer, screen } = require('electron');
 const { EventEmitter } = require('node:events');
+const { randomUUID } = require('node:crypto');
 const sharp = require('sharp');
 const { ScanSelector, signatureDistance, autoFinishReason } = require('./scan');
 
@@ -280,6 +281,8 @@ class CodingCapture extends EventEmitter {
     this.scanStartedAt = Date.now();
     this.scanMotion = { lastSig: null, lastMotionAt: 0, moving: false, scrolled: false };
     this.scanCapturedAt = 0;
+    this.scanId = randomUUID();
+    this.speculation = { inflight: false, dirty: false };
     this._emitScanState('capturing');
     await this._scanTick();
     return { ok: true };
@@ -320,8 +323,12 @@ class CodingCapture extends EventEmitter {
       } else {
         result = this.scan.add(frame);
       }
-      if (result.kept) this._announceViewCaptured();
-      else this._emitScanState('capturing');
+      if (result.kept) {
+        this._announceViewCaptured();
+        // The page is at rest on a new view (first view, or scrolling just
+        // settled): read what we have so far in the background.
+        if (!moved) this._speculate();
+      } else this._emitScanState('capturing');
 
       if (result.limitReached || now - this.scanStartedAt >= SCAN_MAX_DURATION_MS) {
         await this._submitGuidedScan({ partial: true, limitReached: true, finishedBy: 'limit' });
@@ -362,8 +369,10 @@ class CodingCapture extends EventEmitter {
       const result = this.scan.addManual(frame);
       // A deliberate capture counts as activity: don't auto-finish right after.
       if (this.scanMotion) this.scanMotion.lastMotionAt = Date.now();
-      if (result.kept) this._announceViewCaptured();
-      else this._emitScanState('capturing', { lastCapture: 'duplicate' });
+      if (result.kept) {
+        this._announceViewCaptured();
+        this._speculate();
+      } else this._emitScanState('capturing', { lastCapture: 'duplicate' });
       if (result.limitReached) {
         await this._submitGuidedScan({ partial: true, limitReached: true, finishedBy: 'limit' });
       }
@@ -409,6 +418,44 @@ class CodingCapture extends EventEmitter {
     return { ok: true };
   }
 
+  // Read the views captured so far while the user keeps scrolling. Fully
+  // visible questions get answered early, and when the scan ends on these
+  // same views the backend reuses this read instead of starting over. One
+  // read at a time; views kept meanwhile queue a single follow-up read.
+  _speculate() {
+    if (!this.scanning || !this.sessionId) return;
+    const spec = this.speculation;
+    if (spec.inflight) {
+      spec.dirty = true;
+      return;
+    }
+    spec.inflight = true;
+    spec.dirty = false;
+    const scanId = this.scanId;
+    const images = this.scan.frames.map((frame) => frame.base64);
+    void fetch(`${BACKEND_URL}/api/vision/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        images_base64: images,
+        session_id: this.sessionId,
+        force: true,
+        speculative: true,
+        scan_id: scanId,
+        provider: this.provider || undefined,
+        claude_model: this.claudeModel || undefined,
+      }),
+    })
+      .then((response) => {
+        if (!response.ok) this.emit('log', `speculative scan read failed: ${response.status}`);
+      })
+      .catch((error) => this.emit('log', `speculative scan read failed: ${error.message || error}`))
+      .finally(() => {
+        spec.inflight = false;
+        if (spec.dirty && this.scanning && this.scanId === scanId) this._speculate();
+      });
+  }
+
   async _submitGuidedScan({ partial, limitReached, finishedBy = 'manual' }) {
     if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
     if (this.scanTimer) clearTimeout(this.scanTimer);
@@ -430,6 +477,7 @@ class CodingCapture extends EventEmitter {
           session_id: this.sessionId,
           force: true,
           scan_incomplete: Boolean(partial),
+          scan_id: this.scanId || undefined,
           provider: this.provider || undefined,
           claude_model: this.claudeModel || undefined,
         }),

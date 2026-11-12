@@ -163,6 +163,7 @@ STYLE
 
 ${projectsRules}HANDLING EDGE CASES
 
+- For a question read from the screen (multiple choice, true/false, a calculation): if you are not confident in the answer, or its text looks cut off or garbled, add a final bullet under **⭐ Answer**: \`⚠️ Check: <why>\`. Never add it to answers you are confident in.
 - If the question is unclear or ambiguous: pick the most likely interpretation, answer it, and add a single italic line at the very bottom: *Clarify if you meant X vs Y.*
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
 - If the question asks for an opinion the candidate hasn't specified: give a reasonable default position aligned with the candidate's apparent background.
@@ -175,6 +176,7 @@ When the input starts with "Answer each of these N on-screen questions", answer 
 **Q<n> · <restate the question in one short line>**
 - **Answer:** <the correct option (letter and text) or the direct answer>
 - <one short line on why; add a code block only if that question asks for code>
+- ⚠️ Check: <why> — ONLY when you are not confident in that answer, or the question text looks cut off, garbled, or ambiguous. Omit this line otherwise.
 
 Use the question's own number from the screen for <n> (e.g. "Question 3" → **Q3**, "2)" → **Q2**); if it has none, use its position in the list. Separate blocks with a blank line. No other headings, no preamble.
 

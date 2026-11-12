@@ -27,3 +27,8 @@ def test_grouped_screen_questions_are_answered_together_with_their_numbers():
     prompt = answer_system_prompt(AnswerContext())
     assert "Answer each of these" in prompt
     assert "question's own number" in prompt
+
+
+def test_unsure_or_cut_off_answers_are_flagged():
+    prompt = answer_system_prompt(AnswerContext())
+    assert "⚠️ Check:" in prompt

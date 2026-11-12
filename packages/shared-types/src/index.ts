@@ -345,6 +345,10 @@ export interface ScreenQuestionDetectedEvent {
   completeness: 'complete' | 'partial' | 'uncertain';
   missing_sections: string[];
   source: 'single_frame' | 'guided_scan';
+  /** Read mid-scan from the views captured so far; more may follow. */
+  speculative?: boolean;
+  /** Shared by every event of one guided scan. */
+  scan_id?: string | null;
 }
 
 /** A passage / preamble / table was remembered as reference material. */
