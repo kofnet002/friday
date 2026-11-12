@@ -58,7 +58,9 @@ apps/backend/data/
 coverage/
 .nyc_output/
 
-.claude
+.claude/*
+# Project skills are shared; local settings stay private.
+!.claude/skills/
 # Project-context benchmark: cached briefs + per-run results
 apps/backend/evals/projects/.cache/
 apps/backend/evals/projects/results/
