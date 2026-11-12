@@ -157,6 +157,9 @@ export interface CodingPanelProps {
   } | null;
   onAnswerCapturedQuestion: () => void;
   onScanQuestionAgain: () => void;
+  /** Latest passage remembered as reference material (null when none). */
+  savedReference: { count: number; preview: string } | null;
+  onClearScreenContext: () => void;
 }
 
 export function CodingPanel({
@@ -195,6 +198,8 @@ export function CodingPanel({
   pendingScreenQuestion,
   onAnswerCapturedQuestion,
   onScanQuestionAgain,
+  savedReference,
+  onClearScreenContext,
 }: CodingPanelProps) {
   const activeTab = tabs.find((t) => t.fingerprint === activeFingerprint) ?? null;
   const [displays, setDisplays] = useState<FridayScanDisplay[]>([]);
@@ -380,6 +385,30 @@ export function CodingPanel({
             <span role="alert" className="w-full text-xs text-destructive">
               Scan failed: {scanState.error || 'Try again.'}
             </span>
+          ) : null}
+          {savedReference ? (
+            <div
+              role="status"
+              className="flex w-full items-center gap-2 border-t border-sky-200/70 pt-2 text-xs dark:border-sky-900/70"
+            >
+              <span className="min-w-0 flex-1 truncate" title={savedReference.preview}>
+                <span className="font-medium">
+                  Saved passage as reference
+                  {savedReference.count > 1 ? ` (${savedReference.count})` : ''}:
+                </span>{' '}
+                <span className="text-muted-foreground">“{savedReference.preview}”</span>
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-7 shrink-0 px-2 text-xs"
+                onClick={onClearScreenContext}
+                aria-label="Clear remembered screen context"
+              >
+                Clear
+              </Button>
+            </div>
           ) : null}
         </div>
       ) : null}

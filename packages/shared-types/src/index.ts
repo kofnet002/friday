@@ -347,6 +347,15 @@ export interface ScreenQuestionDetectedEvent {
   source: 'single_frame' | 'guided_scan';
 }
 
+/** A passage / preamble / table was remembered as reference material. */
+export interface ScreenReferenceSavedEvent {
+  type: 'screen_reference_saved';
+  /** How many passages are remembered for this session. */
+  count: number;
+  /** First ~120 characters of the passage just saved. */
+  preview: string;
+}
+
 /** Operating modes for /ws/coding-solution. `solve` is the existing
  *  problem→solution path. `explain` walks through a code snippet, `debug`
  *  diagnoses + fixes a snippet given an error message, `tests` generates
@@ -440,7 +449,8 @@ export type CodingSolutionServerMessage =
    *  (perf gate / edge cases); the final message replaces it if improved. */
   | { type: 'agent_solution'; text: string; provisional?: boolean }
   | CodingProblemDetectedEvent
-  | ScreenQuestionDetectedEvent;
+  | ScreenQuestionDetectedEvent
+  | ScreenReferenceSavedEvent;
 
 // ─── project context library ─────────────────────────────────────────────────
 // Mirrors app.api.projects. Projects are library-level (not per session);

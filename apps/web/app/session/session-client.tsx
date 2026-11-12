@@ -53,6 +53,7 @@ import { CodingWs } from '@/lib/coding-ws';
 import {
   fetchSessionDetail,
   fetchSessionUsage,
+  clearScreenContext,
   getCodingClaudeModelPreference,
   getCodingLanguagePreference,
   getOrCreateSessionId,
@@ -263,6 +264,17 @@ export function SessionClient() {
   // Questions already answered from the screen this session, so a rescan or
   // the watcher re-reading the same page doesn't answer them twice.
   const answeredScreenRef = useRef<Set<string>>(new Set());
+  const [savedReference, setSavedReference] = useState<{
+    count: number;
+    preview: string;
+  } | null>(null);
+  // Start fresh: forget remembered passages, the current screen text, and
+  // which on-screen questions were already answered.
+  const resetScreenContext = (sid: string) => {
+    setSavedReference(null);
+    answeredScreenRef.current = new Set();
+    void clearScreenContext(sid);
+  };
   const [codingConnected, setCodingConnected] = useState(false);
   // Coding panel mode (solve / explain / debug / tests). Each non-solve
   // mode keeps its OWN scratch buffer — switching from Explain to Debug
@@ -787,6 +799,10 @@ export function SessionClient() {
   };
 
   const onCodingSolutionMessage = useCallback((msg: CodingSolutionServerMessage) => {
+    if (msg.type === 'screen_reference_saved') {
+      setSavedReference({ count: msg.count, preview: msg.preview });
+      return;
+    }
     if (msg.type === 'screen_question_detected') {
       // During a combined session, the spoken question is the trigger and
       // the extracted screen text is supporting context for that answer.
@@ -1811,6 +1827,9 @@ export function SessionClient() {
     if (codingStartingRef.current) return false;
     screenContextRef.current = null;
     const sid = getOrCreateSessionId();
+    // A new watch usually means a new assessment — don't answer it against
+    // passages remembered from the last one.
+    resetScreenContext(sid);
     codingStartingRef.current = true;
     setCodingStarting(true);
     try {
@@ -2328,6 +2347,8 @@ export function SessionClient() {
               setPendingScreenQuestion(null);
               void startGuidedScan();
             }}
+            savedReference={savedReference}
+            onClearScreenContext={() => resetScreenContext(getOrCreateSessionId())}
           />
         </PanelErrorBoundary>
       );

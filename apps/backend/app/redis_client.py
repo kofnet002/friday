@@ -136,6 +136,19 @@ async def set_screen_references(session_id: str, references: list[str]) -> None:
     )
 
 
+async def clear_screen_state(session_id: str) -> None:
+    """Forget the current screen text and remembered passages for a session."""
+    client = await get_redis()
+    if client is None:
+        return
+    await cast(
+        Awaitable[Any],
+        client.delete(
+            f"session:{session_id}:screen_context", f"session:{session_id}:screen_references"
+        ),
+    )
+
+
 async def get_screen_context(session_id: str) -> str | None:
     client = await get_redis()
     if client is None:

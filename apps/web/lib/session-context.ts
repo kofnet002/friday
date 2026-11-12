@@ -220,6 +220,20 @@ export interface SessionUsageSummary {
  * desktop-driven /api/vision/extract calls (which don't otherwise know the
  * user's current pick) honor it.
  */
+/** Forget the session's remembered passages and current screen text. */
+export async function clearScreenContext(sessionId: string): Promise<boolean> {
+  if (!sessionId) return false;
+  try {
+    const res = await fetch(
+      `${BACKEND_HTTP_URL}/api/vision/screen-context?session_id=${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function patchSessionProvider(
   sessionId: string,
   provider: AnswerProvider,

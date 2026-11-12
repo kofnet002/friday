@@ -12,6 +12,7 @@ from app.models.coding import ExtractedProblem
 from app.prompts.coding_extraction import EXTRACTION_MIN_CONFIDENCE
 from app.redis_client import (
     add_seen_problem_fingerprint,
+    clear_screen_state,
     get_screen_references,
     set_current_problem,
     set_screen_context,
@@ -126,6 +127,14 @@ def compose_screen_context(current: str, references: list[str]) -> str:
     return f"{current}\n\n{block}" if current else block
 
 
+def reference_saved_event(references: list[str], saved: str) -> dict[str, Any]:
+    """Tell the panel a passage was remembered, with a one-line preview."""
+    preview = " ".join(saved.split())
+    if len(preview) > 120:
+        preview = preview[:119].rstrip() + "…"
+    return {"type": "screen_reference_saved", "count": len(references), "preview": preview}
+
+
 def should_emit_screen_question(problem: ExtractedProblem) -> bool:
     return bool(
         problem.is_screen_question
@@ -145,6 +154,14 @@ def screen_question_event(problem: ExtractedProblem, *, is_scan: bool) -> dict[s
         "missing_sections": problem.missing_sections,
         "source": "guided_scan" if is_scan else "single_frame",
     }
+
+
+@router.delete("/screen-context")
+async def clear_screen_context(session_id: str) -> dict[str, bool]:
+    """Forget remembered passages and the current screen text, e.g. when the
+    user moves on to a different assessment."""
+    await clear_screen_state(session_id)
+    return {"ok": True}
 
 
 @router.post("/extract")
@@ -242,6 +259,9 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
             references = updated
             await set_screen_references(request.session_id, references)
             log.info("vision.reference_saved", session_id=request.session_id, count=len(references))
+            await session_bus.publish(
+                request.session_id, reference_saved_event(references, problem.visible_context)
+            )
     current_screen = "\n\n".join(
         part for part in (screen_text or None, problem.screen_code) if part
     )

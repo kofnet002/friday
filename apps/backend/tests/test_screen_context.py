@@ -132,3 +132,32 @@ def test_screen_question_event_carries_every_question():
     assert event["questions"] == ["Q1", "Q2", "Q3"]
     assert event["question"] == "Q1"
     assert event["source"] == "guided_scan"
+
+
+def test_reference_saved_event_has_a_short_preview():
+    from app.api.vision import reference_saved_event
+
+    passage = "Northwind Logistics operates warehouses in three regions. " * 10
+    event = reference_saved_event([passage, "second"], passage)
+    assert event["type"] == "screen_reference_saved"
+    assert event["count"] == 2
+    assert event["preview"].startswith("Northwind Logistics operates")
+    assert len(event["preview"]) <= 121
+
+
+def test_clear_screen_context_endpoint_clears_session_state(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.api import vision
+    from app.main import app
+
+    cleared: list[str] = []
+
+    async def fake_clear(session_id: str) -> None:
+        cleared.append(session_id)
+
+    monkeypatch.setattr(vision, "clear_screen_state", fake_clear)
+    response = TestClient(app).delete("/api/vision/screen-context", params={"session_id": "s1"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert cleared == ["s1"]
