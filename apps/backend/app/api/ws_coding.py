@@ -19,6 +19,7 @@ from app.services.coding_agent import (
     stream_coding_agent,
 )
 from app.services.coding_extraction import problem_fingerprint
+from app.services.claude_api import normalize_claude_model
 from app.services.coding_solution import (
     Provider,
     resolved_model,
@@ -256,6 +257,9 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
 
     async def run_stream(request: dict[str, Any]) -> None:
         provider: Provider = request.get("provider", "gemini")
+        # Which Claude model screen mode should use when provider == "claude";
+        # anything not on the allow-list falls back to the configured default.
+        claude_model = normalize_claude_model(request.get("claude_model"))
         language = str(request.get("language") or "Python")
         mode: CodingMode = request.get("mode") or "solve"
         problem = request.get("problem") or {}
@@ -327,7 +331,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
         # logging report the model that will actually run, not the default
         # Flash tier.
         deep = should_use_deep(mode, problem, prior_solution, feedback)
-        model = resolved_model(provider, deep=deep)
+        model = resolved_model(provider, deep=deep, claude_model=claude_model)
         await send_json(
             {
                 "type": "started",
@@ -347,7 +351,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
             effective_provider = nxt
             # Preserve the deep flag across the fallback so the credited
             # model matches the tier the new provider actually used.
-            effective_model = resolved_model(nxt, deep=deep)
+            effective_model = resolved_model(nxt, deep=deep, claude_model=claude_model)
             await send_json(
                 {
                     "type": "provider_changed",
@@ -381,6 +385,7 @@ async def ws_coding_solution(websocket: WebSocket, session_id: str | None = None
                 prior_solution=prior_solution if mode == "solve" else None,
                 feedback=feedback if mode == "solve" else None,
                 on_fallback=_on_fallback,
+                claude_model=claude_model,
             ):
                 collected.append(token)
                 await send_json({"type": "token", "text": token})

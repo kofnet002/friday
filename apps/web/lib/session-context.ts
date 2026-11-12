@@ -1,5 +1,6 @@
 import type {
   AnswerProvider,
+  ClaudeModel,
   CodingLanguage,
   InterviewType,
   QAHistoryRow,
@@ -80,6 +81,27 @@ export function getProviderPreference(): AnswerProvider {
 export function setProviderPreference(p: AnswerProvider): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(PROVIDER_KEY, p);
+}
+
+const CLAUDE_MODEL_KEY = 'friday.session.coding_claude_model';
+/** Claude models offered in screen mode, in picker order. */
+export const CLAUDE_MODEL_OPTIONS: readonly { id: ClaudeModel; label: string }[] = [
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
+  { id: 'claude-fable-5-2', label: 'Claude Fable 5.2' },
+];
+
+export function getCodingClaudeModelPreference(): ClaudeModel {
+  if (typeof window === 'undefined') return 'claude-opus-5-5';
+  const raw = window.localStorage.getItem(CLAUDE_MODEL_KEY);
+  const match = CLAUDE_MODEL_OPTIONS.find((option) => option.id === raw);
+  return match ? match.id : 'claude-opus-5-5';
+}
+
+export function setCodingClaudeModelPreference(model: ClaudeModel): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(CLAUDE_MODEL_KEY, model);
 }
 
 export function getCodingLanguagePreference(): CodingLanguage {

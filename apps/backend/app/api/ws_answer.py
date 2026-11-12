@@ -54,6 +54,19 @@ def _last_user_index(messages: list[Any]) -> int | None:
     return None
 
 
+def resolve_screen_context(override: dict[str, Any], stored: str | None) -> str | None:
+    """Pick the screen context for an answer.
+
+    The backend's stored context is authoritative: it is written before a
+    screen question is published (so it can't lag a scan) and includes
+    remembered passages. The renderer's copy is only a fallback for when Redis
+    is unavailable. An explicit empty string means screen capture is off.
+    """
+    if "screen_context" in override and override.get("screen_context") == "":
+        return None
+    return stored or override.get("screen_context") or None
+
+
 @router.websocket("/ws/answer")
 async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None:
     await websocket.accept()
@@ -156,12 +169,13 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 recent_transcript = None
 
         projects = await load_project_contexts(session_id)
-        screen_context = override.get("screen_context")
-        if "screen_context" not in override and session_id:
+        stored_screen: str | None = None
+        if session_id and override.get("screen_context") != "":
             try:
-                screen_context = await get_screen_context(session_id)
+                stored_screen = await get_screen_context(session_id)
             except Exception:  # noqa: BLE001 - screen context is optional
-                screen_context = None
+                stored_screen = None
+        screen_context = resolve_screen_context(override, stored_screen)
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(

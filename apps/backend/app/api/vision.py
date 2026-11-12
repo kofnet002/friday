@@ -11,8 +11,15 @@ from app.logging import log
 from app.models.coding import ExtractedProblem
 from app.prompts.coding_extraction import EXTRACTION_MIN_CONFIDENCE
 from app.prompts.function_call_extraction import FUNCTION_CALL_EXTRACTION_MIN_CONFIDENCE
-from app.redis_client import add_seen_problem_fingerprint, set_current_problem, set_screen_context
+from app.redis_client import (
+    add_seen_problem_fingerprint,
+    get_screen_references,
+    set_current_problem,
+    set_screen_context,
+    set_screen_references,
+)
 from app.services import function_call_extraction as fc_extraction
+from app.services.claude_api import normalize_claude_model
 from app.services.coding_extraction import (
     arm_cooldown,
     cached_result,
@@ -36,6 +43,8 @@ class ExtractRequest(BaseModel):
     # absent the service resolves it from the session's default_provider,
     # so the user-selected model in the Coding panel reaches the OCR step.
     provider: str | None = None
+    # Claude model picked in screen mode; ignored unless on the allow-list.
+    claude_model: str | None = None
     scan_cropped: bool = False
     scan_incomplete: bool = False
 
@@ -81,13 +90,63 @@ def mark_scan_incomplete(problem: ExtractedProblem) -> ExtractedProblem:
     return problem
 
 
+# Budget for remembered passages / preambles. Oldest are dropped first; the
+# whole screen context is capped at 20k chars in redis_client.
+MAX_REFERENCE_CHARS = 12_000
+REFERENCE_HEADER = (
+    "Earlier reference material on screen (passages / preambles the questions may refer to):"
+)
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+def merge_references(references: list[str], new: str) -> list[str]:
+    """Add a newly seen passage, dropping exact repeats and shorter earlier
+    reads of the same passage (a rescan that captured more of it)."""
+    new = new.strip()[:MAX_REFERENCE_CHARS]
+    if not new:
+        return list(references)
+    new_norm = _norm(new)
+    if any(new_norm in _norm(ref) for ref in references):
+        return list(references)
+    merged = [ref for ref in references if _norm(ref) not in new_norm] + [new]
+    while len(merged) > 1 and sum(len(ref) for ref in merged) > MAX_REFERENCE_CHARS:
+        merged.pop(0)
+    return merged
+
+
+def compose_screen_context(current: str, references: list[str]) -> str:
+    """Current screen first (most relevant), then earlier reference material
+    that isn't already visible on the current screen."""
+    current_norm = _norm(current)
+    earlier = [ref for ref in references if _norm(ref) not in current_norm]
+    if not earlier:
+        return current
+    block = REFERENCE_HEADER + "\n\n" + "\n\n---\n\n".join(earlier)
+    return f"{current}\n\n{block}" if current else block
+
+
 def should_emit_screen_question(problem: ExtractedProblem) -> bool:
     return bool(
         problem.is_screen_question
         and not problem.is_coding_problem
-        and problem.question
+        and problem.questions
         and problem.confidence >= EXTRACTION_MIN_CONFIDENCE
     )
+
+
+def screen_question_event(problem: ExtractedProblem, *, is_scan: bool) -> dict[str, Any]:
+    return {
+        "type": "screen_question_detected",
+        "question": problem.question,
+        "questions": problem.questions,
+        "screen_code": problem.screen_code,
+        "completeness": problem.completeness,
+        "missing_sections": problem.missing_sections,
+        "source": "guided_scan" if is_scan else "single_frame",
+    }
 
 
 @router.post("/extract")
@@ -146,6 +205,7 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
             image_base64 if not is_scan else image_list,
             request.session_id,
             provider=request.provider,
+            claude_model=normalize_claude_model(request.claude_model),
         )
     except Exception as exc:  # noqa: BLE001 - surface the provider error to the client
         log.error("vision.extract_error", session_id=request.session_id, error=str(exc))
@@ -160,32 +220,39 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
     screen_text = "\n\n".join(
         part
         for part in (
-            problem.question if problem.is_screen_question else None,
+            "\n\n".join(problem.questions) if problem.is_screen_question else None,
             problem.problem_statement if problem.is_coding_problem else None,
             problem.visible_context,
         )
         if part
     )
-    # Always replace the prior screen context. Keeping the previous value
-    # when a new screen has no extractable question/code can make a spoken
-    # question get answered against stale content from an earlier screen.
-    await set_screen_context(
-        request.session_id,
-        "\n\n".join(part for part in (screen_text or None, problem.screen_code) if part),
+    # Always replace the prior *current-screen* context. Keeping the previous
+    # value when a new screen has no extractable question/code can make a
+    # spoken question get answered against stale content from an earlier
+    # screen. Passages/preambles are the exception: questions are asked from
+    # them after the user has scrolled on, so they are remembered separately
+    # and appended as clearly-labelled earlier reference material.
+    references = await get_screen_references(request.session_id)
+    if (
+        problem.is_reference_material
+        and not problem.is_coding_problem
+        and problem.visible_context
+        and problem.confidence >= 0.5
+    ):
+        updated = merge_references(references, problem.visible_context)
+        if updated != references:
+            references = updated
+            await set_screen_references(request.session_id, references)
+            log.info("vision.reference_saved", session_id=request.session_id, count=len(references))
+    current_screen = "\n\n".join(
+        part for part in (screen_text or None, problem.screen_code) if part
     )
+    await set_screen_context(request.session_id, compose_screen_context(current_screen, references))
 
     emitted = False
     if should_emit_screen_question(problem):
         emitted = await session_bus.publish(
-            request.session_id,
-            {
-                "type": "screen_question_detected",
-                "question": problem.question,
-                "screen_code": problem.screen_code,
-                "completeness": problem.completeness,
-                "missing_sections": problem.missing_sections,
-                "source": "guided_scan" if is_scan else "single_frame",
-            },
+            request.session_id, screen_question_event(problem, is_scan=is_scan)
         )
     if (
         problem.is_coding_problem

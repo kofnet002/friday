@@ -109,6 +109,33 @@ async def set_screen_context(session_id: str, content: str) -> None:
     ))
 
 
+async def get_screen_references(session_id: str) -> list[str]:
+    """Reference material (passages / preambles) seen earlier this session."""
+    client = await get_redis()
+    if client is None:
+        return []
+    raw = await cast(Awaitable[str | None], client.get(f"session:{session_id}:screen_references"))
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+async def set_screen_references(session_id: str, references: list[str]) -> None:
+    client = await get_redis()
+    if client is None:
+        return
+    await cast(
+        Awaitable[Any],
+        client.set(
+            f"session:{session_id}:screen_references", json.dumps(references), ex=QD_STATE_TTL_S
+        ),
+    )
+
+
 async def get_screen_context(session_id: str) -> str | None:
     client = await get_redis()
     if client is None:

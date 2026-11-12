@@ -28,6 +28,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "deepseek-reasoner": (0.55, 2.19),
     # Claude (Anthropic) list prices. Output includes thinking tokens, which
     # the API transport reports in usage.output_tokens.
+    "claude-fable-5-2": (8.00, 40.00),
     "claude-opus-5-5": (4.00, 20.00),
     "claude-sonnet-5-5": (2.00, 10.00),
     "claude-haiku-5-5": (0.10, 0.50),

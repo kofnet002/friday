@@ -99,11 +99,13 @@ contextBridge.exposeInMainWorld('friday', {
     startGuidedScan: (displayId) => ipcRenderer.invoke('coding:scan:start', displayId),
     finishGuidedScan: () => ipcRenderer.invoke('coding:scan:finish'),
     cancelGuidedScan: () => ipcRenderer.invoke('coding:scan:cancel'),
+    captureScanSection: () => ipcRenderer.invoke('coding:scan:capture'),
     listDisplays: () => ipcRenderer.invoke('coding:scan:displays'),
     setScanDisplay: (displayId) => ipcRenderer.invoke('coding:scan:display', displayId),
     getScanDisplay: () => ipcRenderer.invoke('coding:scan:get_display'),
     isActive: () => ipcRenderer.invoke('coding:isActive'),
     setProvider: (provider) => ipcRenderer.invoke('coding:set_provider', provider),
+    setClaudeModel: (model) => ipcRenderer.invoke('coding:set_claude_model', model),
     onFrameProcessed: (cb) => {
       codingListeners.frame_processed.add(cb);
       return () => codingListeners.frame_processed.delete(cb);

@@ -1,4 +1,4 @@
-import type { AnswerProvider, ExtractedProblem } from '@friday/shared-types';
+import type { AnswerProvider, ClaudeModel, ExtractedProblem } from '@friday/shared-types';
 
 export {};
 
@@ -29,6 +29,12 @@ declare global {
     limitReached?: boolean;
     partial?: boolean;
     error?: string;
+    /** How the scan ended: Finish button/shortcut, scrolling stopped, or a cap. */
+    finishedBy?: 'manual' | 'idle' | 'limit';
+    /** Result of the latest "capture this section" request. */
+    lastCapture?: 'added' | 'duplicate';
+    /** Epoch ms of the latest kept view — drives the "scroll on" cue. */
+    capturedAt?: number;
   }
 
   interface FridayScanDisplay {
@@ -52,12 +58,14 @@ declare global {
     startGuidedScan: (displayId?: string | null) => Promise<{ ok: boolean; error?: string }>;
     finishGuidedScan: () => Promise<{ ok: boolean; error?: string; partial?: boolean }>;
     cancelGuidedScan: () => Promise<{ ok: boolean; error?: string }>;
+    captureScanSection: () => Promise<{ ok: boolean; error?: string; kept?: boolean }>;
     listDisplays: () => Promise<FridayScanDisplay[]>;
     setScanDisplay: (displayId: string | null) => Promise<{ ok: boolean }>;
     getScanDisplay: () => Promise<string | null>;
     onScanState: (cb: (state: FridayScanState) => void) => () => void;
     isActive: () => Promise<boolean>;
     setProvider: (provider: AnswerProvider) => Promise<{ ok: boolean; provider: string | null }>;
+    setClaudeModel?: (model: ClaudeModel) => Promise<{ ok: boolean; model: string | null }>;
     onFrameProcessed: (cb: (info: FridayCodingFrameInfo) => void) => () => void;
     onExtractionResult: (cb: (payload: FridayCodingExtractionResult) => void) => () => void;
     onError: (cb: (msg: string) => void) => () => void;

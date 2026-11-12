@@ -309,6 +309,7 @@ export interface ExtractedProblem {
   is_coding_problem: boolean;
   is_screen_question?: boolean;
   question?: string | null;
+  questions?: string[];
   visible_context?: string | null;
   screen_code?: string | null;
   completeness?: 'complete' | 'partial' | 'uncertain';
@@ -335,6 +336,8 @@ export interface CodingProblemDetectedEvent {
 export interface ScreenQuestionDetectedEvent {
   type: 'screen_question_detected';
   question: string;
+  /** Every question on screen in page order (absent from older backends). */
+  questions?: string[];
   screen_code?: string | null;
   completeness: 'complete' | 'partial' | 'uncertain';
   missing_sections: string[];
@@ -352,6 +355,13 @@ export type CodingMode = 'solve' | 'explain' | 'debug' | 'tests' | 'agent';
 // /ws/coding-solution protocol. The legacy {type:'solve'} payload still
 // works; new modes route via {type:'solve' with mode:'…'} so the WS
 // frame type stays a single 'solve' string the server already handles.
+/** Claude models selectable in screen mode (solving + screen reading). */
+export type ClaudeModel =
+  | 'claude-opus-5-5'
+  | 'claude-sonnet-5-5'
+  | 'claude-haiku-5-5'
+  | 'claude-fable-5-2';
+
 export type CodingSolutionClientMessage =
   | {
       type: 'solve';
@@ -374,6 +384,8 @@ export type CodingSolutionClientMessage =
       feedback?: string;
       language: CodingLanguage;
       provider: AnswerProvider;
+      /** Which Claude model to use when provider is 'claude'. */
+      claude_model?: ClaudeModel;
       extra_instructions?: string;
     }
   | { type: 'cancel' }

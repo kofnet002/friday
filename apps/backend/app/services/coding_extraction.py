@@ -155,6 +155,7 @@ async def extract_problem(
     image_base64: str | list[bytes],
     session_id: str,
     provider: str | None = None,
+    claude_model: str | None = None,
 ) -> ExtractedProblem:
     """Run vision extraction using the user-selected provider. DeepSeek has
     no native vision model so it transparently falls back to Gemini (logged)."""
@@ -203,7 +204,9 @@ async def extract_problem(
             )
         try:
             if prov == "claude":
-                problem, output_tokens, model_used = await _extract_claude(images, session_id)
+                problem, output_tokens, model_used = await _extract_claude(
+                    images, session_id, model=claude_model
+                )
             elif prov == "openai":
                 problem, output_tokens, model_used = await _extract_openai(images)
             else:
@@ -301,7 +304,7 @@ def _strip_json_fence(text: str) -> str:
 
 
 async def _extract_claude(
-    image_bytes: bytes | list[bytes], session_id: str
+    image_bytes: bytes | list[bytes], session_id: str, *, model: str | None = None
 ) -> tuple[ExtractedProblem, int | None, str]:
     """Vision extraction via Claude — the API (image block) or the
     subscription CLI (Claude Code reads the screenshot), per CLAUDE_TRANSPORT."""
@@ -318,7 +321,7 @@ async def _extract_claude(
             " a single JSON object matching the schema — no markdown fences, no"
             " commentary."
         ),
-        model=settings.claude_vision_model,
+        model=model or settings.claude_vision_model,
         max_tokens=max_output_tokens,
         session_id=session_id,
     )

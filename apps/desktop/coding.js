@@ -7,7 +7,7 @@
 const { desktopCapturer, screen } = require('electron');
 const { EventEmitter } = require('node:events');
 const sharp = require('sharp');
-const { ScanSelector } = require('./scan');
+const { ScanSelector, signatureDistance, autoFinishReason } = require('./scan');
 
 // Mirrors packages/prompts/coding-extraction.ts CODING_EXTRACTION_CONFIG.
 const SAMPLE_INTERVAL_MS = 1000;
@@ -15,7 +15,15 @@ const FRAME_CHANGE_THRESHOLD = 0.15;
 const MIN_API_INTERVAL_MS = 2000;
 const SCAN_SAMPLE_INTERVAL_MS = 400;
 const SCAN_MAX_DURATION_MS = 90_000;
-const SCAN_MAX_FRAMES = 10;
+const SCAN_MAX_FRAMES = 12; // backend MAX_SCAN_IMAGES
+// Finish on our own once the page has been still this long after scrolling.
+const SCAN_IDLE_AFTER_SCROLL_MS = 4000;
+// …or this long when the user never scrolled at all.
+const SCAN_IDLE_WITHOUT_SCROLL_MS = 12_000;
+// Mean per-pixel change (0-255) on the 32x32 signature that counts as the
+// page moving. A blinking caret or hover highlight stays well below this.
+const SCAN_MOTION_THRESHOLD = 2;
+const SIGNATURE_SIZE = 32;
 const MAX_WIDTH_PX = 1920;
 const JPEG_QUALITY = 80;
 
@@ -40,6 +48,17 @@ async function computeAverageHash(buffer) {
     if (data[i] >= mean) hash[i >> 3] |= 1 << (i & 7);
   }
   return hash;
+}
+
+// 32x32 grayscale downsample — a finer motion signal than the 8x8 hash, used
+// to notice scrolling and when it stops.
+async function computeSignature(buffer) {
+  const { data } = await sharp(buffer)
+    .resize(SIGNATURE_SIZE, SIGNATURE_SIZE, { fit: 'fill' })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return Uint8Array.from(data.subarray(0, SIGNATURE_SIZE * SIGNATURE_SIZE));
 }
 
 function hammingDistance(a, b) {
@@ -101,6 +120,9 @@ class CodingCapture extends EventEmitter {
     this.scanTimer = null;
     this.scanStartedAt = 0;
     this.scanDisplayId = null;
+    this.scanMotion = null;
+    this.scanCapturedAt = 0;
+    this.claudeModel = null;
   }
 
   isActive() {
@@ -118,6 +140,12 @@ class CodingCapture extends EventEmitter {
       label: source.name,
       isPrimary: source.display_id === primaryId,
     }));
+  }
+
+  // Claude model picked in screen mode. The backend validates it against its
+  // allow-list, so an unknown value just falls back to the default.
+  setClaudeModel(model) {
+    this.claudeModel = typeof model === 'string' && model.startsWith('claude-') ? model : null;
   }
 
   setProvider(provider) {
@@ -177,6 +205,8 @@ class CodingCapture extends EventEmitter {
     if (!this.active || !this.paused) return { ok: true };
     this.paused = false;
     this.emit('log', 'screen capture resumed');
+    // Time spent paused isn't "stopped scrolling" — restart the idle clock.
+    if (this.scanMotion) this.scanMotion.lastMotionAt = Date.now();
     if (this.scanning) void this._scanTick();
     else this._schedule(0);
     return { ok: true };
@@ -248,28 +278,66 @@ class CodingCapture extends EventEmitter {
     this.scan = new ScanSelector({ maxFrames: SCAN_MAX_FRAMES });
     this.scanDisplayId = displayId || null;
     this.scanStartedAt = Date.now();
+    this.scanMotion = { lastSig: null, lastMotionAt: 0, moving: false, scrolled: false };
+    this.scanCapturedAt = 0;
     this._emitScanState('capturing');
     await this._scanTick();
     return { ok: true };
   }
 
+  async _captureScanFrame() {
+    const img = await captureScreen(this.scanDisplayId);
+    if (!img) throw new Error('No screen available for guided scan');
+    const png = img.toPNG();
+    const [hash, sig] = await Promise.all([computeAverageHash(png), computeSignature(png)]);
+    return { hash, sig, ...(await toJpegBase64(img)) };
+  }
+
   async _scanTick() {
     if (!this.scanning || this.paused) return;
     try {
-      const img = await captureScreen(this.scanDisplayId);
+      const frame = await this._captureScanFrame();
       if (!this.scanning || this.paused) return;
-      if (!img) throw new Error('No screen available for guided scan');
-      const png = img.toPNG();
-      const hash = await computeAverageHash(png);
-      const frame = { hash, ...(await toJpegBase64(img)) };
-      const result = this.scan.add(frame);
-      this._emitScanState('capturing');
-      if (result.limitReached) {
-        await this._submitGuidedScan({ partial: true, limitReached: true });
+      const now = Date.now();
+      const motion = this.scanMotion;
+      const moved =
+        motion.lastSig !== null &&
+        signatureDistance(motion.lastSig, frame.sig) > SCAN_MOTION_THRESHOLD;
+      motion.lastSig = frame.sig;
+
+      let result;
+      if (moved) {
+        motion.lastMotionAt = now;
+        motion.moving = true;
+        motion.scrolled = true;
+        // Mid-scroll: keep only views the coarse hash sees as new.
+        result = this.scan.add(frame);
+      } else if (motion.moving) {
+        // Scrolling just settled — the user is looking at this position, so
+        // keep it even if the coarse hash calls it a near-duplicate.
+        motion.moving = false;
+        result = this.scan.addManual(frame);
+      } else {
+        result = this.scan.add(frame);
+      }
+      if (result.kept) this._announceViewCaptured();
+      else this._emitScanState('capturing');
+
+      if (result.limitReached || now - this.scanStartedAt >= SCAN_MAX_DURATION_MS) {
+        await this._submitGuidedScan({ partial: true, limitReached: true, finishedBy: 'limit' });
         return;
       }
-      if (Date.now() - this.scanStartedAt >= SCAN_MAX_DURATION_MS) {
-        await this._submitGuidedScan({ partial: true, limitReached: true });
+      const reason = autoFinishReason({
+        scrolled: motion.scrolled,
+        startedAt: this.scanStartedAt,
+        lastMotionAt: motion.lastMotionAt,
+        now,
+        idleAfterScrollMs: SCAN_IDLE_AFTER_SCROLL_MS,
+        idleWithoutScrollMs: SCAN_IDLE_WITHOUT_SCROLL_MS,
+      });
+      if (reason) {
+        this.emit('log', 'guided scan finished: scrolling stopped');
+        await this._submitGuidedScan({ partial: false, limitReached: false, finishedBy: reason });
         return;
       }
       if (!this.paused)
@@ -278,8 +346,32 @@ class CodingCapture extends EventEmitter {
       const message = error && error.message ? error.message : String(error);
       this.emit('error', message);
       this.scan = null;
+      this.scanMotion = null;
       this._emitScanState('failed', { error: message });
       this._schedule(0);
+    }
+  }
+
+  /** Keep the current view now — the "capture this section" shortcut. */
+  async captureScanSection() {
+    if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
+    if (this.paused) return { ok: false, error: 'resume Assist before capturing' };
+    try {
+      const frame = await this._captureScanFrame();
+      if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
+      const result = this.scan.addManual(frame);
+      // A deliberate capture counts as activity: don't auto-finish right after.
+      if (this.scanMotion) this.scanMotion.lastMotionAt = Date.now();
+      if (result.kept) this._announceViewCaptured();
+      else this._emitScanState('capturing', { lastCapture: 'duplicate' });
+      if (result.limitReached) {
+        await this._submitGuidedScan({ partial: true, limitReached: true, finishedBy: 'limit' });
+      }
+      return { ok: true, kept: result.kept };
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      this.emit('error', message);
+      return { ok: false, error: message };
     }
   }
 
@@ -288,10 +380,15 @@ class CodingCapture extends EventEmitter {
     try {
       const img = this.paused ? null : await captureScreen(this.scanDisplayId);
       if (img) {
-        const hash = await computeAverageHash(img.toPNG());
-        this.scan.finish({ hash, ...(await toJpegBase64(img)) });
+        const png = img.toPNG();
+        const [hash, sig] = await Promise.all([computeAverageHash(png), computeSignature(png)]);
+        this.scan.finish({ hash, sig, ...(await toJpegBase64(img)) });
       }
-      return await this._submitGuidedScan({ partial: false, limitReached: false });
+      return await this._submitGuidedScan({
+        partial: false,
+        limitReached: false,
+        finishedBy: 'manual',
+      });
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       this.scan = null;
@@ -306,18 +403,24 @@ class CodingCapture extends EventEmitter {
     if (this.scanTimer) clearTimeout(this.scanTimer);
     this.scanTimer = null;
     this.scan = null;
+    this.scanMotion = null;
     this._emitScanState('cancelled');
     this._schedule(0);
     return { ok: true };
   }
 
-  async _submitGuidedScan({ partial, limitReached }) {
+  async _submitGuidedScan({ partial, limitReached, finishedBy = 'manual' }) {
     if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
     if (this.scanTimer) clearTimeout(this.scanTimer);
     this.scanTimer = null;
     const selector = this.scan;
     this.scan = null;
-    this._emitScanState('combining', { limitReached, frames: selector.frames.length });
+    this.scanMotion = null;
+    this._emitScanState('combining', {
+      limitReached,
+      finishedBy,
+      frames: selector.frames.length,
+    });
     try {
       const response = await fetch(`${BACKEND_URL}/api/vision/extract`, {
         method: 'POST',
@@ -328,6 +431,7 @@ class CodingCapture extends EventEmitter {
           force: true,
           scan_incomplete: Boolean(partial),
           provider: this.provider || undefined,
+          claude_model: this.claudeModel || undefined,
         }),
       });
       if (!response.ok)
@@ -344,6 +448,7 @@ class CodingCapture extends EventEmitter {
         {
           frames: selector.frames.length,
           limitReached,
+          finishedBy,
           partial: partial || data.problem?.completeness !== 'complete',
         },
       );
@@ -359,11 +464,22 @@ class CodingCapture extends EventEmitter {
     }
   }
 
+  // Tell the user this position is in the bag so they can scroll on.
+  _announceViewCaptured() {
+    const frames = this.scan ? this.scan.frames.length : 0;
+    this.scanCapturedAt = Date.now();
+    this._emitScanState('capturing', { lastCapture: 'added' });
+    this.emit('scan_view_captured', { frames, maxFrames: SCAN_MAX_FRAMES });
+  }
+
   _emitScanState(state, extra = {}) {
     this.emit('scan_state', {
       state,
       frames: this.scan ? this.scan.frames.length : extra.frames || 0,
       displayId: this.scanDisplayId || undefined,
+      // Carried on every tick so the renderer's "View N captured" cue lasts
+      // its full window instead of vanishing on the next 400ms update.
+      capturedAt: this.scan ? this.scanCapturedAt || undefined : undefined,
       ...extra,
     });
   }
@@ -380,6 +496,7 @@ class CodingCapture extends EventEmitter {
           session_id: sessionIdAtSend,
           force: Boolean(force),
           provider: this.provider || undefined,
+          claude_model: this.claudeModel || undefined,
         }),
       });
       if (!this.active || this.inflightId !== callId) {

@@ -1,4 +1,5 @@
 import type {
+  ClaudeModel,
   CodingSolutionClientMessage,
   CodingSolutionServerMessage,
 } from '@friday/shared-types';
@@ -109,9 +110,20 @@ export class CodingWs {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
+  private claudeModel: ClaudeModel | null = null;
+
+  /** Claude model screen mode should use; attached to every Claude request. */
+  setClaudeModel(model: ClaudeModel | null): void {
+    this.claudeModel = model;
+  }
+
   send(message: CodingSolutionClientMessage): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify(message));
+    const outgoing =
+      message.type === 'solve' && message.provider === 'claude' && this.claudeModel
+        ? { ...message, claude_model: message.claude_model ?? this.claudeModel }
+        : message;
+    this.ws.send(JSON.stringify(outgoing));
   }
 
   cancel(): void {

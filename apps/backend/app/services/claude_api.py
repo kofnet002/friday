@@ -49,8 +49,29 @@ _NO_EFFORT_PREFIXES = ("claude-sonnet-4-5", "claude-haiku-4", "claude-3")
 # Models that accept `fallbacks: "default"` (server-side re-run of a
 # safety-classifier refusal on Anthropic's recommended substitute model).
 _FALLBACK_MODELS = frozenset(
-    {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
+    {
+        "claude-fable-5-2",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-fable-5-1",
+        "claude-sonnet-5-5",
+    }
 )
+
+# Claude models the user can pick for screen mode (solving + screen reading).
+# Order is the order shown in the picker. _request_kwargs already shapes each
+# request per model (thinking / effort), so any of these is safe to send.
+CLAUDE_MODEL_CHOICES: tuple[str, ...] = (
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-2",
+)
+
+
+def normalize_claude_model(value: object) -> str | None:
+    """A client-supplied model id, or None unless it is an allowed choice."""
+    return value if isinstance(value, str) and value in CLAUDE_MODEL_CHOICES else None
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 

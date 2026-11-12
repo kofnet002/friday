@@ -123,7 +123,9 @@ def _build_prompts_for_mode(
     raise ValueError(f"unknown coding mode: {mode!r}")
 
 
-def resolved_model(provider: Provider, *, deep: bool = False) -> str:
+def resolved_model(
+    provider: Provider, *, deep: bool = False, claude_model: str | None = None
+) -> str:
     """Return the model name the streamers will actually call. `deep=True`
     selects the reasoning / Pro tier per provider — used for refine calls
     where the failure signals we need more capability than the default
@@ -135,6 +137,10 @@ def resolved_model(provider: Provider, *, deep: bool = False) -> str:
     if provider == "deepseek":
         return REFINE_DEEPSEEK_MODEL if deep else SOLUTION_DEEPSEEK_MODEL
     if provider == "claude":
+        # A model the user picked in screen mode wins over the deep/default
+        # tier split — they chose it on purpose (speed, cost, or capability).
+        if claude_model:
+            return claude_model
         return REFINE_ANTHROPIC_MODEL if deep else SOLUTION_ANTHROPIC_MODEL
     return SOLUTION_OPENAI_MODEL
 
@@ -208,6 +214,7 @@ async def stream_coding(
     prior_solution: str | None = None,
     feedback: str | None = None,
     on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
+    claude_model: str | None = None,
 ) -> AsyncIterator[str]:
     """Unified streamer for all four coding panel modes (solve/explain/
     debug/tests). The system+user prompts come from _build_prompts_for_mode;
@@ -243,7 +250,9 @@ async def stream_coding(
         elif p == "deepseek":
             base = lambda: _stream_deepseek(system, user, deep=deep)  # noqa: E731
         elif p == "claude":
-            base = lambda: _stream_anthropic(system, user, deep=deep)  # noqa: E731
+            base = lambda: _stream_anthropic(  # noqa: E731
+                system, user, deep=deep, model=claude_model
+            )
         else:
             base = lambda: _stream_openai(system, user, deep=deep)  # noqa: E731
         return retry_stream(base, label=f"coding.{mode}.{p}{'.deep' if deep else ''}")
@@ -362,8 +371,10 @@ async def _stream_deepseek(system: str, user: str, *, deep: bool = False) -> Asy
             yield delta.content
 
 
-async def _stream_anthropic(system: str, user: str, *, deep: bool = False) -> AsyncIterator[str]:
-    model = REFINE_ANTHROPIC_MODEL if deep else SOLUTION_ANTHROPIC_MODEL
+async def _stream_anthropic(
+    system: str, user: str, *, deep: bool = False, model: str | None = None
+) -> AsyncIterator[str]:
+    model = resolved_model("claude", deep=deep, claude_model=model)
     # Subscription transport: drive the local `claude` CLI (single-shot, no
     # tools) so the user's Claude selection runs on their subscription instead
     # of silently falling back to gemini/openai. See services/claude_cli.py.

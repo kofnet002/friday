@@ -396,7 +396,35 @@ audio.on('exit', (info) => broadcast('audio:exit', info));
 
 coding.on('frame_processed', (info) => broadcast('coding:frame_processed', info));
 coding.on('extraction_result', (payload) => broadcast('coding:extraction_result', payload));
-coding.on('scan_state', (payload) => broadcast('coding:scan_state', payload));
+// "Capture this section" is only bound while a scan runs, so the shortcut
+// isn't stolen from other apps the rest of the time.
+const SCAN_CAPTURE_ACCELERATOR = 'CommandOrControl+Shift+Enter';
+let scanCaptureBound = false;
+function syncScanCaptureShortcut(capturing) {
+  if (capturing && !scanCaptureBound) {
+    scanCaptureBound = globalShortcut.register(SCAN_CAPTURE_ACCELERATOR, () => {
+      void coding.captureScanSection().then((result) => {
+        // A kept view is announced via scan_view_captured below.
+        if (result.ok && !result.kept) publishToast('This view is already captured');
+      });
+    });
+  } else if (!capturing && scanCaptureBound) {
+    globalShortcut.unregister(SCAN_CAPTURE_ACCELERATOR);
+    scanCaptureBound = false;
+  }
+}
+coding.on('scan_view_captured', ({ frames, maxFrames }) => {
+  const remaining = maxFrames - frames;
+  publishToast(
+    remaining > 0
+      ? `View ${frames} captured — scroll to the next part`
+      : `View ${frames} captured — capture limit reached`,
+  );
+});
+coding.on('scan_state', (payload) => {
+  syncScanCaptureShortcut(payload.state === 'capturing');
+  broadcast('coding:scan_state', payload);
+});
 coding.on('error', (msg) => broadcast('coding:error', msg));
 coding.on('log', (msg) => broadcast('coding:log', msg));
 
@@ -529,11 +557,16 @@ ipcMain.handle('coding:set_provider', (_evt, provider) => {
   coding.setProvider(provider);
   return { ok: true, provider: coding.provider };
 });
+ipcMain.handle('coding:set_claude_model', (_evt, model) => {
+  coding.setClaudeModel(model);
+  return { ok: true, model: coding.claudeModel };
+});
 ipcMain.handle('coding:scan:start', (_evt, displayId) =>
   coding.startGuidedScan(displayId || getWindowState().preferences.codingDisplayId),
 );
 ipcMain.handle('coding:scan:finish', () => coding.finishGuidedScan());
 ipcMain.handle('coding:scan:cancel', () => coding.cancelGuidedScan());
+ipcMain.handle('coding:scan:capture', () => coding.captureScanSection());
 ipcMain.handle('coding:scan:displays', () => coding.listDisplays());
 ipcMain.handle('coding:scan:display', (_evt, displayId) => {
   if (windowState) windowState.set('preferences.codingDisplayId', displayId || null);
