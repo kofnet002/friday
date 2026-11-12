@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Platform = Literal["leetcode", "turing", "hackerrank", "coderpad", "other"]
 Difficulty = Literal["easy", "medium", "hard"]
@@ -29,7 +29,14 @@ class ExtractedProblem(BaseModel):
     is_coding_problem: bool
     is_screen_question: bool = False
     question: str | None = None
+    # Every distinct question on screen, in page order. A scanned assessment
+    # page often holds several; `question` stays the first for older callers.
+    questions: list[str] = Field(default_factory=list)
     visible_context: str | None = None
+    # A passage / preamble / case study / dataset the questions refer to.
+    # Kept across later screens so "Q3 — based on the passage above…" still
+    # has the passage after the user scrolls past it.
+    is_reference_material: bool = False
     screen_code: str | None = None
     completeness: Completeness = "uncertain"
     missing_sections: list[str] = Field(default_factory=list)
@@ -42,6 +49,23 @@ class ExtractedProblem(BaseModel):
     function_signature: str | None = None
     language_hint: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _sync_questions(self) -> "ExtractedProblem":
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for item in self.questions:
+            text = item.strip() if isinstance(item, str) else ""
+            key = " ".join(text.split()).lower()
+            if text and key not in seen:
+                seen.add(key)
+                cleaned.append(text)
+        if not cleaned and self.question and self.question.strip():
+            cleaned = [self.question.strip()]
+        self.questions = cleaned
+        if cleaned and not (self.question and self.question.strip()):
+            self.question = cleaned[0]
+        return self
 
     @field_validator("platform", mode="before")
     @classmethod

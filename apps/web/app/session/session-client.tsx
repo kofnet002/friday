@@ -32,6 +32,7 @@ import type {
   AnswerMessage,
   AnswerProvider,
   AnswerServerMessage,
+  ClaudeModel,
   CodingLanguage,
   CodingMode,
   CodingSolutionServerMessage,
@@ -54,6 +55,7 @@ import { CodingWs } from '@/lib/coding-ws';
 import {
   fetchSessionDetail,
   fetchSessionUsage,
+  getCodingClaudeModelPreference,
   getCodingLanguagePreference,
   getOrCreateSessionId,
   onSessionIdChange,
@@ -61,6 +63,7 @@ import {
   getQdModelPreference,
   patchSessionProvider,
   sessionExportUrl,
+  setCodingClaudeModelPreference,
   setCodingLanguagePreference,
   setProviderPreference,
   setQdModelPreference,
@@ -68,7 +71,11 @@ import {
 } from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
-import { screenQuestionAction } from '@/lib/screen-question-routing';
+import {
+  combineScreenQuestions,
+  normalizeQuestion,
+  planScreenQuestions,
+} from '@/lib/screen-question-routing';
 
 import { AssistPanel, type AssistView } from './assist-panel';
 import { SetupForm } from '../setup/setup-form';
@@ -189,6 +196,10 @@ export function SessionClient() {
   // tokens always land on the right entry even if the user navigates away
   // while the LLM is still streaming.
   const [provider, setProvider] = useState<AnswerProvider>('gemini');
+  // Claude model for screen mode (solving + screen reading). Kept in a ref
+  // too so sockets/IPC created later pick up the current choice.
+  const [codingClaudeModel, setCodingClaudeModel] = useState<ClaudeModel>('claude-opus-5-5');
+  const codingClaudeModelRef = useRef<ClaudeModel>('claude-opus-5-5');
   const [entries, setEntries] = useState<AnswerEntry[]>([]);
   const [entryIndex, setEntryIndex] = useState(-1);
   const [panelError, setPanelError] = useState<string | null>(null);
@@ -242,6 +253,9 @@ export function SessionClient() {
     missingSections: string[];
   } | null>(null);
   const askAnswerRef = useRef<(q: string, opts?: { autoDetected?: boolean }) => void>(() => {});
+  // Questions already answered from the screen this session, so a rescan or
+  // the watcher re-reading the same page doesn't answer them twice.
+  const answeredScreenRef = useRef<Set<string>>(new Set());
   const [codingConnected, setCodingConnected] = useState(false);
   // Coding panel mode (solve / explain / debug / tests). Each non-solve
   // mode keeps its OWN scratch buffer — switching from Explain to Debug
@@ -377,6 +391,9 @@ export function SessionClient() {
     sessionIdRef.current = sid;
     setSessionIdState(sid);
     setProvider(getProviderPreference());
+    const savedClaudeModel = getCodingClaudeModelPreference();
+    codingClaudeModelRef.current = savedClaudeModel;
+    setCodingClaudeModel(savedClaudeModel);
     setCodingLanguage(getCodingLanguagePreference());
     setQdModelState(getQdModelPreference());
 
@@ -407,6 +424,7 @@ export function SessionClient() {
       onClose: () => setCodingConnected(false),
       onError: () => setCodingConnected(false),
     });
+    codingWs.setClaudeModel(codingClaudeModelRef.current);
     codingWs.connect();
     codingWsRef.current = codingWs;
 
@@ -769,26 +787,39 @@ export function SessionClient() {
 
   const onCodingSolutionMessage = useCallback((msg: CodingSolutionServerMessage) => {
     if (msg.type === 'screen_question_detected') {
+      // During a combined session, the spoken question is the trigger and
+      // the extracted screen text is supporting context for that answer.
+      // Avoid racing it with answers generated from the screen alone —
+      // unless the user explicitly scanned the page, which is a request.
+      if (audioStatusRef.current === 'recording' && msg.source !== 'guided_scan') return;
       const lastEntry = entriesRef.current[entriesRef.current.length - 1];
       const recentQuestion = lastEntry
         ? [...lastEntry.messages].reverse().find((m) => m.role === 'user')?.content
         : undefined;
-      const action = screenQuestionAction(msg.question, msg.completeness, recentQuestion);
-      if (action === 'answer') {
-        // During a combined session, the spoken question is the trigger and
-        // the extracted screen text is supporting context for that answer.
-        // Avoid racing it with a second answer generated from the screen alone.
-        if (audioStatusRef.current === 'recording') return;
-        askAnswerRef.current(msg.question, { autoDetected: true });
+      const skip = new Set(answeredScreenRef.current);
+      if (recentQuestion) skip.add(normalizeQuestion(recentQuestion));
+      const plan = planScreenQuestions(
+        msg.questions?.length ? msg.questions : [msg.question],
+        msg.completeness,
+        skip,
+      );
+      const combined = combineScreenQuestions(plan.answer);
+      if (combined) {
+        for (const question of plan.answer) {
+          answeredScreenRef.current.add(normalizeQuestion(question));
+        }
+        // All questions from one page go out as one request → one answer page.
+        askAnswerRef.current(combined, { autoDetected: true });
         setAssistView('answers');
         setActiveFeature('assist');
-      } else if (action === 'review' && msg.completeness !== 'complete') {
+      }
+      if (plan.review && msg.completeness !== 'complete') {
         setPendingScreenQuestion({
-          question: msg.question,
+          question: plan.review,
           completeness: msg.completeness,
           missingSections: msg.missing_sections ?? [],
         });
-        if (audioStatusRef.current !== 'recording') setAssistView('screen');
+        if (!plan.answer.length) setAssistView('screen');
         setActiveFeature('assist');
       }
       return;
@@ -1662,6 +1693,14 @@ export function SessionClient() {
     setEntryIndex((i) => Math.min(entries.length - 1, i + 1));
   };
 
+  const onCodingClaudeModelChange = (model: ClaudeModel) => {
+    codingClaudeModelRef.current = model;
+    setCodingClaudeModel(model);
+    setCodingClaudeModelPreference(model);
+    codingWsRef.current?.setClaudeModel(model);
+    void window.friday?.coding?.setClaudeModel?.(model);
+  };
+
   const onProviderChange = (p: AnswerProvider) => {
     setProvider(p);
     setProviderPreference(p);
@@ -1792,6 +1831,7 @@ export function SessionClient() {
       // Push the renderer's currently-selected provider into the desktop
       // capture so the very first vision/extract uses the user's pick.
       void fridayApi.coding.setProvider?.(providerRef.current);
+      void fridayApi.coding.setClaudeModel?.(codingClaudeModelRef.current);
       setCodingError(null);
       const offFrame = fridayApi.coding.onFrameProcessed((info) => {
         setCodingFrame({ changed_bits: info.changed_bits, interval_ms: info.interval_ms });
@@ -2267,6 +2307,8 @@ export function SessionClient() {
             onLanguageChange={onCodingLanguageChange}
             provider={provider}
             onProviderChange={onProviderChange}
+            claudeModel={codingClaudeModel}
+            onClaudeModelChange={onCodingClaudeModelChange}
             tabs={codingTabs}
             activeFingerprint={activeFingerprint}
             onSelectTab={setActiveFingerprint}

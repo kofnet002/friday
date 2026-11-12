@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
   AnswerProvider,
+  ClaudeModel,
   CodingLanguage,
   CodingMode,
   CodingTestCaseResult,
@@ -34,7 +35,7 @@ import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { friendlyError } from '@/lib/error-messages';
 import { Markdown, useHighlightedCode } from '@/lib/markdown';
-import { ALL_CODING_LANGUAGES } from '@/lib/session-context';
+import { ALL_CODING_LANGUAGES, CLAUDE_MODEL_OPTIONS } from '@/lib/session-context';
 import { cn } from '@/lib/utils';
 
 export type CodingSolutionStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error';
@@ -112,6 +113,9 @@ export interface CodingPanelProps {
   onLanguageChange: (lang: CodingLanguage) => void;
   provider: AnswerProvider;
   onProviderChange: (provider: AnswerProvider) => void;
+  /** Claude model used when provider is 'claude'. */
+  claudeModel: ClaudeModel;
+  onClaudeModelChange: (model: ClaudeModel) => void;
   tabs: CodingProblemTab[];
   activeFingerprint: string | null;
   onSelectTab: (fingerprint: string) => void;
@@ -162,6 +166,8 @@ export function CodingPanel({
   onLanguageChange,
   provider,
   onProviderChange,
+  claudeModel,
+  onClaudeModelChange,
   tabs,
   activeFingerprint,
   onSelectTab,
@@ -227,15 +233,30 @@ export function CodingPanel({
           </span>
           <ActivePill active={active} />
           <Select
-            value={provider}
-            onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+            // Claude entries carry their model id ("claude-sonnet-5-5"); the
+            // other providers keep their provider id as the value.
+            value={provider === 'claude' ? claudeModel : provider}
+            onChange={(e) => {
+              const value = e.target.value;
+              const claude = CLAUDE_MODEL_OPTIONS.find((option) => option.id === value);
+              if (claude) {
+                onClaudeModelChange(claude.id);
+                if (provider !== 'claude') onProviderChange('claude');
+              } else {
+                onProviderChange(value as AnswerProvider);
+              }
+            }}
             className="ml-auto h-8 text-xs"
             aria-label="model"
           >
             <option value="gemini">Gemini 2.5 Flash</option>
             <option value="openai">GPT-4o</option>
             <option value="deepseek">DeepSeek</option>
-            <option value="claude">Claude Opus 5.5</option>
+            {CLAUDE_MODEL_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
           </Select>
           <Select
             value={language}
@@ -294,18 +315,43 @@ export function CodingPanel({
           {scanState?.state === 'capturing' ? (
             <>
               <span role="status" aria-live="polite" className="text-xs">
-                Scanning · {scanState.frames} views
+                {/* Scan state re-emits every ~400ms tick, so this recency check
+                    refreshes on its own and the cue fades back to the count. */}
+                {scanState.capturedAt && Date.now() - scanState.capturedAt < 2500 ? (
+                  <span className="font-medium text-emerald-700 dark:text-emerald-300">
+                    ✓ View {scanState.frames} captured — scroll to the next part
+                  </span>
+                ) : (
+                  <>
+                    Scanning · {scanState.frames} {scanState.frames === 1 ? 'view' : 'views'}
+                    {scanState.lastCapture === 'duplicate' ? ' · section already captured' : ''}
+                  </>
+                )}
               </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void window.friday?.coding.captureScanSection()}
+                aria-label="Capture this section (⌘⇧Enter)"
+              >
+                Capture section
+              </Button>
               <Button type="button" size="sm" onClick={onFinishScan}>
                 Finish scan
               </Button>
               <Button type="button" size="sm" variant="outline" onClick={onCancelScan}>
                 Cancel
               </Button>
+              <span className="w-full text-xs text-muted-foreground">
+                Keep scrolling down the page. Friday reads each part and finishes a few seconds
+                after you stop · ⌘⇧Enter captures the current section
+              </span>
             </>
           ) : scanState?.state === 'combining' ? (
             <span role="status" aria-live="polite" className="text-xs">
-              Reading {scanState.frames} views…
+              {scanState.finishedBy === 'idle' ? 'Scrolling stopped · ' : ''}Reading{' '}
+              {scanState.frames} {scanState.frames === 1 ? 'view' : 'views'}…
             </span>
           ) : (
             <>
@@ -320,7 +366,7 @@ export function CodingPanel({
                 Scan screen
               </Button>
               <span className="text-xs text-muted-foreground">
-                Scroll the page as you normally would · ⌘⇧S starts or finishes
+                Reads a long page as you scroll · ⌘⇧S starts or finishes
               </span>
             </>
           )}

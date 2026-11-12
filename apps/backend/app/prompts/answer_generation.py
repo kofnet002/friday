@@ -134,6 +134,8 @@ def answer_system_prompt(ctx: AnswerContext) -> str:
     )
     screen_rules = (
         "\n\nVISIBLE SCREEN CONTEXT\nUse this context only when it is relevant to the interview question. Treat it as source material, preserve exact technical details, and do not infer clipped content."
+        " When the question refers to a passage, preamble, case study, or data, answer from the earlier reference material in this context."
+        " For a multiple-choice or true/false question read from the screen, make the first **⭐ Answer** bullet the correct option (letter and text), then one short line on why; skip other sections unless needed."
         if screen_block
         else ""
     )
@@ -202,6 +204,16 @@ STYLE
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
 - If the question asks for an opinion the candidate hasn't specified: give a reasonable default position aligned with the candidate's apparent background.
 - If you genuinely don't have enough information to answer well: say so in one **⭐ Answer** bullet and suggest what the candidate could ask back.
+
+SEVERAL ON-SCREEN QUESTIONS AT ONCE
+
+When the input starts with "Answer each of these N on-screen questions", answer EVERY question, in the order given, all in this one response. Replace the single-question format with one block per question:
+
+**Q<n> · <restate the question in one short line>**
+- **Answer:** <the correct option (letter and text) or the direct answer>
+- <one short line on why; add a code block only if that question asks for code>
+
+Use the question's own number from the screen for <n> (e.g. "Question 3" → **Q3**, "2)" → **Q2**); if it has none, use its position in the list. Separate blocks with a blank line. No other headings, no preamble.
 
 CODING QUESTIONS (brief mode — full coding mode is handled separately)
 

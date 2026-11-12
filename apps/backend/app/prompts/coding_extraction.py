@@ -5,7 +5,7 @@ Kept in sync with the TS file; update both when the schema changes.
 
 from __future__ import annotations
 
-CODING_EXTRACTION_VERSION = "1.5.0"
+CODING_EXTRACTION_VERSION = "1.6.0"
 
 CODING_EXTRACTION_SYSTEM_PROMPT = """\
 You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
@@ -16,7 +16,9 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
   "is_coding_problem": boolean,
   "is_screen_question": boolean,
   "question": string | null,
+  "questions": string[],
   "visible_context": string | null,
+  "is_reference_material": boolean,
   "screen_code": string | null,
   "completeness": "complete" | "partial" | "uncertain",
   "missing_sections": string[],
@@ -41,10 +43,23 @@ RULES
   errors, and command output. Preserve exact names and details, omit unrelated
   app chrome, and do not infer clipped or unreadable content. Keep it under
   6,000 characters.
+- questions: EVERY distinct question visible across the screenshot(s), in
+  page order, each self-contained: its number, full wording, and all options
+  verbatim. Set `question` to the first one. Do not merge separate questions.
+- is_reference_material: true when the screen shows material that questions
+  are asked FROM rather than a question itself — a reading passage, preamble,
+  case study, scenario, instructions, table, dataset, or code listing that
+  later questions refer to ("based on the passage above…"). Put that material
+  in full in `visible_context`. It may be true alongside a visible question.
+- For multiple-choice, true/false, or fill-in questions, include every option
+  verbatim (with its letter/number) in `question`.
 - When is_coding_problem is true, set is_screen_question false so coding tasks
   are routed only to the coding workflow.
 - Transcribe visible code into `screen_code` verbatim; never infer hidden lines.
 - Mark clipped/unreadable content partial or uncertain and name missing sections.
+- A question that refers to a passage, table, or preamble shown elsewhere
+  ("based on the passage above") is NOT partial for that reason alone; judge
+  completeness only on whether the question and its options are fully visible.
 - For ordered screenshots, merge in document order, remove overlap, preserve
   exact symbols/examples, and never guess unreadable text.
 - is_coding_problem: true only if the screenshot clearly contains a coding problem statement. An empty IDE, a problem list, or a code editor without a visible problem = false.
