@@ -60,10 +60,11 @@ def _provider_chain(primary: Provider) -> list[Provider]:
     return chain or [primary]
 
 
-def claude_answer_model() -> str:
+def claude_answer_model(model: str | None = None) -> str:
     """Model label to bill answer usage against (``claude-code:<model>`` on
-    the subscription transport, which deliberately has no PRICING row)."""
-    return claude_usage_model(settings.anthropic_answer_model)
+    the subscription transport, which deliberately has no PRICING row).
+    `model` overrides the configured answer model (screen-mode pick)."""
+    return claude_usage_model(model or settings.anthropic_answer_model)
 
 
 async def stream_answer(
@@ -72,6 +73,7 @@ async def stream_answer(
     context: AnswerContext,
     *,
     on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
+    claude_model: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield answer tokens for the given question using the selected provider.
 
@@ -119,7 +121,7 @@ async def stream_answer(
                     question, context.recent_transcript, context.prior_turns, context.code_refs
                 )
                 base = lambda: _stream_anthropic(  # noqa: E731
-                    system, user, threaded, context.prior_turns
+                    system, user, threaded, context.prior_turns, model=claude_model
                 )
             else:
                 base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
@@ -211,6 +213,8 @@ async def _stream_anthropic(
     user: str,
     threaded_user: str,
     prior: tuple[PriorTurn, ...],
+    *,
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream an answer from Claude on the transport claude_transport() picks.
 
@@ -222,6 +226,7 @@ async def _stream_anthropic(
       subscription. It accepts a single prompt, so we send `threaded_user`
       (history embedded in the prompt) instead.
     """
+    model = model or settings.anthropic_answer_model
     transport = claude_transport()
     if transport == "cli":
         from app.services.claude_cli import stream_claude_cli_text
@@ -229,7 +234,7 @@ async def _stream_anthropic(
         async for text in stream_claude_cli_text(
             prompt=threaded_user,
             system=system,
-            model=settings.anthropic_answer_model,
+            model=model,
         ):
             if text:
                 yield text
@@ -242,7 +247,7 @@ async def _stream_anthropic(
     async for text in stream_claude_api(
         system=system,
         user=user,
-        model=settings.anthropic_answer_model,
+        model=model,
         max_tokens=1500,
         effort=settings.anthropic_effort,
         prior=((turn.role, turn.content) for turn in prior),

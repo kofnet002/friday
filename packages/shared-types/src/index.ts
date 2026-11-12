@@ -192,6 +192,9 @@ export type AnswerClientMessage =
       /** Started before the question was confirmed; the server persists it
        *  only after a matching `commit`. */
       speculative?: boolean;
+      /** Claude model for this answer when provider is 'claude' — set for
+       *  questions read off the screen so they use the Screen panel's pick. */
+      claude_model?: ClaudeModel;
     }
   /** Confirms a speculative answer so the server saves it. `question` is
    *  the confirmed wording, saved instead of the raw turn text the answer

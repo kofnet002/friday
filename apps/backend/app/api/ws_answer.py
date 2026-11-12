@@ -12,6 +12,7 @@ from app.prompts.answer_generation import AnswerContext, PriorTurn
 from app.redis_client import get_screen_context, recent_transcript_text, set_last_answer
 from app.services import latency
 from app.services.answer import Provider, claude_answer_model, stream_answer
+from app.services.claude_api import normalize_claude_model
 from app.services.limits import check_token_budget
 from app.services.code_search import find_code_refs
 from app.services.project_context import load_project_contexts
@@ -199,6 +200,8 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             else (),
         )
 
+        # Screen-originated answers carry the Screen panel's Claude model.
+        claude_model = normalize_claude_model(request.get("claude_model"))
         auto_detected = bool(request.get("auto_detected", False))
         cid_raw = request.get("candidate_id")
         candidate_id = cid_raw if isinstance(cid_raw, str) and cid_raw else None
@@ -212,7 +215,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         elif provider == "deepseek":
             model = settings.deepseek_model
         elif provider == "claude":
-            model = claude_answer_model()
+            model = claude_answer_model(claude_model)
         else:
             model = settings.openai_model
 
@@ -238,7 +241,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             elif nxt == "deepseek":
                 effective_model = settings.deepseek_model
             elif nxt == "claude":
-                effective_model = claude_answer_model()
+                effective_model = claude_answer_model(claude_model)
             else:
                 effective_model = settings.openai_model
             await send(
@@ -254,7 +257,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         collected: list[str] = []
         try:
             async for token in stream_answer(
-                provider, question, context, on_fallback=_on_fallback
+                provider, question, context, on_fallback=_on_fallback, claude_model=claude_model
             ):
                 if not collected:
                     latency.mark(candidate_id, "first_token")

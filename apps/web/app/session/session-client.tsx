@@ -250,7 +250,16 @@ export function SessionClient() {
     completeness: 'partial' | 'uncertain';
     missingSections: string[];
   } | null>(null);
-  const askAnswerRef = useRef<(q: string, opts?: { autoDetected?: boolean }) => void>(() => {});
+  const askAnswerRef = useRef<
+    (q: string, opts?: { autoDetected?: boolean; fromScreen?: boolean }) => void
+  >(() => {});
+  // Threads started from questions read off the screen. Their answers (and
+  // follow-ups) use the Screen panel's Claude model, not AI Help's.
+  const screenThreadIdsRef = useRef<Set<string>>(new Set());
+  const screenClaudeModelFor = (threadId: string): ClaudeModel | undefined =>
+    providerRef.current === 'claude' && screenThreadIdsRef.current.has(threadId)
+      ? codingClaudeModelRef.current
+      : undefined;
   // Questions already answered from the screen this session, so a rescan or
   // the watcher re-reading the same page doesn't answer them twice.
   const answeredScreenRef = useRef<Set<string>>(new Set());
@@ -801,7 +810,7 @@ export function SessionClient() {
           answeredScreenRef.current.add(normalizeQuestion(question));
         }
         // All questions from one page go out as one request → one answer page.
-        askAnswerRef.current(combined, { autoDetected: true });
+        askAnswerRef.current(combined, { autoDetected: true, fromScreen: true });
         setAssistView('answers');
         setActiveFeature('assist');
       }
@@ -1373,7 +1382,10 @@ export function SessionClient() {
       ? crypto.randomUUID()
       : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  const askAnswer = (q: string, opts: { autoDetected?: boolean; candidateId?: string } = {}) => {
+  const askAnswer = (
+    q: string,
+    opts: { autoDetected?: boolean; candidateId?: string; fromScreen?: boolean } = {},
+  ) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
@@ -1385,6 +1397,7 @@ export function SessionClient() {
     cancelInFlight();
     const id = newId();
     const threadId = newId();
+    if (opts.fromScreen) screenThreadIdsRef.current.add(threadId);
     const messages: AnswerMessage[] = [
       { role: 'user', content: q },
       { role: 'assistant', content: '' },
@@ -1427,6 +1440,7 @@ export function SessionClient() {
       auto_detected: opts.autoDetected,
       candidate_id: opts.candidateId,
       session_context: answerScreenContext(),
+      claude_model: screenClaudeModelFor(threadId),
     });
   };
   askAnswerRef.current = askAnswer;
@@ -1447,7 +1461,7 @@ export function SessionClient() {
   };
   const answerCapturedScreenQuestion = () => {
     if (!pendingScreenQuestion) return;
-    askAnswerRef.current(pendingScreenQuestion.question);
+    askAnswerRef.current(pendingScreenQuestion.question, { fromScreen: true });
     setPendingScreenQuestion(null);
     setAssistView('answers');
     setActiveFeature('assist');
@@ -1504,6 +1518,7 @@ export function SessionClient() {
       provider: providerRef.current,
       candidate_id: opts.candidateId,
       session_context: answerScreenContext(),
+      claude_model: screenClaudeModelFor(current.threadId),
     });
   };
 
