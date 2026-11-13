@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type {
   AnswerProvider,
   ClaudeModel,
@@ -162,6 +162,8 @@ export interface CodingPanelProps {
   /** Bumped whenever the remembered passages change, to refetch the list. */
   passagesRefreshKey: number;
   onClearScreenContext: () => void;
+  /** Answers to questions read off the screen, shown under the scan tools. */
+  screenAnswers?: ReactNode;
 }
 
 export function CodingPanel({
@@ -203,6 +205,7 @@ export function CodingPanel({
   sessionId,
   passagesRefreshKey,
   onClearScreenContext,
+  screenAnswers,
 }: CodingPanelProps) {
   const activeTab = tabs.find((t) => t.fingerprint === activeFingerprint) ?? null;
   const [displays, setDisplays] = useState<FridayScanDisplay[]>([]);
@@ -421,6 +424,8 @@ export function CodingPanel({
           </div>
         </div>
       ) : null}
+
+      {screenAnswers}
 
       {!isSolveMode ? (
         <ScratchView

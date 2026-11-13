@@ -102,6 +102,10 @@ export interface AnswerPanelProps {
    * the streamed answer.
    */
   transcriptSlot?: ReactNode;
+  /** 'screen' renders answers to on-screen questions inside the Screen tab:
+   *  just the pager, answer and follow-ups — no listening chrome (model and
+   *  detection pickers, connection pills, Start CTA). */
+  variant?: 'listen' | 'screen';
 }
 
 export function AnswerPanel({
@@ -136,7 +140,9 @@ export function AnswerPanel({
   onPrev,
   onNext,
   transcriptSlot,
+  variant = 'listen',
 }: AnswerPanelProps) {
+  const isScreen = variant === 'screen';
   const [customPrompt, setCustomPrompt] = useState('');
   const [copied, setCopied] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -203,66 +209,81 @@ export function AnswerPanel({
     // No outer card chrome — the surrounding popover already provides the
     // glass frame. Keep this transparent so we don't end up with nested
     // containers.
-    <div className="flex h-full flex-col gap-4">
+    <div className={cn('flex flex-col gap-4', !isScreen && 'h-full')}>
       {/* In privacyMode the entire header bar collapses: no Copilot badge,
           no connection / QD / fallback / error indicators, no model
           selectors, no history pager. An over-the-shoulder observer
           should see nothing that hints at AI assistance. */}
       {!privacyMode ? (
-        <div className="flex items-center gap-2.5">
-          <span
-            className="flex items-center gap-1.5 rounded-md bg-sky-100/70 px-2 py-1 text-sm font-semibold text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
-            aria-label="Copilot"
-          >
-            <Bot className="h-4 w-4" aria-hidden />
-            Copilot
-          </span>
-          <span
-            className={cn(
-              'flex items-center gap-1.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider',
-              connected
-                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
-                : 'bg-neutral-200/60 text-neutral-500 dark:bg-neutral-800/80 dark:text-neutral-500',
-            )}
-            title={connected ? 'WebSocket connected' : 'WebSocket disconnected'}
-          >
-            <span
-              className={cn(
-                'h-1.5 w-1.5 rounded-full',
-                connected ? 'animate-pulse bg-emerald-500' : 'bg-neutral-400',
-              )}
-            />
-            {connected ? 'live' : 'offline'}
-          </span>
-          <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
-          {audioUsage ? <AudioBudgetPill usage={audioUsage} /> : null}
-          <div className="ml-auto flex items-center gap-1.5">
-            <Select
-              value={qdModel}
-              onChange={(e) => onQdModelChange(e.target.value as QdModel)}
-              className="h-7 text-xs"
-              title="Model used to detect questions in the live transcript. Claude options use your Anthropic API key when set; otherwise they run on your Claude Code subscription, which adds a few seconds per detection."
-              aria-label="Question detection model"
-            >
-              {ALL_QD_MODELS.map((m) => (
-                <option key={m} value={m}>
-                  QD: {qdModelLabel(m)}
-                </option>
-              ))}
-            </Select>
-            {qdError ? <QdErrorBadge reason={qdError} /> : null}
-            {qdFallbackModel && !qdError ? <QdFallbackBadge model={qdFallbackModel} /> : null}
-          </div>
-          <Select
-            value={provider}
-            onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
-            className="h-7 text-xs"
-          >
-            <option value="gemini">Gemini 2.5 Flash</option>
-            <option value="openai">GPT-4o</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="claude">Claude Sonnet 5.5</option>
-          </Select>
+        <div
+          className={cn(
+            'flex items-center gap-2.5',
+            // In the Screen tab the answer grows with the tab's own scroll;
+            // the pager stays pinned so navigation is always reachable.
+            isScreen && 'sticky top-0 z-10 -my-1 bg-white py-1 dark:bg-neutral-900',
+          )}
+        >
+          {isScreen ? (
+            <span className="mr-auto text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">
+              Screen answers
+            </span>
+          ) : (
+            <>
+              <span
+                className="flex items-center gap-1.5 rounded-md bg-sky-100/70 px-2 py-1 text-sm font-semibold text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+                aria-label="Copilot"
+              >
+                <Bot className="h-4 w-4" aria-hidden />
+                Copilot
+              </span>
+              <span
+                className={cn(
+                  'flex items-center gap-1.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider',
+                  connected
+                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                    : 'bg-neutral-200/60 text-neutral-500 dark:bg-neutral-800/80 dark:text-neutral-500',
+                )}
+                title={connected ? 'WebSocket connected' : 'WebSocket disconnected'}
+              >
+                <span
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full',
+                    connected ? 'animate-pulse bg-emerald-500' : 'bg-neutral-400',
+                  )}
+                />
+                {connected ? 'live' : 'offline'}
+              </span>
+              <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
+              {audioUsage ? <AudioBudgetPill usage={audioUsage} /> : null}
+              <div className="ml-auto flex items-center gap-1.5">
+                <Select
+                  value={qdModel}
+                  onChange={(e) => onQdModelChange(e.target.value as QdModel)}
+                  className="h-7 text-xs"
+                  title="Model used to detect questions in the live transcript. Claude options use your Anthropic API key when set; otherwise they run on your Claude Code subscription, which adds a few seconds per detection."
+                  aria-label="Question detection model"
+                >
+                  {ALL_QD_MODELS.map((m) => (
+                    <option key={m} value={m}>
+                      QD: {qdModelLabel(m)}
+                    </option>
+                  ))}
+                </Select>
+                {qdError ? <QdErrorBadge reason={qdError} /> : null}
+                {qdFallbackModel && !qdError ? <QdFallbackBadge model={qdFallbackModel} /> : null}
+              </div>
+              <Select
+                value={provider}
+                onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+                className="h-7 text-xs"
+              >
+                <option value="gemini">Gemini 2.5 Flash</option>
+                <option value="openai">GPT-4o</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="claude">Claude Sonnet 5.5</option>
+              </Select>
+            </>
+          )}
 
           {/* History pager — chevrons step through every Q&A asked this
             session (auto-detect or force-ask), so a new question never
@@ -311,7 +332,7 @@ export function AnswerPanel({
           which meant the mic went live the moment the user peeked at the
           panel. Now starting is an explicit act. Hidden once live so the
           panel reads the same as before mid-session. */}
-      {!listening ? (
+      {!listening && !isScreen ? (
         <StartListeningCta
           starting={starting}
           onStart={onStart}
@@ -372,6 +393,7 @@ export function AnswerPanel({
           isStreaming={isStreaming}
           marked={marked}
           privacyMode={privacyMode}
+          grow={isScreen}
         />
       )}
 
@@ -531,6 +553,7 @@ function AnswerBody({
   isStreaming,
   marked,
   privacyMode,
+  grow = false,
 }: {
   answer: string;
   question: string | null;
@@ -538,6 +561,9 @@ function AnswerBody({
   isStreaming: boolean;
   marked: boolean;
   privacyMode: boolean;
+  /** Grow with the content instead of scrolling inside — for a host that
+   *  already scrolls (the Screen tab), so there's one scrollbar, not two. */
+  grow?: boolean;
 }) {
   // Prior turns to show above the current streaming/finished answer. We
   // skip:
@@ -602,7 +628,8 @@ function AnswerBody({
       className={cn(
         // Transparent answer body — no nested card chrome. Vertical
         // padding only; the popover's frame handles the rest.
-        'min-h-[200px] flex-1 overflow-y-auto py-1 transition-opacity',
+        'py-1 transition-opacity',
+        !grow && 'min-h-[200px] flex-1 overflow-y-auto',
         marked && 'opacity-50',
         privacyMode && 'select-none blur-md',
       )}
