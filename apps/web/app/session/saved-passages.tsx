@@ -84,9 +84,9 @@ export function SavedPassages({ sessionId, refreshKey, onClearAll }: SavedPassag
                   Remove
                 </Button>
               </div>
-              <div className="max-h-64 overflow-y-auto">
-                <Markdown text={p.text} />
-              </div>
+              {/* No inner scroll: passages grow and the Screen tab's own scroll
+                  is the only one (the list is already behind Show/Hide). */}
+              <Markdown text={p.text} />
               {p.images.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-2">
                   {p.images.map((key) => (
