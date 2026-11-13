@@ -24,8 +24,10 @@ SAME_PASSAGE_HEAD_CHARS = 40
 # it, say) counts when the wording is still this close.
 SAME_PASSAGE_HEAD_WINDOW = 120
 SAME_PASSAGE_PREFIXED_RATIO = 0.6
-# Reads sharing this many screenshots show the same passage.
+# Reads sharing this many screenshots show the same passage, provided their
+# text is related: this close, or opening the same way.
 SAME_PASSAGE_SHARED_IMAGES = 2
+SAME_PASSAGE_SHARED_IMAGES_RATIO = 0.5
 REFERENCE_HEADER = (
     "Earlier reference material on screen (passages / preambles the questions may refer to):"
 )
@@ -100,24 +102,32 @@ def _head_near_start(a_norm: str, b_norm: str) -> bool:
 
 
 def _same_passage(ref: ScreenReference, new_norm: str, new_keys: list[str]) -> bool:
-    """A re-read of a saved passage: worded nearly the same, showing several
-    of its screenshots, showing one of its figures under the same opening
-    line, or opening the same way (after a title, say) in close wording."""
+    """A re-read of a saved passage: worded nearly the same, showing one of
+    its figures under the same opening line, showing several of its
+    screenshots with related text, or opening the same way (after a title,
+    say) in close wording."""
     ref_norm = _norm(ref.text)
     shared = set(ref.image_keys) & set(new_keys)
-    if len(shared) >= SAME_PASSAGE_SHARED_IMAGES:
-        return True
     matcher = SequenceMatcher(None, ref_norm, new_norm)
-    if matcher.quick_ratio() >= SAME_PASSAGE_RATIO and matcher.ratio() >= SAME_PASSAGE_RATIO:
+
+    def ratio_at_least(floor: float) -> bool:
+        return matcher.quick_ratio() >= floor and matcher.ratio() >= floor
+
+    if ratio_at_least(SAME_PASSAGE_RATIO):
         return True
     head = _head(new_norm)
-    if head and shared and _head(ref_norm) == head:
+    same_head = bool(head) and _head(ref_norm) == head
+    if same_head and shared:
         return True
-    return (
-        _head_near_start(ref_norm, new_norm)
-        and matcher.quick_ratio() >= SAME_PASSAGE_PREFIXED_RATIO
-        and matcher.ratio() >= SAME_PASSAGE_PREFIXED_RATIO
-    )
+    # Never on screenshots alone: a false merge keeps only the longer text and
+    # silently drops the other passage.
+    if len(shared) >= SAME_PASSAGE_SHARED_IMAGES and (
+        same_head
+        or _head_near_start(ref_norm, new_norm)
+        or ratio_at_least(SAME_PASSAGE_SHARED_IMAGES_RATIO)
+    ):
+        return True
+    return _head_near_start(ref_norm, new_norm) and ratio_at_least(SAME_PASSAGE_PREFIXED_RATIO)
 
 
 def merge_references(

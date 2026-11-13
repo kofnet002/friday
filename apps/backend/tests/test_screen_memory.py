@@ -234,20 +234,50 @@ def test_title_prefixed_reread_from_the_smoke_merges():
     assert refs[0].text == str(first["text"]).strip()
 
 
-def test_two_shared_screenshots_make_one_passage():
-    refs = merge_references([], "Section 2: Regional sales. East grew fastest.", ["a", "b", "x"])
-    refs = merge_references(refs, "Regional performance overview, with notes on staffing.", ["b", "a"])
+def _ratio(a: str, b: str) -> float:
+    from difflib import SequenceMatcher
+
+    from app.services.screen_memory import _norm
+
+    return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+
+
+def test_unrelated_texts_sharing_two_screenshots_stay_separate():
+    first = "Section 2: Regional sales. East grew fastest."
+    second = "Appendix B: Glossary of staffing terms used throughout this report."
+    assert _ratio(first, second) < 0.5
+    refs = merge_references([], first, ["a", "b", "x"])
+    refs = merge_references(refs, second, ["b", "a"])
+    assert len(refs) == 2
+
+
+def test_related_reads_sharing_two_screenshots_merge():
+    first = "Figure 2 shows quarterly sales by channel; online overtook in-store in early 2024."
+    second = "Quarterly sales by channel (Figure 2): online sales overtook in-store sales in 2024."
+    assert 0.5 <= _ratio(first, second) < 0.8
+    refs = merge_references([], first, ["a", "b", "x"])
+    refs = merge_references(refs, second, ["b", "a"])
     assert len(refs) == 1
 
 
 def test_heading_prefix_within_the_opening_merges_when_wording_is_close():
+    import re
+
+    from app.services.screen_memory import _norm
+
     body = (
         "Preamble: Questions 1 to 7 refer to the figures in this section. Read each "
         "figure carefully; not every value is printed and the text does not repeat them."
     )
     titled = "Operations Analyst Assessment, Section C\n" + body.replace("Preamble: ", "Preamble. ")
+    reread = body + " Lakeview Retail runs one distribution centre."
+    # Only rule (b) applies: no shared screenshots, wording below 0.8, and the
+    # re-read's opening sits inside the titled read's first 120 characters.
+    assert 0.6 <= _ratio(titled, reread) < 0.8
+    head = re.sub(r"[^a-z0-9]", "", _norm(reread))[:40]
+    assert head in re.sub(r"[^a-z0-9]", "", _norm(titled))[:120]
     refs = merge_references([], titled, ["a"])
-    refs = merge_references(refs, body + " Lakeview Retail runs one distribution centre.", ["z"])
+    refs = merge_references(refs, reread, ["z"])
     assert len(refs) == 1
 
 
@@ -257,7 +287,9 @@ def test_shared_screenshot_and_heading_prefix_but_different_text_stay_separate()
 
     from app.services.screen_memory import _norm
 
-    first = "Figure 2: Sales by channel, quarterly, 2023 to 2024. Online overtook in-store in Q1 2024."
+    first = (
+        "Figure 2: Sales by channel, quarterly, 2023 to 2024. Online overtook in-store in Q1 2024."
+    )
     second = (
         "Questions 5 to 7. Figure 2: Sales by channel, quarterly, 2023 to 2024 is needed for "
         "question 7: add the North region's March and June orders, subtract Online Q4 sales, "
