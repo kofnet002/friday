@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { SavedPassages } from './saved-passages';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { friendlyError } from '@/lib/error-messages';
@@ -157,8 +158,9 @@ export interface CodingPanelProps {
   } | null;
   onAnswerCapturedQuestion: () => void;
   onScanQuestionAgain: () => void;
-  /** Latest passage remembered as reference material (null when none). */
-  savedReference: { count: number; preview: string } | null;
+  sessionId: string;
+  /** Bumped whenever the remembered passages change, to refetch the list. */
+  passagesRefreshKey: number;
   onClearScreenContext: () => void;
 }
 
@@ -198,7 +200,8 @@ export function CodingPanel({
   pendingScreenQuestion,
   onAnswerCapturedQuestion,
   onScanQuestionAgain,
-  savedReference,
+  sessionId,
+  passagesRefreshKey,
   onClearScreenContext,
 }: CodingPanelProps) {
   const activeTab = tabs.find((t) => t.fingerprint === activeFingerprint) ?? null;
@@ -386,30 +389,11 @@ export function CodingPanel({
               Scan failed: {scanState.error || 'Try again.'}
             </span>
           ) : null}
-          {savedReference ? (
-            <div
-              role="status"
-              className="flex w-full items-center gap-2 border-t border-sky-200/70 pt-2 text-xs dark:border-sky-900/70"
-            >
-              <span className="min-w-0 flex-1 truncate" title={savedReference.preview}>
-                <span className="font-medium">
-                  Saved passage as reference
-                  {savedReference.count > 1 ? ` (${savedReference.count})` : ''}:
-                </span>{' '}
-                <span className="text-muted-foreground">“{savedReference.preview}”</span>
-              </span>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="h-7 shrink-0 px-2 text-xs"
-                onClick={onClearScreenContext}
-                aria-label="Clear remembered screen context"
-              >
-                Clear
-              </Button>
-            </div>
-          ) : null}
+          <SavedPassages
+            sessionId={sessionId}
+            refreshKey={passagesRefreshKey}
+            onClearAll={onClearScreenContext}
+          />
         </div>
       ) : null}
 

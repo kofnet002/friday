@@ -279,16 +279,13 @@ export function SessionClient() {
   // Questions already answered from the screen this session, so a rescan or
   // the watcher re-reading the same page doesn't answer them twice.
   const answeredScreenRef = useRef<Set<string>>(new Set());
-  const [savedReference, setSavedReference] = useState<{
-    count: number;
-    preview: string;
-  } | null>(null);
+  const [passagesRefreshKey, setPassagesRefreshKey] = useState(0);
   // Start fresh: forget remembered passages, the current screen text, and
   // which on-screen questions were already answered.
   const resetScreenContext = (sid: string) => {
-    setSavedReference(null);
     answeredScreenRef.current = new Set();
-    void clearScreenContext(sid);
+    // Refetch only once the backend has cleared, or the list would reappear.
+    void clearScreenContext(sid).then(() => setPassagesRefreshKey((k) => k + 1));
   };
   const [codingConnected, setCodingConnected] = useState(false);
   // Coding panel mode (solve / explain / debug / tests). Each non-solve
@@ -825,7 +822,7 @@ export function SessionClient() {
 
   const onCodingSolutionMessage = useCallback((msg: CodingSolutionServerMessage) => {
     if (msg.type === 'screen_reference_saved') {
-      setSavedReference({ count: msg.count, preview: msg.preview });
+      setPassagesRefreshKey((k) => k + 1);
       return;
     }
     if (msg.type === 'screen_question_detected') {
@@ -2395,7 +2392,8 @@ export function SessionClient() {
               setPendingScreenQuestion(null);
               void startGuidedScan();
             }}
-            savedReference={savedReference}
+            sessionId={getOrCreateSessionId()}
+            passagesRefreshKey={passagesRefreshKey}
             onClearScreenContext={() => resetScreenContext(getOrCreateSessionId())}
           />
         </PanelErrorBoundary>
