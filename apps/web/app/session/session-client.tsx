@@ -294,10 +294,11 @@ export function SessionClient() {
   // the watcher re-reading the same page doesn't answer them twice.
   const answeredScreenRef = useRef<Set<string>>(new Set());
   const [passagesRefreshKey, setPassagesRefreshKey] = useState(0);
-  // Start fresh: forget remembered passages, the current screen text, and
-  // which on-screen questions were already answered.
+  // Start fresh: forget remembered passages, the current screen text, which
+  // on-screen questions were already answered, and any question left for review.
   const resetScreenContext = (sid: string) => {
     answeredScreenRef.current = new Set();
+    setPendingScreenQuestion(null);
     // Refetch only once the backend has cleared, or the list would reappear.
     void clearScreenContext(sid).then(() => setPassagesRefreshKey((k) => k + 1));
   };
@@ -1943,7 +1944,11 @@ export function SessionClient() {
         screenContextRef.current = parts.join('\n\n').slice(0, 20_000) || null;
       });
       const offErr = fridayApi.coding.onError((msg) => setCodingError(msg));
-      const offScan = fridayApi.coding.onScanState((state) => setScanState(state));
+      const offScan = fridayApi.coding.onScanState((state) => {
+        setScanState(state);
+        // A new scan (button or shortcut) replaces any question left for review.
+        if (state.state === 'capturing' && state.frames === 0) setPendingScreenQuestion(null);
+      });
       codingUnsubsRef.current = [offFrame, offExt, offErr, offScan];
       setCodingActive(true);
       return true;
