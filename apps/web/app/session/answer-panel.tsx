@@ -32,7 +32,11 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { friendlyError } from '@/lib/error-messages';
 import { Markdown } from '@/lib/markdown';
-import { asQuestionBlocks, extractQuestionAnswers } from '@/lib/question-answers';
+import {
+  asQuestionBlocks,
+  extractQuestionAnswers,
+  screenAnswerTurns,
+} from '@/lib/question-answers';
 import { isScreenQuestionPrompt } from '@/lib/screen-question-routing';
 import { isNearBottom, screenPin } from '@/lib/stick-to-bottom';
 import { cn } from '@/lib/utils';
@@ -641,15 +645,18 @@ function AnswerBody({
   // Per-question answers from a grouped screen answer (all turns of the
   // thread), for per-heading / one-key copy.
   // Later questions of a scan come back in the single-question layout; the
-  // Screen tab rewrites them to match the scan's "Q<n> · …" blocks.
-  const shown = (text: string) => (screen ? asQuestionBlocks(text) : text);
+  // Screen tab rewrites them to match the scan's "Q<n> · …" blocks — only
+  // answers to new on-screen questions, never typed follow-ups ("why Q3?").
+  const rewrite: boolean[] = screen ? screenAnswerTurns(messages) : [];
+  const shown = (text: string, i: number) => (rewrite[i] ? asQuestionBlocks(text) : text);
+  const lastIndex = messages.length - 1;
   const assistantTexts = [
     ...messages
       .slice(0, -1)
-      .filter((m) => m.role === 'assistant')
-      .map((m) => m.content),
-    answer,
-  ].map(shown);
+      .map((m, i) => (m.role === 'assistant' ? shown(m.content, i) : null))
+      .filter((text): text is string => text !== null),
+    shown(answer, lastIndex),
+  ];
   const questionAnswers = extractQuestionAnswers(assistantTexts);
   const { copiedLabel, copyQuestion } = useQuestionCopy(questionAnswers, !privacyMode);
   // A copy icon on each "Q<n> · …" heading copies that question's answer.
@@ -687,14 +694,20 @@ function AnswerBody({
           )}
         >
           {priorTurns.map((turn, i) => (
-            <ThreadTurn key={i} turn={turn} questionAction={questionAction} flat={screen} />
+            <ThreadTurn
+              key={i}
+              turn={turn}
+              questionAction={questionAction}
+              flat={screen}
+              blocks={rewrite[i + 1] ?? false}
+            />
           ))}
         </div>
       ) : null}
 
       {answer ? (
         <Markdown
-          text={shown(answer) + (isStreaming ? ' ▍' : '')}
+          text={shown(answer, lastIndex) + (isStreaming ? ' ▍' : '')}
           questionAction={questionAction}
         />
       ) : isStreaming ? (
@@ -855,11 +868,14 @@ function ThreadTurn({
   turn,
   questionAction,
   flat = false,
+  blocks = false,
 }: {
   turn: AnswerMessage;
   questionAction?: (label: string) => ReactNode;
   /** Screen tab: later questions continue the list — no divider, no card. */
   flat?: boolean;
+  /** Answers new on-screen questions: rewrite as "Q<n> · …" blocks. */
+  blocks?: boolean;
 }) {
   if (turn.role === 'user' && isScreenQuestionPrompt(turn.content)) {
     if (flat) return null;
@@ -880,7 +896,12 @@ function ThreadTurn({
     );
   }
   if (flat) {
-    return <Markdown text={asQuestionBlocks(turn.content)} questionAction={questionAction} />;
+    return (
+      <Markdown
+        text={blocks ? asQuestionBlocks(turn.content) : turn.content}
+        questionAction={questionAction}
+      />
+    );
   }
   return (
     <div className="rounded-lg bg-neutral-100/60 p-2.5 dark:bg-neutral-900/40">

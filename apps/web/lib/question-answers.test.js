@@ -109,3 +109,45 @@ test('asQuestionBlocks rewrites every question when a text holds several', () =>
     ['Q6=C) Highland', 'Q7=B) 68'],
   );
 });
+
+test('a later Q block without its own Answer line keeps the earlier answer', () => {
+  const followUp = '**Q3 · Why Q1 2024?**\nOnline (38) overtook in-store (36) that quarter.';
+  assert.deepEqual(
+    extractQuestionAnswers([grouped, followUp]).map((qa) => `${qa.label}=${qa.answer}`),
+    ['Q1=C) Highland', 'Q2=A) True', 'Q3=B) 2,000'],
+  );
+});
+
+test('screenAnswerTurns rewrites only turns that answer new on-screen questions', () => {
+  const { screenAnswerTurns, asQuestionBlocks } = require('./question-answers');
+  const { combineScreenQuestions } = require('./screen-question-routing');
+  const why =
+    '**💬 Question:** Q3 — Why Q1 2024?\n\n**⭐ Answer:**\n- Online (38) overtook in-store.';
+  const later = '**💬 Question:** Q4 — Next?\n\n**⭐ Answer:**\n- D) None';
+  const messages = [
+    { role: 'user', content: combineScreenQuestions(['A?', 'B?', 'C?'], { grouped: true }) },
+    { role: 'assistant', content: grouped },
+    { role: 'user', content: 'why Q3?' },
+    { role: 'assistant', content: why },
+    { role: 'user', content: combineScreenQuestions(['Next?'], { grouped: true }) },
+    { role: 'assistant', content: later },
+  ];
+  const flags = screenAnswerTurns(messages);
+  assert.deepEqual(flags, [false, true, false, false, false, true]);
+  const texts = messages
+    .filter((m) => m.role === 'assistant')
+    .map((m) => (flags[messages.indexOf(m)] ? asQuestionBlocks(m.content) : m.content));
+  // The typed "why Q3?" follow-up doesn't take over key 3's copy.
+  assert.deepEqual(
+    extractQuestionAnswers(texts).map((qa) => `${qa.label}=${qa.answer}`),
+    ['Q1=C) Highland', 'Q2=A) True', 'Q3=B) 2,000', 'Q4=D) None'],
+  );
+  // The thread's first answer counts as on-screen even when opened with one plain question.
+  assert.deepEqual(
+    screenAnswerTurns([
+      { role: 'user', content: 'Which region?' },
+      { role: 'assistant', content: '' },
+    ]),
+    [false, true],
+  );
+});

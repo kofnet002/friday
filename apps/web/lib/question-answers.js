@@ -4,6 +4,8 @@
 //   - ⚠️ Check: …
 // so the answer panel can offer copy per question (by key or heading icon).
 
+const { isScreenQuestionPrompt } = require('./screen-question-routing');
+
 const HEADING = /^\*\*Q(\d+)\s*[·:.\-–—]/;
 // A bullet (`- **Answer:** …`) or, from asQuestionBlocks, a plain paragraph.
 const ANSWER = /^(?:[-*]\s*)?\*\*Answer:?\*\*:?\s*(.+)$/;
@@ -25,16 +27,20 @@ function extractQuestionAnswers(texts) {
       const line = raw.trim();
       const heading = line.match(HEADING);
       if (heading) {
+        // Not stored yet: a later block replaces an earlier answer to the
+        // same question only once it gives its own Answer line (a follow-up
+        // explaining "Why Q1 2024?" under a Q3 heading doesn't).
         current = { number: Number(heading[1]), answer: null, check: false };
-        byNumber.set(current.number, current);
         continue;
       }
       if (!current) continue;
       const answer = line.match(ANSWER);
       // A block that still holds several Answer lines (a visible self-correction)
       // copies the last one, the model's final word.
-      if (answer) current.answer = clean(answer[1]);
-      else if (CHECK.test(line)) current.check = true;
+      if (answer) {
+        current.answer = clean(answer[1]);
+        byNumber.set(current.number, current);
+      } else if (CHECK.test(line)) current.check = true;
     }
   }
   return [...byNumber.values()]
@@ -124,4 +130,23 @@ function asQuestionBlocks(text) {
   return out.join('\n');
 }
 
-module.exports = { extractQuestionAnswers, headingLabel, asQuestionBlocks };
+/**
+ * Which turns of a Screen-tab thread answer NEW on-screen questions, and so
+ * get the asQuestionBlocks rewrite: the thread's first answer and answers to
+ * "Answer each of these …" requests. Answers to typed follow-ups ("why Q3?")
+ * stay as written, so they can't take over a question's copy target.
+ * @param {{ role: string, content: string }[]} messages
+ * @returns {boolean[]} one flag per message (always false for user turns)
+ */
+function screenAnswerTurns(messages) {
+  let prompt = -1;
+  return (messages || []).map((turn, i) => {
+    if (turn.role !== 'assistant') {
+      if (turn.role === 'user') prompt = i;
+      return false;
+    }
+    return prompt <= 0 || isScreenQuestionPrompt(messages[prompt].content);
+  });
+}
+
+module.exports = { extractQuestionAnswers, headingLabel, asQuestionBlocks, screenAnswerTurns };
