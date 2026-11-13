@@ -84,6 +84,30 @@ Check which model ran in the backend log (`extraction.done … model=…`,
 `usage.answer … model=…`). To pick a Claude model for screen mode:
 `select model claude-haiku-5-5` while the Screen tab is open.
 
+### Visual scan
+
+`fixtures/assessment-visuals.html` ("Operations Analyst Assessment — Section C") is a
+long page whose questions can only be answered by reading the figures: a bar chart
+(only Jan and Jun labelled), a two-series line chart, a refund-approval flowchart, a
+PNG floor plan (the dock numbers exist only in the image) and an SLA table. It
+scrolls itself one section per stop (7 stops, ~8 views — under the 12-view cap),
+so each figure is whole in one view. Run it the same way, with
+`testpage .claude/skills/run-desktop/fixtures/assessment-visuals.html`; answers
+arrive ~40 s after the scan starts. The Friday panel sits over the middle of the
+primary display and is captured with the page — move it to another display first
+if there is one (`evalMain` + `setBounds`; it can snap back when the view changes).
+Answer key (also in an HTML comment at the bottom):
+
+- Q1 B) April · Q2 B) 60,000 · Q3 B) Q1 2024 · Q4 C) Manager review
+- Q5 B) Dock 7 · Q6 C) Support · Q7 B) 68 (50 + 70 − 52)
+
+Screenshots with figures are kept for the session and listed under **Saved
+passages** in the Screen panel. Buttons are clicked by exact accessible name, which
+is the `aria-label` when there is one: `click Show` / `click Hide`,
+`click Remove passage 1` (not "Remove"), and
+`click Clear remembered screen context` (the "Clear all" button). A thumbnail is
+`click Open saved screenshot` (opens a new window).
+
 ## Gotchas
 
 - **Clicks match exact names.** A partial match for "Start" hits **Restart Friday**,
