@@ -403,24 +403,15 @@ let scanCaptureBound = false;
 function syncScanCaptureShortcut(capturing) {
   if (capturing && !scanCaptureBound) {
     scanCaptureBound = globalShortcut.register(SCAN_CAPTURE_ACCELERATOR, () => {
-      void coding.captureScanSection().then((result) => {
-        // A kept view is announced via scan_view_captured below.
-        if (result.ok && !result.kept) publishToast('This view is already captured');
-      });
+      // Kept and duplicate views are shown inline in the Screen panel
+      // (scan_state's capturedAt / lastCapture), not as toasts.
+      void coding.captureScanSection();
     });
   } else if (!capturing && scanCaptureBound) {
     globalShortcut.unregister(SCAN_CAPTURE_ACCELERATOR);
     scanCaptureBound = false;
   }
 }
-coding.on('scan_view_captured', ({ frames, maxFrames }) => {
-  const remaining = maxFrames - frames;
-  publishToast(
-    remaining > 0
-      ? `View ${frames} captured — scroll to the next part`
-      : `View ${frames} captured — capture limit reached`,
-  );
-});
 coding.on('scan_state', (payload) => {
   syncScanCaptureShortcut(payload.state === 'capturing');
   broadcast('coding:scan_state', payload);
