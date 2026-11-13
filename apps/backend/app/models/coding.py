@@ -49,6 +49,12 @@ class ExtractedProblem(BaseModel):
     function_signature: str | None = None
     language_hint: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
+    # 0-based indices of the screenshots holding a chart/diagram/figure the
+    # questions depend on, so those frames can be kept for later answers.
+    visual_frames: list[int] = Field(default_factory=list)
+
+    def valid_visual_frames(self, frame_count: int) -> list[int]:
+        return sorted({i for i in self.visual_frames if 0 <= i < frame_count})
 
     @model_validator(mode="after")
     def _sync_questions(self) -> "ExtractedProblem":

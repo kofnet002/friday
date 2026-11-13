@@ -161,3 +161,24 @@ def test_clear_screen_context_endpoint_clears_session_state(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert cleared == ["s1"]
+
+
+def test_visual_frames_default_empty():
+    assert ExtractedProblem(is_coding_problem=False, confidence=0.9).visual_frames == []
+
+
+def test_valid_visual_frames_drops_out_of_range_and_duplicates():
+    p = ExtractedProblem(is_coding_problem=False, confidence=0.9, visual_frames=[3, 0, 0, -1, 7])
+    assert p.valid_visual_frames(4) == [0, 3]
+
+
+def test_extraction_prompt_asks_for_tables_charts_and_visual_frames():
+    from app.prompts.coding_extraction import (
+        CODING_EXTRACTION_SYSTEM_PROMPT as P,
+        CODING_EXTRACTION_VERSION,
+    )
+
+    assert '"visual_frames": number[]' in P
+    assert "Markdown table" in P
+    assert "[unreadable]" in P
+    assert CODING_EXTRACTION_VERSION == "1.7.0"
