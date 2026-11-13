@@ -301,3 +301,50 @@ def test_shared_screenshot_and_heading_prefix_but_different_text_stay_separate()
     refs = merge_references([], first, ["shared"])
     refs = merge_references(refs, second, ["shared", "other"])
     assert len(refs) == 2
+
+
+def test_same_shape_tables_with_different_numbers_stay_separate():
+    first = "| Region | Sales |\n|---|---|\n| North | 120 |\n| South | 95 |\n| East | 80 |"
+    second = "| Region | Sales |\n|---|---|\n| North | 140 |\n| South | 75 |\n| East | 60 |"
+    assert _ratio(first, second) >= 0.8
+    refs = merge_references([], first, ["a", "b"])
+    refs = merge_references(refs, second, ["a", "b"])
+    assert [r.text for r in refs] == [first, second]
+
+
+def test_preambles_for_different_question_ranges_stay_separate():
+    first = (
+        "Operations Analyst Assessment, Section C\nPreamble: Questions 1–4 refer to Figure 1. "
+        "Read each figure carefully: not every value is printed on it."
+    )
+    second = (
+        "Operations Analyst Assessment, Section C\nPreamble: Questions 5–7 refer to Figure 4. "
+        "Read each figure carefully: not every value is printed on it."
+    )
+    assert _ratio(first, second) >= 0.8
+    refs = merge_references([], first, ["a", "b"])
+    refs = merge_references(refs, second, ["a", "b"])
+    assert len(refs) == 2
+
+
+def test_question_ranges_alone_keep_passages_apart():
+    from app.services.screen_memory import _norm, _same_passage
+
+    # Same numbers either way, so only the differing ranges tell them apart.
+    first = "Questions 1 to 4 and 5: read the memo about 4 stores and 1 warehouse."
+    second = "Questions 1-5 and 4: read the memo about 4 stores and 1 warehouse."
+    ref = ScreenReference("1", first, ["a", "b"], 1.0)
+    assert not _same_passage(ref, _norm(second), ["a", "b"])
+    same_range = ScreenReference("2", second.replace("1-5", "1 to 5"), [], 1.0)
+    assert _same_passage(same_range, _norm(second), [])
+
+
+def test_contained_reread_with_more_figures_adds_them_to_the_saved_passage():
+    refs = merge_references([], "Figure 1 sales by region, Figure 2 costs", ["a", "b"])
+    refs = merge_references(refs, "Figure 1 sales by region", ["c", "a", "d"])
+    assert len(refs) == 1
+    # New first, the saved ones kept after them, deduped and capped at four.
+    assert refs[0].image_keys == ["c", "a", "d", "b"]
+    refs = merge_references([], "Figure 1 sales by region, Figure 2 costs", ["a", "b"])
+    refs = merge_references(refs, "Figure 2 costs", ["c", "d", "e"])
+    assert refs[0].image_keys == ["c", "d", "e", "a"]

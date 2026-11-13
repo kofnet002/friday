@@ -101,12 +101,41 @@ def _head_near_start(a_norm: str, b_norm: str) -> bool:
     )
 
 
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_QUESTION_RANGE = re.compile(r"\bquestions?\s+(\d+)\s*(?:-|–|—|to|through)\s*(\d+)")
+
+
+def _numbers_agree(a_norm: str, b_norm: str) -> bool:
+    """Every number in the shorter read also appears in the longer one.
+
+    Compared as sets, not multisets: a fuller re-read often repeats a value
+    (a heading and a caption both say "Figure 2") or drops a repeat, which
+    shouldn't split one passage. What matters is that the shorter read names
+    no value the longer one lacks, as when two same-shape tables differ."""
+    shorter, longer = sorted((a_norm, b_norm), key=len)
+    return set(_NUMBER.findall(shorter)) <= set(_NUMBER.findall(longer))
+
+
+def _question_ranges(norm_text: str) -> set[tuple[int, int]]:
+    return {(int(lo), int(hi)) for lo, hi in _QUESTION_RANGE.findall(norm_text)}
+
+
+def _ranges_agree(a_norm: str, b_norm: str) -> bool:
+    """Two reads naming different question ranges ("Questions 1–4" vs
+    "Questions 5–7") introduce different questions."""
+    a, b = _question_ranges(a_norm), _question_ranges(b_norm)
+    return not (a and b) or a == b
+
+
 def _same_passage(ref: ScreenReference, new_norm: str, new_keys: list[str]) -> bool:
     """A re-read of a saved passage: worded nearly the same, showing one of
     its figures under the same opening line, showing several of its
     screenshots with related text, or opening the same way (after a title,
-    say) in close wording."""
+    say) in close wording. Never when the numbers or question ranges differ:
+    close wording doesn't make two tables or two preambles one."""
     ref_norm = _norm(ref.text)
+    if not (_numbers_agree(ref_norm, new_norm) and _ranges_agree(ref_norm, new_norm)):
+        return False
     shared = set(ref.image_keys) & set(new_keys)
     matcher = SequenceMatcher(None, ref_norm, new_norm)
 
@@ -145,7 +174,9 @@ def merge_references(
         if new_norm in _norm(ref.text):
             merged = list(refs)
             if len(ref.image_keys) < len(new_keys):
-                merged[i] = replace(ref, image_keys=new_keys)
+                # Add the new figures (first) to the saved ones.
+                keys = list(dict.fromkeys([*new_keys, *ref.image_keys]))
+                merged[i] = replace(ref, image_keys=keys[:MAX_IMAGES_PER_REFERENCE])
             return merged
     replaced = [ref for ref in refs if _norm(ref.text) in new_norm]
     merged = [ref for ref in refs if _norm(ref.text) not in new_norm]
