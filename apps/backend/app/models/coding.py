@@ -56,10 +56,18 @@ class ExtractedProblem(BaseModel):
     # figures that screenshot shows; sent as its caption with answers.
     visual_frame_labels: list[str] = Field(default_factory=list)
 
-    @field_validator("visual_frames", "visual_frame_labels", mode="before")
+    @field_validator("visual_frames", mode="before")
     @classmethod
     def _null_visual_frames(cls, value: object) -> object:
         return [] if value is None else value
+
+    @field_validator("visual_frame_labels", mode="before")
+    @classmethod
+    def _coerce_visual_frame_labels(cls, value: object) -> list[str]:
+        # A bad caption must never fail the whole read.
+        if not isinstance(value, list):
+            return []
+        return [item if isinstance(item, str) else "" for item in value]
 
     @model_validator(mode="after")
     def _align_visual_frame_labels(self) -> ExtractedProblem:

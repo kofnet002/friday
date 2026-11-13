@@ -202,6 +202,9 @@ def test_visual_frame_labels_align_with_visual_frames():
     assert make([1], ["Figure 2", "extra"]).visual_frame_labels == ["Figure 2"]
     assert make([1], None).visual_frame_labels == [""]
     assert make(None, None).visual_frame_labels == []
+    # A bad caption never fails the whole read.
+    assert make([0, 1, 2], [None, 7, "  Figure 3 "]).visual_frame_labels == ["", "", "Figure 3"]
+    assert make([0], "not a list").visual_frame_labels == [""]
     # Labels follow their frame through dedupe / range filtering.
     p = make([3, 0, 0, 9], ["Fig D", "Fig A", "dup", "out"])
     assert p.labelled_visual_frames(4) == [(0, "Fig A"), (3, "Fig D")]

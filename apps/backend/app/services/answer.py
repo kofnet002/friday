@@ -260,6 +260,12 @@ async def _stream_anthropic(
     `image_labels`: a caption block on the API, a file list on the CLI.
     """
     model = model or settings.anthropic_answer_model
+    # Captions only when some image has a label; otherwise exactly as before.
+    labels = (
+        image_labels
+        if images and image_labels and any(label.strip() for label in image_labels)
+        else None
+    )
     transport = claude_transport()
     if transport == "cli" and images:
         from app.services.claude_cli import run_claude_cli_with_images
@@ -269,7 +275,7 @@ async def _stream_anthropic(
             prompt=threaded_user,
             system=system,
             model=model,
-            labels=image_labels or [""] * len(images),
+            labels=labels,
         )
         if text:
             yield text
@@ -298,7 +304,7 @@ async def _stream_anthropic(
         effort=settings.anthropic_effort,
         prior=((turn.role, turn.content) for turn in prior),
         image=[(b, image_media_type(b)) for b in images] if images else None,
-        image_captions=(image_labels or [""] * len(images)) if images else None,
+        image_captions=labels,
         cache_system=True,
     ):
         yield text
