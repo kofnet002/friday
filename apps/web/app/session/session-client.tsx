@@ -2342,7 +2342,14 @@ export function SessionClient() {
         entryCount={count}
         onPrev={() => goPrev(fromScreen)}
         onNext={() => goNext(fromScreen)}
-        onSubmitCustom={submitCustom}
+        // Typing in the Screen tab stays in the screen thread, even before its
+        // answer has text (errored, cancelled, first token pending).
+        onSubmitCustom={
+          fromScreen
+            ? (q) =>
+                entry ? followUp(q, { entryId: entry.id }) : askAnswer(q, { fromScreen: true })
+            : submitCustom
+        }
         // The Screen tab's follow-ups continue the screen thread it shows.
         onFollowUp={(q) => followUp(q, fromScreen && entry ? { entryId: entry.id } : {})}
         connected={answerConnected}

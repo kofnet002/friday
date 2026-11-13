@@ -202,7 +202,7 @@ export function AnswerPanel({
 
   const copyAnswer = async () => {
     if (!answer) return;
-    await copyText(answer);
+    if (!(await copyText(answer))) return;
     setCopied(true);
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
     copyTimerRef.current = window.setTimeout(() => setCopied(false), 1400);
@@ -596,19 +596,28 @@ function AnswerBody({
   }, [turnKey, screen]);
 
   // A new screen answer page: show its start (below the sticky pager)
-  // without jumping when it's already in view.
-  useLayoutEffect(() => {
+  // without jumping when it's already in view, and pin only if the reader
+  // is then at the bottom.
+  const revealStart = () => {
     const el = hostScrollRef?.current;
     const body = bodyRef.current;
-    if (!screen || !el || !body) return;
+    if (!el || !body) return;
     const top = body.getBoundingClientRect().top - el.getBoundingClientRect().top;
     if (top < 0 || top > el.clientHeight) body.scrollIntoView({ block: 'start' });
     pinnedRef.current = isNearBottom(el);
+  };
+  useLayoutEffect(() => {
+    if (screen) revealStart();
   }, [question, screen]);
 
+  // Arriving from another view remounts the host scroller (its `key` is the
+  // view), whose ref is attached only after this child's layout effects —
+  // so the step above found no scroller. Do it here on mount instead, or
+  // the first token would follow a `pinned` that was never measured.
   useEffect(() => {
     const el = hostScrollRef?.current;
     if (!screen || !el) return;
+    revealStart();
     const onHostScroll = () => {
       pinnedRef.current = isNearBottom(el);
     };
@@ -725,9 +734,11 @@ function AnswerBody({
 
 type QuestionAnswer = { label: string; answer: string; check: boolean };
 
-async function copyText(text: string) {
+/** Copies `text`; true only when it reached the clipboard. */
+async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
+    return true;
   } catch {
     const ta = document.createElement('textarea');
     ta.value = text;
@@ -735,12 +746,14 @@ async function copyText(text: string) {
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
+    let copied = false;
     try {
-      document.execCommand('copy');
+      copied = document.execCommand('copy');
     } catch {
       /* swallow */
     }
     document.body.removeChild(ta);
+    return copied;
   }
 }
 
@@ -762,7 +775,7 @@ function useQuestionCopy(questionAnswers: QuestionAnswer[], enabled: boolean) {
   const copyQuestion = async (label: string) => {
     const qa = answersRef.current.find((q) => q.label === label);
     if (!qa) return;
-    await copyText(qa.answer);
+    if (!(await copyText(qa.answer))) return;
     setCopiedLabel(label);
     if (timerRef.current) window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => setCopiedLabel(null), 1400);

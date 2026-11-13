@@ -5,7 +5,8 @@
 // so the answer panel can offer copy per question (by key or heading icon).
 
 const HEADING = /^\*\*Q(\d+)\s*[·:.\-–—]/;
-const ANSWER = /^[-*]\s*\*\*Answer:?\*\*:?\s*(.+)$/;
+// A bullet (`- **Answer:** …`) or, from asQuestionBlocks, a plain paragraph.
+const ANSWER = /^(?:[-*]\s*)?\*\*Answer:?\*\*:?\s*(.+)$/;
 const CHECK = /⚠️\s*\*{0,2}Check/;
 
 function clean(text) {
@@ -102,6 +103,14 @@ function asQuestionBlocks(text) {
       out.push(
         /^\*\*Answer:?\*\*/.test(bullet[2]) ? trimmed : `${bullet[1]} **Answer:** ${bullet[2]}`,
       );
+      labelNextBullet = false;
+      inQuestion = false;
+      continue;
+    }
+    // A plain paragraph answer (e.g. "B) 68"): label it so it can be copied,
+    // and keep a blank line so it doesn't run into the heading's paragraph.
+    if (labelNextBullet && trimmed) {
+      out.push('', /^\*\*Answer:?\*\*/.test(trimmed) ? trimmed : `**Answer:** ${trimmed}`);
       labelNextBullet = false;
       inQuestion = false;
       continue;

@@ -87,3 +87,25 @@ test('a block with several Answer lines copies the last one', () => {
     { label: 'Q7', answer: 'B) 68', check: false },
   ]);
 });
+
+test('asQuestionBlocks labels a plain-paragraph answer and keeps it apart from the heading', () => {
+  const { asQuestionBlocks } = require('./question-answers');
+  const plain = `**💬 Question:** Q7 — Result?\n\n**⭐ Answer:**\n\nB) 68\n\nSum = 120.`;
+  assert.equal(asQuestionBlocks(plain), `**Q7 · Result?**\n\n**Answer:** B) 68\n\nSum = 120.`);
+  assert.deepEqual(extractQuestionAnswers([asQuestionBlocks(plain)]), [
+    { label: 'Q7', answer: 'B) 68', check: false },
+  ]);
+});
+
+test('asQuestionBlocks rewrites every question when a text holds several', () => {
+  const { asQuestionBlocks } = require('./question-answers');
+  const two = `**💬 Question:** Q6 — First?\n\n**⭐ Answer:**\n- C) Highland\n- Why.\n\n**💬 Question:** Q7 — Second?\n\n**⭐ Answer:**\nB) 68`;
+  assert.equal(
+    asQuestionBlocks(two),
+    `**Q6 · First?**\n- **Answer:** C) Highland\n- Why.\n\n**Q7 · Second?**\n\n**Answer:** B) 68`,
+  );
+  assert.deepEqual(
+    extractQuestionAnswers([asQuestionBlocks(two)]).map((qa) => `${qa.label}=${qa.answer}`),
+    ['Q6=C) Highland', 'Q7=B) 68'],
+  );
+});
