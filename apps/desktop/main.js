@@ -15,7 +15,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 const { AudioSupervisor } = require('./audio');
-const { CodingCapture } = require('./coding');
+const { CodingCapture, setProtectedWindowCheck } = require('./coding');
 const bundledServices = require('./services');
 const stealth = require('./stealth');
 const { autoUpdater } = require('electron-updater');
@@ -70,6 +70,9 @@ let windowState = null;
 let Store = null;
 let stealthEnabled = DEFAULT_STEALTH_ENABLED;
 let stealthStatus = stealth.statusShape({ enabled: DEFAULT_STEALTH_ENABLED });
+// Screen captures shield every Friday window; this says which ones stealth
+// keeps protected so a capture never switches their protection off.
+setProtectedWindowCheck((win) => stealthEnabled && win === mainWindow);
 let bundledRedisAvailable = null;
 let finishingServiceShutdown = false;
 let checkForUpdates = async () => null;

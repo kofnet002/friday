@@ -2,19 +2,29 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 let captureNumber = 0;
-const electronMock = {
-  desktopCapturer: {
-    getSources: async () => [
-      {
-        display_id: 'primary',
-        name: 'Built-in Display',
-        thumbnail: {
-          isEmpty: () => false,
-          toPNG: () => Buffer.from([++captureNumber]),
-        },
-      },
-    ],
+function fakeWindow(name) {
+  const win = { name, protectedNow: false, calls: [] };
+  win.isDestroyed = () => false;
+  win.setContentProtection = (on) => {
+    win.protectedNow = on;
+    win.calls.push(on);
+  };
+  return win;
+}
+let windows = [];
+const defaultGetSources = async () => [
+  {
+    display_id: 'primary',
+    name: 'Built-in Display',
+    thumbnail: {
+      isEmpty: () => false,
+      toPNG: () => Buffer.from([++captureNumber]),
+    },
   },
+];
+const electronMock = {
+  BrowserWindow: { getAllWindows: () => windows },
+  desktopCapturer: { getSources: defaultGetSources },
   screen: { getPrimaryDisplay: () => ({ id: 'primary' }) },
 };
 
@@ -52,7 +62,7 @@ require.cache[require.resolve('sharp')] = {
   }),
 };
 
-const { CodingCapture } = require('./coding');
+const { CodingCapture, getSourcesWithoutFriday, setProtectedWindowCheck } = require('./coding');
 
 function activeCapture() {
   const capture = new CodingCapture();
@@ -160,5 +170,82 @@ test('a scan reads its first view in the background and the final read shares it
   } finally {
     capture.stop();
     global.fetch = originalFetch;
+  }
+});
+
+test('captures shield every Friday window and restore it afterwards', async () => {
+  const panel = fakeWindow('panel');
+  windows = [panel];
+  let protectedDuringCapture = null;
+  electronMock.desktopCapturer.getSources = async () => {
+    protectedDuringCapture = panel.protectedNow;
+    return defaultGetSources();
+  };
+  try {
+    await getSourcesWithoutFriday({ types: ['screen'] });
+    assert.equal(protectedDuringCapture, true);
+    assert.equal(panel.protectedNow, false);
+    assert.deepEqual(panel.calls, [true, false]);
+  } finally {
+    electronMock.desktopCapturer.getSources = defaultGetSources;
+    windows = [];
+  }
+});
+
+test('a failed capture still restores window protection', async () => {
+  const panel = fakeWindow('panel');
+  windows = [panel];
+  electronMock.desktopCapturer.getSources = async () => {
+    assert.equal(panel.protectedNow, true);
+    throw new Error('capture denied');
+  };
+  try {
+    await assert.rejects(getSourcesWithoutFriday({ types: ['screen'] }), /capture denied/);
+    assert.equal(panel.protectedNow, false);
+  } finally {
+    electronMock.desktopCapturer.getSources = defaultGetSources;
+    windows = [];
+  }
+});
+
+test('a window stealth already protects stays protected after a capture', async () => {
+  const stealthed = fakeWindow('main');
+  stealthed.protectedNow = true;
+  const other = fakeWindow('other');
+  windows = [stealthed, other];
+  setProtectedWindowCheck((win) => win === stealthed);
+  try {
+    const capture = activeCapture();
+    capture.active = false;
+    await capture.listDisplays();
+    assert.equal(stealthed.protectedNow, true);
+    assert.deepEqual(stealthed.calls, [], 'a protected window is never switched off');
+    assert.deepEqual(other.calls, [true, false]);
+  } finally {
+    setProtectedWindowCheck(null);
+    windows = [];
+  }
+});
+
+test('overlapping captures keep windows shielded until the last one ends', async () => {
+  const panel = fakeWindow('panel');
+  windows = [panel];
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  let calls = 0;
+  electronMock.desktopCapturer.getSources = async () => {
+    if (calls++ === 0) await gate;
+    return defaultGetSources();
+  };
+  try {
+    const slow = getSourcesWithoutFriday({ types: ['screen'] });
+    await getSourcesWithoutFriday({ types: ['screen'] });
+    assert.equal(panel.protectedNow, true, 'first capture is still running');
+    release();
+    await slow;
+    assert.equal(panel.protectedNow, false);
+  } finally {
+    electronMock.desktopCapturer.getSources = defaultGetSources;
+    windows = [];
   }
 });

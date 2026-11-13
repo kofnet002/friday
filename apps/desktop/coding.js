@@ -4,7 +4,7 @@
 // threshold constants mirror CODING_EXTRACTION_CONFIG from
 // packages/prompts/coding-extraction.ts.
 
-const { desktopCapturer, screen } = require('electron');
+const { BrowserWindow, desktopCapturer, screen } = require('electron');
 const { EventEmitter } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const sharp = require('sharp');
@@ -75,8 +75,56 @@ function hammingDistance(a, b) {
   return dist;
 }
 
+// Friday must never read its own window as part of the page — with stealth
+// off its panels (saved passages, answers) would come back as "passages".
+// Every capture runs with content protection on for all Friday windows, then
+// each window goes back to what the app wants it to be. Electron 33 has no
+// isContentProtected(), so main.js tells us which windows it keeps protected
+// (stealth); those are never switched off here.
+let wantsProtection = () => false;
+let shieldDepth = 0;
+let shielded = [];
+
+function setProtectedWindowCheck(check) {
+  wantsProtection = typeof check === 'function' ? check : () => false;
+}
+
+function isWindowProtected(win) {
+  if (typeof win.isContentProtected === 'function' && win.isContentProtected()) return true;
+  return Boolean(wantsProtection(win));
+}
+
+function shieldOwnWindows() {
+  if (shieldDepth++ > 0) return;
+  shielded = [];
+  for (const win of BrowserWindow?.getAllWindows?.() ?? []) {
+    if (win.isDestroyed() || isWindowProtected(win)) continue;
+    win.setContentProtection(true);
+    shielded.push(win);
+  }
+}
+
+function unshieldOwnWindows() {
+  if (--shieldDepth > 0) return;
+  shieldDepth = 0;
+  for (const win of shielded) {
+    // Stealth may have been switched on mid-capture: then it stays on.
+    if (!win.isDestroyed() && !isWindowProtected(win)) win.setContentProtection(false);
+  }
+  shielded = [];
+}
+
+async function getSourcesWithoutFriday(options) {
+  shieldOwnWindows();
+  try {
+    return await desktopCapturer.getSources(options);
+  } finally {
+    unshieldOwnWindows();
+  }
+}
+
 async function captureScreen(displayId) {
-  const sources = await desktopCapturer.getSources({
+  const sources = await getSourcesWithoutFriday({
     types: ['screen'],
     thumbnailSize: { width: MAX_WIDTH_PX, height: MAX_WIDTH_PX },
     fetchWindowIcons: false,
@@ -131,7 +179,7 @@ class CodingCapture extends EventEmitter {
   }
 
   async listDisplays() {
-    const sources = await desktopCapturer.getSources({
+    const sources = await getSourcesWithoutFriday({
       types: ['screen'],
       fetchWindowIcons: false,
     });
@@ -571,4 +619,4 @@ class CodingCapture extends EventEmitter {
   }
 }
 
-module.exports = { CodingCapture };
+module.exports = { CodingCapture, getSourcesWithoutFriday, setProtectedWindowCheck };
