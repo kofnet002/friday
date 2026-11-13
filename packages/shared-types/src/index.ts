@@ -195,6 +195,8 @@ export type AnswerClientMessage =
       /** Claude model for this answer when provider is 'claude' — set for
        *  questions read off the screen so they use the Screen panel's pick. */
       claude_model?: ClaudeModel;
+      /** Question read off the screen or a follow-up in such a thread. */
+      from_screen?: boolean;
     }
   /** Confirms a speculative answer so the server saves it. `question` is
    *  the confirmed wording, saved instead of the raw turn text the answer

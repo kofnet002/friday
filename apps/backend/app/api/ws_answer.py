@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 from typing import Any, Literal
 
@@ -9,13 +11,21 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.db import append_qa, get_session
 from app.logging import log
 from app.prompts.answer_generation import AnswerContext, PriorTurn
-from app.redis_client import get_screen_context, recent_transcript_text, set_last_answer
+from app.redis_client import (
+    get_current_screen_images,
+    get_screen_context,
+    get_screen_image,
+    get_screen_references,
+    recent_transcript_text,
+    set_last_answer,
+)
 from app.services import latency
 from app.services.answer import Provider, claude_answer_model, stream_answer
 from app.services.claude_api import normalize_claude_model
 from app.services.limits import check_token_budget
 from app.services.code_search import find_code_refs
 from app.services.project_context import load_project_contexts
+from app.services.screen_memory import answer_image_keys
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
 
@@ -66,6 +76,28 @@ def resolve_screen_context(override: dict[str, Any], stored: str | None) -> str 
     if "screen_context" in override and override.get("screen_context") == "":
         return None
     return stored or override.get("screen_context") or None
+
+
+async def load_answer_images(session_id: str, *, from_screen: bool) -> list[bytes]:
+    """Kept screenshots (charts/diagrams) to attach to an answer: the current
+    screen's, plus remembered passages' for a question read off the screen.
+    Missing or undecodable images are dropped; Redis errors yield none."""
+    try:
+        current = await get_current_screen_images(session_id)
+        refs = await get_screen_references(session_id)
+        keys = answer_image_keys(current, refs, include_references=from_screen)
+        images: list[bytes] = []
+        for key in keys:
+            data = await get_screen_image(session_id, key)
+            if not data:
+                continue
+            try:
+                images.append(base64.b64decode(data))
+            except (binascii.Error, ValueError):
+                continue
+        return images
+    except Exception:  # noqa: BLE001 - screenshots are optional
+        return []
 
 
 @router.websocket("/ws/answer")
@@ -177,6 +209,12 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             except Exception:  # noqa: BLE001 - screen context is optional
                 stored_screen = None
         screen_context = resolve_screen_context(override, stored_screen)
+        # A question read off the screen (or a follow-up in such a thread)
+        # also gets the remembered passages' screenshots.
+        from_screen = bool(request.get("from_screen"))
+        images: list[bytes] = []
+        if session_id and screen_context:
+            images = await load_answer_images(session_id, from_screen=from_screen)
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
@@ -187,6 +225,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
             screen_context=screen_context,
+            screen_visuals="attached" if images else None,
             prior_turns=prior_turns,
             projects=projects,
             code_refs=await find_code_refs(
@@ -257,7 +296,12 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         collected: list[str] = []
         try:
             async for token in stream_answer(
-                provider, question, context, on_fallback=_on_fallback, claude_model=claude_model
+                provider,
+                question,
+                context,
+                on_fallback=_on_fallback,
+                claude_model=claude_model,
+                images=images or None,
             ):
                 if not collected:
                     latency.mark(candidate_id, "first_token")

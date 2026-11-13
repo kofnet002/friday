@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-ANSWER_GENERATION_VERSION = "1.6.0"
+ANSWER_GENERATION_VERSION = "1.7.0"
 
 Role = Literal["user", "assistant"]
 
@@ -56,6 +56,10 @@ class AnswerContext:
     # Per-question code retrieval — rendered in the USER turn so the system
     # prompt (resume + projects) stays identical and prompt-cacheable.
     code_refs: tuple[CodeRef, ...] = field(default_factory=tuple)
+    # Whether screenshots of on-screen charts/diagrams reach the model:
+    # "attached" (sent with this answer), "unavailable" (the page has them
+    # but this provider can't see them), None (no kept visuals).
+    screen_visuals: Literal["attached", "unavailable"] | None = None
 
 
 def _projects_block(projects: tuple[ProjectContext, ...]) -> str:
@@ -105,6 +109,15 @@ The user turn may include <code_references>: code blocks from the project's repo
 """
 
 
+SCREEN_VISUALS_NOTES: dict[str, str] = {
+    "attached": "Screenshots of the on-screen charts/diagrams are attached; treat them as the"
+    " source of truth over the transcription for visual content. If a value you need is still"
+    " unreadable, add `⚠️ Check:`.",
+    "unavailable": "The page has charts/diagrams that are NOT available to you; for any question"
+    " that depends on them, add `⚠️ Check: visual not available`.",
+}
+
+
 def answer_system_prompt(ctx: AnswerContext) -> str:
     resume_block = (
         f"\n\n<candidate_background>\n{ctx.resume_text.strip()}\n</candidate_background>"
@@ -132,6 +145,8 @@ def answer_system_prompt(ctx: AnswerContext) -> str:
         if ctx.screen_context and ctx.screen_context.strip()
         else ""
     )
+    if screen_block and ctx.screen_visuals:
+        screen_block += "\n\n" + SCREEN_VISUALS_NOTES[ctx.screen_visuals]
     screen_rules = (
         "\n\nVISIBLE SCREEN CONTEXT\nUse this context only when it is relevant to the interview question. Treat it as source material, preserve exact technical details, and do not infer clipped content."
         " When the question refers to a passage, preamble, case study, or data, answer from the earlier reference material in this context."

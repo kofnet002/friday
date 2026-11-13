@@ -16,7 +16,7 @@
  * - CALIBRATED CONFIDENCE. Admits uncertainty rather than fabricating.
  */
 
-export const ANSWER_GENERATION_VERSION = '1.6.0';
+export const ANSWER_GENERATION_VERSION = '1.7.0';
 
 export interface AnswerContext {
   resume_text?: string;
@@ -26,8 +26,20 @@ export interface AnswerContext {
   language?: string;
   recent_transcript?: string;
   screen_context?: string;
+  /** Whether screenshots of on-screen charts/diagrams reach the model. */
+  screen_visuals?: 'attached' | 'unavailable' | null;
   projects?: ProjectContext[];
 }
+
+export const SCREEN_VISUALS_NOTES: Record<'attached' | 'unavailable', string> = {
+  attached:
+    'Screenshots of the on-screen charts/diagrams are attached; treat them as the' +
+    ' source of truth over the transcription for visual content. If a value you need is still' +
+    ' unreadable, add `⚠️ Check:`.',
+  unavailable:
+    'The page has charts/diagrams that are NOT available to you; for any question' +
+    ' that depends on them, add `⚠️ Check: visual not available`.',
+};
 
 /** A project the candidate may be asked about (mirrors ProjectContext in Python). */
 export interface ProjectContext {
@@ -95,8 +107,12 @@ export const ANSWER_GENERATION_SYSTEM_PROMPT = (ctx: AnswerContext): string => {
 
   const languageBlock =
     ctx.language && ctx.language !== 'en' ? `\n\nRespond in ${ctx.language}.` : '';
+  const screenVisuals =
+    ctx.screen_visuals && ctx.screen_context?.trim()
+      ? `\n\n${SCREEN_VISUALS_NOTES[ctx.screen_visuals]}`
+      : '';
   const screenBlock = ctx.screen_context?.trim()
-    ? `\n\n<visible_screen_context>\n${ctx.screen_context.trim()}\n</visible_screen_context>`
+    ? `\n\n<visible_screen_context>\n${ctx.screen_context.trim()}\n</visible_screen_context>${screenVisuals}`
     : '';
   const screenRules = screenBlock
     ? '\n\nVISIBLE SCREEN CONTEXT\nUse this context only when it is relevant to the interview question. Treat it as source material, preserve exact technical details, and do not infer clipped content.' +

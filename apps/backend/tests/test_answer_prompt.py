@@ -32,3 +32,54 @@ def test_grouped_screen_questions_are_answered_together_with_their_numbers():
 def test_unsure_or_cut_off_answers_are_flagged():
     prompt = answer_system_prompt(AnswerContext())
     assert "⚠️ Check:" in prompt
+
+
+def test_attached_screen_visuals_are_the_source_of_truth():
+    prompt = answer_system_prompt(
+        AnswerContext(screen_context="Chart page", screen_visuals="attached")
+    )
+    assert "source of truth" in prompt
+    assert "visual not available" not in prompt
+
+
+def test_unavailable_screen_visuals_ask_for_a_check():
+    prompt = answer_system_prompt(
+        AnswerContext(screen_context="Chart page", screen_visuals="unavailable")
+    )
+    assert "⚠️ Check: visual not available" in prompt
+    assert "source of truth" not in prompt
+
+
+def test_no_screen_visuals_line_by_default():
+    prompt = answer_system_prompt(AnswerContext(screen_context="Chart page"))
+    assert "source of truth" not in prompt
+    assert "visual not available" not in prompt
+
+
+def test_non_claude_answer_is_told_visuals_are_unavailable(monkeypatch):
+    import asyncio
+
+    from app.services import answer as answer_mod
+
+    seen: list[str] = []
+
+    async def fake_gemini(system: str, user: str):
+        seen.append(system)
+        yield "ok"
+
+    monkeypatch.setattr(answer_mod, "_stream_gemini", fake_gemini)
+    monkeypatch.setattr(answer_mod, "_provider_chain", lambda p: [p])
+
+    async def run() -> list[str]:
+        return [
+            t
+            async for t in answer_mod.stream_answer(
+                "gemini",
+                "What does the chart show?",
+                AnswerContext(screen_context="Chart page"),
+                images=[b"\x89PNG\r\n\x1a\nfake"],
+            )
+        ]
+
+    assert asyncio.run(run()) == ["ok"]
+    assert "⚠️ Check: visual not available" in seen[0]

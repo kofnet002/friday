@@ -105,3 +105,95 @@ def test_superseded_stream_events_carry_old_request_id(saved: list[dict[str, Any
     cancelled = [e for e in events if e["type"] == "cancelled"]
     assert cancelled and all(e["request_id"] == "old" for e in cancelled)
     assert [e["request_id"] for e in events if e["type"] == "done"] == ["new"]
+
+
+@pytest.fixture
+def captured(
+    saved: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Capture stream_answer's args; stub screen storage with one current
+    image (k1) and one remembered passage image (k2)."""
+    from app.services.screen_memory import ScreenReference
+
+    calls: list[dict[str, Any]] = []
+    screen: dict[str, Any] = {
+        "context": "Revenue chart page",
+        "current": ["k1"],
+        "refs": [ScreenReference(id="r1", text="passage", image_keys=["k2"], saved_at=1.0)],
+        "images": {"k1": "aW1nMQ==", "k2": "aW1nMg=="},
+    }
+
+    async def fake_stream(*a: Any, **k: Any) -> AsyncIterator[str]:
+        calls.append({"args": a, **k})
+        yield "ok"
+
+    async def get_screen_context(_sid: str) -> str | None:
+        return screen["context"]
+
+    async def get_current_screen_images(_sid: str) -> list[str]:
+        return list(screen["current"])
+
+    async def get_screen_references(_sid: str) -> list[Any]:
+        return list(screen["refs"])
+
+    async def get_screen_image(_sid: str, key: str) -> str | None:
+        return screen["images"].get(key)
+
+    monkeypatch.setattr(mod, "stream_answer", fake_stream)
+    monkeypatch.setattr(mod, "get_screen_context", get_screen_context)
+    monkeypatch.setattr(mod, "get_current_screen_images", get_current_screen_images)
+    monkeypatch.setattr(mod, "get_screen_references", get_screen_references)
+    monkeypatch.setattr(mod, "get_screen_image", get_screen_image)
+    return calls, screen
+
+
+def _ask_once(**extra: Any) -> None:
+    with TestClient(app).websocket_connect("/ws/answer?session_id=s1") as ws:
+        _ask(ws, provider="claude", **extra)
+        _drain(ws, "saved")
+
+
+def test_spoken_question_sends_only_the_current_screen_image(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    calls, _ = captured
+    _ask_once()
+    assert calls[0]["images"] == [b"img1"]
+    assert calls[0]["args"][2].screen_visuals == "attached"
+
+
+def test_screen_question_also_sends_remembered_images(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    calls, _ = captured
+    _ask_once(from_screen=True)
+    assert calls[0]["images"] == [b"img1", b"img2"]
+
+
+def test_screen_capture_off_sends_no_images(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    calls, _ = captured
+    _ask_once(from_screen=True, session_context={"screen_context": ""})
+    assert calls[0]["images"] is None
+    assert calls[0]["args"][2].screen_visuals is None
+
+
+def test_no_stored_images_sends_none(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    calls, screen = captured
+    screen["current"] = []
+    screen["refs"] = []
+    _ask_once(from_screen=True)
+    assert calls[0]["images"] is None
+    assert calls[0]["args"][2].screen_visuals is None
+
+
+def test_missing_image_bytes_are_dropped(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    calls, screen = captured
+    screen["images"] = {"k2": "aW1nMg=="}
+    _ask_once(from_screen=True)
+    assert calls[0]["images"] == [b"img2"]
