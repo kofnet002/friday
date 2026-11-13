@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import base64 as _base64
 import hashlib
+import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field, model_validator
 
 from app import session_bus
@@ -19,6 +20,7 @@ from app.redis_client import (
     clear_screen_state,
     get_current_screen_images,
     get_screen_current_text,
+    get_screen_generation,
     get_screen_image,
     get_screen_image_label,
     get_screen_references,
@@ -51,11 +53,19 @@ from app.settings import settings
 
 router = APIRouter(prefix="/api/vision")
 
+# Session ids are minted as uuid4 strings by the web client; allow that
+# alphabet (letters, digits, - and _) and nothing that could reach another
+# session's Redis keys or act as a glob (`*`, `?`, `[`, `:`).
+SESSION_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+SessionId = Query(pattern=SESSION_ID_PATTERN)
+# Screenshot keys are image_key() digests: 32 lowercase hex characters.
+_IMAGE_KEY = re.compile(r"^[0-9a-f]{32}$")
+
 
 class ExtractRequest(BaseModel):
     image_base64: str | None = Field(default=None, min_length=16)
     images_base64: list[str] | None = None
-    session_id: str = Field(min_length=1)
+    session_id: str = Field(pattern=SESSION_ID_PATTERN)
     force: bool = False
     # Optional override of the provider used for vision extraction. When
     # absent the service resolves it from the session's default_provider,
@@ -219,7 +229,7 @@ async def update_screen_images(
 
 
 @router.delete("/screen-context")
-async def clear_screen_context(session_id: str) -> dict[str, bool]:
+async def clear_screen_context(session_id: str = SessionId) -> dict[str, bool]:
     """Forget remembered passages and the current screen text, e.g. when the
     user moves on to a different assessment."""
     await clear_screen_state(session_id)
@@ -227,7 +237,7 @@ async def clear_screen_context(session_id: str) -> dict[str, bool]:
 
 
 @router.get("/screen-context")
-async def list_screen_references(session_id: str) -> dict[str, Any]:
+async def list_screen_references(session_id: str = SessionId) -> dict[str, Any]:
     """Remembered passages for the viewer, oldest first."""
     refs = await get_screen_references(session_id)
     return {
@@ -247,7 +257,9 @@ async def list_screen_references(session_id: str) -> dict[str, Any]:
 
 
 @router.get("/screen-image/{key}")
-async def get_screen_image_bytes(key: str, session_id: str) -> Response:
+async def get_screen_image_bytes(key: str, session_id: str = SessionId) -> Response:
+    if not _IMAGE_KEY.match(key):
+        raise HTTPException(status_code=404, detail="Image not found")
     encoded = await get_screen_image(session_id, key)
     if not encoded:
         raise HTTPException(status_code=404, detail="Image not found")
@@ -255,11 +267,16 @@ async def get_screen_image_bytes(key: str, session_id: str) -> Response:
         data = _base64.b64decode(encoded)
     except ValueError:
         raise HTTPException(status_code=404, detail="Image not found") from None
-    return Response(content=data, media_type=image_media_type(data))
+    # Screenshots of an assessment: never written to a browser/disk cache.
+    return Response(
+        content=data,
+        media_type=image_media_type(data),
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 @router.delete("/screen-reference/{ref_id}")
-async def delete_screen_reference(ref_id: str, session_id: str) -> dict[str, Any]:
+async def delete_screen_reference(ref_id: str, session_id: str = SessionId) -> dict[str, Any]:
     """Forget one remembered passage and its screenshots."""
     refs = await get_screen_references(session_id)
     removed = next((r for r in refs if r.id == ref_id), None)
@@ -325,6 +342,9 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
                 }
 
     speculative = is_scan and request.speculative
+    # A Clear all (or a new watch, which clears) while the model reads must
+    # win: if the generation moved by the time we'd save, this read is stale.
+    generation = await get_screen_generation(request.session_id)
 
     async def run_extraction() -> ExtractedProblem:
         return await extract_problem(
@@ -360,6 +380,15 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         )
         if part
     )
+    if await get_screen_generation(request.session_id) != generation:
+        log.info("vision.extract_discarded_after_clear", session_id=request.session_id)
+        return {
+            "problem": problem.model_dump(),
+            "emitted": False,
+            "cached": False,
+            "image_hash": image_hash,
+            "skipped": "cleared",
+        }
     # Always replace the prior *current-screen* context. Keeping the previous
     # value when a new screen has no extractable question/code can make a
     # spoken question get answered against stale content from an earlier

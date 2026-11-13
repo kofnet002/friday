@@ -298,3 +298,42 @@ def test_delete_removes_passage_image_and_text(viewer):
     assert "Current screen" in ctx
     missing = client.delete("/api/vision/screen-reference/zzz", params={"session_id": "s1"})
     assert missing.status_code == 404
+
+
+def test_screen_images_are_never_cached(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    r = client.get(f"/api/vision/screen-image/{key}", params={"session_id": "s1"})
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+    assert r.headers["pragma"] == "no-cache"
+
+
+def test_image_key_must_be_32_hex_chars(viewer):
+    import asyncio
+
+    client, fake = viewer
+    key = asyncio.run(_seed())
+    # Only image keys we mint (32 lowercase hex) are looked up at all.
+    fake.store["session:s1:screen_image:notakey"] = base64.b64encode(_JPEG).decode()
+    for bad in ("notakey", key.upper(), key[:-1], key + "0", "*"):
+        r = client.get(f"/api/vision/screen-image/{bad}", params={"session_id": "s1"})
+        assert r.status_code == 404, bad
+
+
+def test_viewer_endpoints_reject_malformed_session_ids(viewer):
+    import asyncio
+
+    client, fake = viewer
+    asyncio.run(_seed())
+    before = dict(fake.store)
+    for sid in ("*", "s?", "s1:screen_image", "a b", "x" * 65, ""):
+        params = {"session_id": sid}
+        assert client.delete("/api/vision/screen-context", params=params).status_code == 422
+        assert client.get("/api/vision/screen-context", params=params).status_code == 422
+    assert fake.store == before
+    # A real (uuid4) session id is accepted.
+    sid = "0b7d3c8e-4a52-4f0e-9a1d-3f6c2b1e9d70"
+    assert client.get("/api/vision/screen-context", params={"session_id": sid}).status_code == 200

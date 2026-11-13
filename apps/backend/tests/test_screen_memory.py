@@ -76,8 +76,11 @@ async def test_clear_screen_state_removes_images(monkeypatch):
     await rc.set_current_screen_images("s1", [k])
     await rc.put_screen_images("other", ["BBBB"])
     await rc.clear_screen_state("s1")
-    assert [key for key in fake.store if key.startswith("session:s1:")] == []
-    assert len(fake.store) == 1
+    # Only the clear's generation counter remains (it must outlive the clear).
+    assert [key for key in fake.store if key.startswith("session:s1:")] == [
+        "session:s1:screen_generation"
+    ]
+    assert len(fake.store) == 2
 
 
 def test_legacy_string_id_is_stable():
@@ -205,7 +208,9 @@ async def test_labels_are_stored_pruned_and_cleared_with_their_images(monkeypatc
     [k3] = await rc.put_screen_images(sid, ["CCCC"], ["Figure 3"])
     await rc.clear_screen_state(sid)
     assert await rc.get_screen_image_label(sid, k3) is None
-    assert [key for key in fake.store if key.startswith("session:s1:")] == []
+    assert [key for key in fake.store if key.startswith("session:s1:")] == [
+        "session:s1:screen_generation"
+    ]
 
 
 def _smoke11_reads() -> list[dict[str, object]]:
@@ -348,3 +353,33 @@ def test_contained_reread_with_more_figures_adds_them_to_the_saved_passage():
     refs = merge_references([], "Figure 1 sales by region, Figure 2 costs", ["a", "b"])
     refs = merge_references(refs, "Figure 2 costs", ["c", "d", "e"])
     assert refs[0].image_keys == ["c", "d", "e", "a"]
+
+
+@pytest.mark.asyncio
+async def test_saving_passages_refreshes_their_image_ttls(monkeypatch):
+    fake = install_fake_redis(monkeypatch)
+    [k] = await rc.put_screen_images("s1", ["AAAA"], ["Figure 1"])
+    image_key_ = f"session:s1:screen_image:{k}"
+    label_key = f"session:s1:screen_image_label:{k}"
+    fake.ttl[image_key_] = fake.ttl[label_key] = 5  # nearly expired
+    await rc.set_screen_references("s1", [ScreenReference("1", "t", [k], 1.0)])
+    assert fake.ttl[image_key_] == rc.QD_STATE_TTL_S
+    assert fake.ttl[label_key] == rc.QD_STATE_TTL_S
+
+
+@pytest.mark.asyncio
+async def test_clear_with_a_glob_session_id_leaves_other_sessions_alone(monkeypatch):
+    fake = install_fake_redis(monkeypatch)
+    await rc.put_screen_images("s1", ["AAAA"], ["Figure 1"])
+    await rc.clear_screen_state("*")
+    await rc.clear_screen_state("s?")
+    assert any(key.startswith("session:s1:screen_image:") for key in fake.store)
+    assert any(key.startswith("session:s1:screen_image_label:") for key in fake.store)
+
+
+@pytest.mark.asyncio
+async def test_clear_bumps_the_screen_generation(monkeypatch):
+    install_fake_redis(monkeypatch)
+    before = await rc.get_screen_generation("s1")
+    await rc.clear_screen_state("s1")
+    assert await rc.get_screen_generation("s1") == before + 1

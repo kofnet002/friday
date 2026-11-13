@@ -169,3 +169,37 @@ async def test_kept_frames_store_their_labels(monkeypatch):
     assert await get_current_screen_images("s") == [image_key(imgs[0]), image_key(imgs[2])]
     assert await get_screen_image_label("s", image_key(imgs[0])) == "Figure 1"
     assert await get_screen_image_label("s", image_key(imgs[2])) == "Figure 3 (flowchart)"
+
+
+def test_extract_request_rejects_a_malformed_session_id():
+    with pytest.raises(ValidationError):
+        ExtractRequest(session_id="*", image_base64="A" * 16)
+
+
+async def test_clear_during_an_extract_keeps_the_old_read_out(monkeypatch):
+    import asyncio
+
+    from app.api import vision
+    from app.redis_client import clear_screen_state
+
+    imgs = _images(2)
+    fake = _setup(monkeypatch, _problem())
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow_extract(*_a, **_k):
+        started.set()
+        await release.wait()
+        return _problem(
+            is_reference_material=True, visual_frames=[0], visible_context="Old passage."
+        )
+
+    monkeypatch.setattr(vision, "extract_problem", slow_extract)
+    task = asyncio.create_task(vision.extract(ExtractRequest(session_id="s", images_base64=imgs)))
+    await started.wait()
+    await clear_screen_state("s")  # Clear all / a new watch
+    release.set()
+    result = await task
+    assert result["emitted"] is False
+    # Nothing from the stale read: no passage, screenshots or screen text.
+    assert [k for k in fake.store if k.startswith("session:s:")] == ["session:s:screen_generation"]

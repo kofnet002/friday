@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable
 from typing import Any, cast
 
@@ -162,6 +163,11 @@ async def set_screen_references(session_id: str, references: list[ScreenReferenc
             ex=QD_STATE_TTL_S,
         ),
     )
+    # A passage's screenshots live as long as the passage: refresh them (and
+    # their labels) whenever it is saved, so figures never expire before it.
+    for k in dict.fromkeys(k for ref in references for k in ref.image_keys):
+        for redis_key in (_screen_image_key(session_id, k), _screen_image_label_key(session_id, k)):
+            await cast(Awaitable[Any], client.expire(redis_key, QD_STATE_TTL_S))
 
 
 def _screen_image_key(session_id: str, key: str) -> str:
@@ -260,11 +266,38 @@ async def prune_screen_images(session_id: str, candidate_keys: list[str]) -> Non
         await cast(Awaitable[Any], client.delete(*stale))
 
 
+def _screen_generation_key(session_id: str) -> str:
+    return f"session:{session_id}:screen_generation"
+
+
+async def get_screen_generation(session_id: str) -> int:
+    """Bumped by every clear: a read that started before a clear (Clear all,
+    a new watch) sees a different value when it finishes and drops its result."""
+    client = await get_redis()
+    if client is None:
+        return 0
+    raw = await cast(Awaitable[str | None], client.get(_screen_generation_key(session_id)))
+    try:
+        return int(raw) if raw else 0
+    except ValueError:
+        return 0
+
+
+_GLOB_SPECIAL = re.compile(r"([*?\[\]\\])")
+
+
+def _glob_escape(text: str) -> str:
+    return _GLOB_SPECIAL.sub(r"\\\1", text)
+
+
 async def clear_screen_state(session_id: str) -> None:
     """Forget the current screen text, remembered passages and screenshots."""
     client = await get_redis()
     if client is None:
         return
+    generation_key = _screen_generation_key(session_id)
+    await cast(Awaitable[Any], client.incr(generation_key))
+    await cast(Awaitable[Any], client.expire(generation_key, QD_STATE_TTL_S))
     keys = [
         f"session:{session_id}:screen_context",
         f"session:{session_id}:screen_current_text",
@@ -272,7 +305,9 @@ async def clear_screen_state(session_id: str) -> None:
         f"session:{session_id}:screen_images_current",
     ]
     for pattern in ("screen_image", "screen_image_label"):
-        async for key in client.scan_iter(match=f"session:{session_id}:{pattern}:*"):
+        # Escaped: a session id holding glob characters must not match others.
+        match = f"session:{_glob_escape(session_id)}:{pattern}:*"
+        async for key in client.scan_iter(match=match):
             keys.append(key)
     await cast(Awaitable[Any], client.delete(*keys))
 
