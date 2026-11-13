@@ -50,7 +50,7 @@ export function AssistPanel({
   ];
 
   return (
-    <section aria-label="Assist workspace" className="flex h-full min-h-0 flex-col gap-3">
+    <section aria-label="Assist workspace" className="relative flex h-full min-h-0 flex-col gap-3">
       <header
         className={cn(
           'flex flex-wrap items-center justify-between gap-3 border-b pb-3 transition-[border-color,box-shadow] duration-300 motion-reduce:transition-none',

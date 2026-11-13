@@ -15,3 +15,11 @@ test('passagePreview cuts long text to max with an ellipsis', () => {
 test('passagePreview leaves short text alone', () => {
   assert.equal(passagePreview('short'), 'short');
 });
+
+test('saved screenshots open in the in-panel lightbox, never a new window', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '../app/session/saved-passages.tsx'), 'utf8');
+  assert.doesNotMatch(source, /window\.open/);
+  assert.match(source, /aria-label="Close screenshot"/);
+});

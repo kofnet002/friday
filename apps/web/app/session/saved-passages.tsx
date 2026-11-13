@@ -1,6 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { X } from 'lucide-react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { Markdown } from '@/lib/markdown';
 import { passagePreview } from '@/lib/saved-passages';
@@ -10,6 +12,9 @@ import {
   screenImageUrl,
   type SavedPassage,
 } from '@/lib/session-context';
+import { cn } from '@/lib/utils';
+
+import { AssistScrollContext } from './assist-panel';
 
 interface SavedPassagesProps {
   sessionId: string;
@@ -21,6 +26,8 @@ interface SavedPassagesProps {
 export function SavedPassages({ sessionId, refreshKey, onClearAll }: SavedPassagesProps) {
   const [passages, setPassages] = useState<SavedPassage[]>([]);
   const [expanded, setExpanded] = useState(false);
+  const [viewing, setViewing] = useState<{ key: string; label: string | null } | null>(null);
+  const closeViewer = useCallback(() => setViewing(null), []);
 
   const refresh = useCallback(async () => {
     const list = await fetchSavedPassages(sessionId);
@@ -93,7 +100,7 @@ export function SavedPassages({ sessionId, refreshKey, onClearAll }: SavedPassag
                     <button
                       key={key}
                       type="button"
-                      onClick={() => window.open(screenImageUrl(sessionId, key))}
+                      onClick={() => setViewing({ key, label: label ?? null })}
                       aria-label={`Open saved screenshot${label ? `: ${label}` : ''}`}
                       title={label ?? undefined}
                     >
@@ -111,6 +118,81 @@ export function SavedPassages({ sessionId, refreshKey, onClearAll }: SavedPassag
           ))}
         </ol>
       ) : null}
+      {viewing ? (
+        <ScreenshotLightbox
+          src={screenImageUrl(sessionId, viewing.key)}
+          label={viewing.label}
+          onClose={closeViewer}
+        />
+      ) : null}
     </div>
   );
+}
+
+/**
+ * A saved screenshot shown full size over the Assist panel (fit to it, the
+ * label as caption) — never in a browser window. Closed by Esc, a click
+ * outside the image, or the close button.
+ */
+function ScreenshotLightbox({
+  src,
+  label,
+  onClose,
+}: {
+  src: string;
+  label: string | null;
+  onClose: () => void;
+}) {
+  const hostScrollRef = useContext(AssistScrollContext);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const [host, setHost] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    // The Assist panel's section (the scroller's parent): the overlay covers
+    // the panel, not the whole window.
+    setHost(hostScrollRef?.current?.parentElement ?? null);
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hostScrollRef, onClose]);
+
+  const overlay = (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={label ? `Screenshot: ${label}` : 'Screenshot'}
+      data-interactive="true"
+      className={cn(
+        'z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-in fade-in duration-150',
+        host ? 'absolute inset-0 rounded-lg' : 'fixed inset-0',
+      )}
+      onClick={onClose}
+    >
+      <button
+        ref={closeRef}
+        type="button"
+        aria-label="Close screenshot"
+        onClick={onClose}
+        className="absolute right-2 top-2 rounded-md p-1.5 text-white/90 hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+      >
+        <X className="h-4 w-4" aria-hidden />
+      </button>
+      <figure
+        className="flex max-h-full min-h-0 max-w-full flex-col items-center gap-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={label || 'Saved screenshot'}
+          className="min-h-0 max-w-full flex-1 rounded object-contain"
+        />
+        {label ? <figcaption className="text-xs text-white/90">{label}</figcaption> : null}
+      </figure>
+    </div>
+  );
+  return host ? createPortal(overlay, host) : overlay;
 }
