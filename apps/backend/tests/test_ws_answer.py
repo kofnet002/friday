@@ -204,3 +204,21 @@ def test_missing_image_bytes_are_dropped(
     _ask_once(from_screen=True)
     assert calls[0]["images"] == [b"img2"]
     assert calls[0]["image_labels"] == ["Figure 2 (line chart)"]
+
+
+def test_screen_question_answers_with_the_screen_effort(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    from app.settings import settings
+
+    calls, _ = captured
+    _ask_once(from_screen=True)
+    assert calls[0]["effort"] == settings.anthropic_screen_effort
+
+
+def test_spoken_question_answers_with_the_default_effort(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    calls, _ = captured
+    _ask_once()
+    assert calls[0]["effort"] is None

@@ -318,6 +318,8 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 claude_model=claude_model,
                 images=images or None,
                 image_labels=image_labels if images else None,
+                # Screen questions think first so the visible answer is final.
+                effort=settings.anthropic_screen_effort if from_screen else None,
             ):
                 if not collected:
                     latency.mark(candidate_id, "first_token")

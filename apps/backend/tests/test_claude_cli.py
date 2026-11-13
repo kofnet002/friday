@@ -120,3 +120,15 @@ async def test_vision_wrapper_keeps_single_image_behavior(monkeypatch: pytest.Mo
         seen["proc"].stdin.data.decode()
         == "Read the image file screen.png in the current directory. P"
     )
+
+
+async def test_cli_passes_effort_when_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    _patch(monkeypatch, seen)
+    await claude_cli.run_claude_cli_with_images(
+        images=[JPEG], prompt="Describe.", system="sys", effort="medium"
+    )
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--effort") + 1] == "medium"
+    await claude_cli.run_claude_cli_with_images(images=[JPEG], prompt="Describe.", system="sys")
+    assert "--effort" not in seen["cmd"]

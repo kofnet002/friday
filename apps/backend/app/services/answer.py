@@ -20,6 +20,7 @@ from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.services.claude_agent_auth import claude_available
 from app.services.claude_api import (
+    Effort,
     claude_transport,
     claude_usage_model,
     image_media_type,
@@ -82,6 +83,7 @@ async def stream_answer(
     claude_model: str | None = None,
     images: list[bytes] | None = None,
     image_labels: list[str] | None = None,
+    effort: Effort | None = None,
 ) -> AsyncIterator[str]:
     """Yield answer tokens for the given question using the selected provider.
 
@@ -102,6 +104,9 @@ async def stream_answer(
     fallback after Claude fails — is told the visuals are unavailable so it
     flags answers that depend on them. `image_labels` (aligned with `images`)
     caption each screenshot with the figures it shows.
+
+    `effort` sets Claude's thinking depth (None: `anthropic_effort`); screen
+    questions pass `anthropic_screen_effort`. Other providers ignore it.
     """
     claude_system = answer_system_prompt(context)
     other_system = (
@@ -148,6 +153,7 @@ async def stream_answer(
                     model=claude_model,
                     images=images or None,
                     image_labels=image_labels,
+                    effort=effort,
                 )
             else:
                 base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
@@ -243,6 +249,7 @@ async def _stream_anthropic(
     model: str | None = None,
     images: list[bytes] | None = None,
     image_labels: list[str] | None = None,
+    effort: Effort | None = None,
 ) -> AsyncIterator[str]:
     """Stream an answer from Claude on the transport claude_transport() picks.
 
@@ -258,6 +265,10 @@ async def _stream_anthropic(
     from files in a one-shot call, so with images it yields the whole answer
     at once instead of streaming. Each image carries its label from
     `image_labels`: a caption block on the API, a file list on the CLI.
+
+    `effort` (None: `anthropic_effort`) is sent where the model accepts it
+    (claude_api drops it otherwise); the CLI gets `--effort` only when one is
+    given, so its other calls run exactly as before.
     """
     model = model or settings.anthropic_answer_model
     # Captions only when some image has a label; otherwise exactly as before.
@@ -276,6 +287,7 @@ async def _stream_anthropic(
             system=system,
             model=model,
             labels=labels,
+            effort=effort,
         )
         if text:
             yield text
@@ -287,6 +299,7 @@ async def _stream_anthropic(
             prompt=threaded_user,
             system=system,
             model=model,
+            effort=effort,
         ):
             if text:
                 yield text
@@ -301,7 +314,7 @@ async def _stream_anthropic(
         user=user,
         model=model,
         max_tokens=1500,
-        effort=settings.anthropic_effort,
+        effort=effort or settings.anthropic_effort,
         prior=((turn.role, turn.content) for turn in prior),
         image=[(b, image_media_type(b)) for b in images] if images else None,
         image_captions=labels,

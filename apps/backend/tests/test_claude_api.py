@@ -225,3 +225,60 @@ async def test_unlabelled_images_on_the_cli_get_no_file_list(
         )
     ]
     assert seen["labels"] == ["Figure 1", ""]
+
+
+async def test_answer_effort_reaches_the_api_and_defaults_to_the_answer_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.prompts.answer_generation import AnswerContext
+    from app.services import answer as answer_mod
+
+    efforts: list[object] = []
+
+    async def fake_stream(**kw: object) -> AsyncIterator[str]:
+        efforts.append(kw["effort"])
+        yield "ok"
+
+    _creds(monkeypatch, key="sk", token="", mode="auto")
+    monkeypatch.setattr(settings, "anthropic_effort", "low")
+    monkeypatch.setattr(answer_mod, "stream_claude_api", fake_stream)
+    monkeypatch.setattr(answer_mod, "_provider_chain", lambda _p: ["claude"])
+    for effort in ("medium", None):
+        _ = [
+            t
+            async for t in answer_mod.stream_answer(
+                "claude", "Q1?", AnswerContext(screen_context="page"), effort=effort
+            )
+        ]
+    assert efforts == ["medium", "low"]
+
+
+async def test_screen_effort_reaches_the_cli_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import answer as answer_mod
+    from app.services import claude_cli
+
+    seen: list[object] = []
+
+    async def fake_text(**kw: object) -> AsyncIterator[str]:
+        seen.append(kw.get("effort"))
+        yield "ok"
+
+    async def fake_images(**kw: object) -> str:
+        seen.append(kw.get("effort"))
+        return "ok"
+
+    _creds(monkeypatch, key="", token="oat", mode="auto")
+    monkeypatch.setattr(claude_cli, "stream_claude_cli_text", fake_text)
+    monkeypatch.setattr(claude_cli, "run_claude_cli_with_images", fake_images)
+    png = b"\x89PNG\r\n\x1a\nx"
+    _ = [t async for t in answer_mod._stream_anthropic("s", "q", "q", (), effort="medium")]
+    _ = [
+        t
+        async for t in answer_mod._stream_anthropic(
+            "s", "q", "q", (), images=[png], effort="medium"
+        )
+    ]
+    _ = [t async for t in answer_mod._stream_anthropic("s", "q", "q", ())]
+    assert seen == ["medium", "medium", None]

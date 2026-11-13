@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # Second pass that fact-checks the draft brief against its sources.
     project_brief_verify: bool = Field(default=True)
     anthropic_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(default="low")
+    # Answers to on-screen questions (and their follow-ups) think longer, so
+    # the work stays hidden and the visible answer states one final choice.
+    anthropic_screen_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
+        default="medium"
+    )
     anthropic_solve_effort: Literal["low", "medium", "high", "xhigh", "max"] = Field(
         default="medium"
     )

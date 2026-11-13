@@ -103,6 +103,7 @@ async def run_claude_cli_with_images(
     model: str | None = None,
     session_id: str | None = None,
     labels: list[str] | None = None,
+    effort: str | None = None,
 ) -> str:
     """One-shot call with one or more images: write them to a scratch dir, let
     the CLI read them (Read tool), and return the final answer text.
@@ -154,6 +155,8 @@ async def run_claude_cli_with_images(
         ]
         if model:
             cmd += ["--model", model]
+        if effort:
+            cmd += ["--effort", effort]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -211,6 +214,7 @@ async def stream_claude_cli_text(
     system: str | None = None,
     model: str | None = None,
     session_id: str | None = None,
+    effort: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream a plain text completion from `claude -p` (no tools).
 
@@ -237,6 +241,8 @@ async def stream_claude_cli_text(
         cmd += ["--system-prompt", system]
     if model:
         cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
     # No --allowedTools / --dangerously-skip-permissions: in non-interactive
     # print mode the CLI can't prompt for tool approval, so it just answers in
     # text — exactly what a solve wants.
