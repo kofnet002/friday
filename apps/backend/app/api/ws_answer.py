@@ -81,11 +81,12 @@ def resolve_screen_context(override: dict[str, Any], stored: str | None) -> str 
 
 async def load_answer_images(
     session_id: str, *, from_screen: bool
-) -> list[tuple[bytes, str]]:
+) -> tuple[list[tuple[bytes, str]], int]:
     """Kept screenshots (charts/diagrams) to attach to an answer, each with its
     label ("" if none): the current screen's, plus remembered passages' for a
-    question read off the screen. Missing or undecodable images are dropped;
-    Redis errors yield none."""
+    question read off the screen — and how many were wanted. Missing or
+    undecodable images are dropped (so fewer may load than were wanted);
+    Redis errors yield ([], 0)."""
     try:
         current = await get_current_screen_images(session_id)
         refs = await get_screen_references(session_id)
@@ -106,10 +107,22 @@ async def load_answer_images(
                 )
                 continue
             images.append((decoded, await get_screen_image_label(session_id, key) or ""))
-        return images
+        return images, len(keys)
     except Exception as exc:  # noqa: BLE001 - screenshots are optional
         log.warning("ws_answer.screen_images_failed", session_id=session_id, error=str(exc))
-        return []
+        return [], 0
+
+
+def screen_visuals_state(
+    loaded: int, wanted: int
+) -> Literal["attached", "partial", "unavailable"] | None:
+    """How the answer is told about the page's kept screenshots: all sent,
+    some sent (the rest failed to load), none could be loaded, or none kept."""
+    if not wanted:
+        return None
+    if not loaded:
+        return "unavailable"
+    return "attached" if loaded >= wanted else "partial"
 
 
 @router.websocket("/ws/answer")
@@ -226,8 +239,9 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         from_screen = bool(request.get("from_screen"))
         images: list[bytes] = []
         image_labels: list[str] = []
+        wanted_images = 0
         if session_id and screen_context:
-            loaded = await load_answer_images(session_id, from_screen=from_screen)
+            loaded, wanted_images = await load_answer_images(session_id, from_screen=from_screen)
             images = [data for data, _ in loaded]
             image_labels = [label for _, label in loaded]
         # Which screenshots an answer saw, so "the chart wasn't visible" answers
@@ -250,7 +264,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
             screen_context=screen_context,
-            screen_visuals="attached" if images else None,
+            screen_visuals=screen_visuals_state(len(images), wanted_images),
             prior_turns=prior_turns,
             projects=projects,
             code_refs=await find_code_refs(

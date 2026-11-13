@@ -204,6 +204,18 @@ def test_missing_image_bytes_are_dropped(
     _ask_once(from_screen=True)
     assert calls[0]["images"] == [b"img2"]
     assert calls[0]["image_labels"] == ["Figure 2 (line chart)"]
+    # Some kept screenshots didn't load: attached, with a note about the rest.
+    assert calls[0]["args"][2].screen_visuals == "partial"
+
+
+def test_no_kept_image_loads_means_visuals_unavailable(
+    captured: tuple[list[dict[str, Any]], dict[str, Any]],
+) -> None:
+    calls, screen = captured
+    screen["images"] = {}
+    _ask_once(from_screen=True)
+    assert calls[0]["images"] is None
+    assert calls[0]["args"][2].screen_visuals == "unavailable"
 
 
 def test_screen_question_answers_with_the_screen_effort(

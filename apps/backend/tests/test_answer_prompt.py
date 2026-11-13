@@ -50,6 +50,14 @@ def test_unavailable_screen_visuals_ask_for_a_check():
     assert "source of truth" not in prompt
 
 
+def test_partly_loaded_screen_visuals_flag_the_missing_ones():
+    prompt = answer_system_prompt(
+        AnswerContext(screen_context="Chart page", screen_visuals="partial")
+    )
+    assert "source of truth" in prompt
+    assert "⚠️ Check: visual not available" in prompt
+
+
 def test_no_screen_visuals_line_by_default():
     prompt = answer_system_prompt(AnswerContext(screen_context="Chart page"))
     assert "source of truth" not in prompt

@@ -57,9 +57,10 @@ class AnswerContext:
     # prompt (resume + projects) stays identical and prompt-cacheable.
     code_refs: tuple[CodeRef, ...] = field(default_factory=tuple)
     # Whether screenshots of on-screen charts/diagrams reach the model:
-    # "attached" (sent with this answer), "unavailable" (the page has them
-    # but this provider can't see them), None (no kept visuals).
-    screen_visuals: Literal["attached", "unavailable"] | None = None
+    # "attached" (sent with this answer), "partial" (some sent, others failed
+    # to load), "unavailable" (the page has them but this provider can't see
+    # them, or none could be loaded), None (no kept visuals).
+    screen_visuals: Literal["attached", "partial", "unavailable"] | None = None
 
 
 def _projects_block(projects: tuple[ProjectContext, ...]) -> str:
@@ -113,6 +114,10 @@ SCREEN_VISUALS_NOTES: dict[str, str] = {
     "attached": "Screenshots of the on-screen charts/diagrams are attached; treat them as the"
     " source of truth over the transcription for visual content. If a value you need is still"
     " unreadable, add `⚠️ Check:`.",
+    "partial": "Screenshots of some on-screen charts/diagrams are attached; treat them as the"
+    " source of truth over the transcription for visual content. Others could not be loaded;"
+    " for any question that depends on a chart/diagram you don't have, add"
+    " `⚠️ Check: visual not available`.",
     "unavailable": "The page has charts/diagrams that are NOT available to you; for any question"
     " that depends on them, add `⚠️ Check: visual not available`.",
 }
