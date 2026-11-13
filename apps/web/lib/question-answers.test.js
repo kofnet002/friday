@@ -37,3 +37,11 @@ test('ordinary answers without Q blocks yield nothing', () => {
     [],
   );
 });
+
+test('headingLabel recognises a question heading', () => {
+  const { headingLabel } = require('./question-answers');
+  assert.equal(headingLabel('Q2 · True or false: delivery time halved?'), 'Q2');
+  assert.equal(headingLabel('Q12: Something'), 'Q12');
+  assert.equal(headingLabel('Answer:'), null);
+  assert.equal(headingLabel('Quarterly · revenue'), null);
+});

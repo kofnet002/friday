@@ -193,22 +193,7 @@ export function AnswerPanel({
 
   const copyAnswer = async () => {
     if (!answer) return;
-    try {
-      await navigator.clipboard.writeText(answer);
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = answer;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand('copy');
-      } catch {
-        /* swallow */
-      }
-      document.body.removeChild(ta);
-    }
+    await copyText(answer);
     setCopied(true);
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
     copyTimerRef.current = window.setTimeout(() => setCopied(false), 1400);
@@ -586,7 +571,7 @@ function AnswerBody({
   };
 
   // Per-question answers from a grouped screen answer (all turns of the
-  // thread), for one-click / one-key copy.
+  // thread), for per-heading / one-key copy.
   const assistantTexts = [
     ...messages
       .slice(0, -1)
@@ -595,6 +580,20 @@ function AnswerBody({
     answer,
   ];
   const questionAnswers = extractQuestionAnswers(assistantTexts);
+  const { copiedLabel, copyQuestion } = useQuestionCopy(questionAnswers, !privacyMode);
+  // A copy icon on each "Q<n> · …" heading copies that question's answer.
+  const questionAction = privacyMode
+    ? undefined
+    : (label: string) => {
+        const qa = questionAnswers.find((q) => q.label === label);
+        return qa ? (
+          <QuestionCopyButton
+            qa={qa}
+            copied={copiedLabel === label}
+            onCopy={() => void copyQuestion(label)}
+          />
+        ) : null;
+      };
 
   return (
     <div
@@ -608,19 +607,16 @@ function AnswerBody({
         privacyMode && 'select-none blur-md',
       )}
     >
-      {questionAnswers.length > 0 && !privacyMode ? (
-        <QuestionCopyBar questionAnswers={questionAnswers} />
-      ) : null}
       {priorTurns.length > 0 ? (
         <div className="mb-4 flex flex-col gap-3 border-b border-neutral-200/70 pb-3 dark:border-neutral-800/70">
           {priorTurns.map((turn, i) => (
-            <ThreadTurn key={i} turn={turn} />
+            <ThreadTurn key={i} turn={turn} questionAction={questionAction} />
           ))}
         </div>
       ) : null}
 
       {answer ? (
-        <Markdown text={answer + (isStreaming ? ' ▍' : '')} />
+        <Markdown text={answer + (isStreaming ? ' ▍' : '')} questionAction={questionAction} />
       ) : isStreaming ? (
         <div className="flex items-center gap-2 text-sm text-sky-600 dark:text-sky-400">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -658,32 +654,55 @@ function AnswerBody({
   );
 }
 
-function QuestionCopyBar({
-  questionAnswers,
-}: {
-  questionAnswers: { label: string; answer: string; check: boolean }[];
-}) {
-  const [copied, setCopied] = useState<string | null>(null);
+type QuestionAnswer = { label: string; answer: string; check: boolean };
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+    } catch {
+      /* swallow */
+    }
+    document.body.removeChild(ta);
+  }
+}
+
+/** Copies one question's answer by label, and binds keys 1–9 to Q1–Q9
+ *  while you're not typing somewhere. `copiedLabel` is set for ~1.4s. */
+function useQuestionCopy(questionAnswers: QuestionAnswer[], enabled: boolean) {
+  const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
   const answersRef = useRef(questionAnswers);
   answersRef.current = questionAnswers;
+  const timerRef = useRef<number | null>(null);
 
-  const copy = async (index: number) => {
-    const qa = answersRef.current[index];
+  useEffect(
+    () => () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const copyQuestion = async (label: string) => {
+    const qa = answersRef.current.find((q) => q.label === label);
     if (!qa) return;
-    try {
-      await navigator.clipboard.writeText(qa.answer);
-      setCopied(qa.label);
-      window.setTimeout(
-        () => setCopied((current) => (current === qa.label ? null : current)),
-        1500,
-      );
-    } catch {
-      /* clipboard unavailable — nothing to do */
-    }
+    await copyText(qa.answer);
+    setCopiedLabel(label);
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopiedLabel(null), 1400);
   };
+  const copyRef = useRef(copyQuestion);
+  copyRef.current = copyQuestion;
 
-  // Keys 1–9 copy Q1–Q9's answer while you're not typing somewhere.
   useEffect(() => {
+    if (!enabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
@@ -694,49 +713,67 @@ function QuestionCopyBar({
         return;
       }
       if (!/^[1-9]$/.test(event.key)) return;
-      const index = answersRef.current.findIndex((qa) => qa.label === `Q${event.key}`);
-      if (index < 0) return;
+      const label = `Q${event.key}`;
+      if (!answersRef.current.some((qa) => qa.label === label)) return;
       event.preventDefault();
-      void copy(index);
+      void copyRef.current(label);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [enabled]);
 
+  return { copiedLabel, copyQuestion };
+}
+
+function QuestionCopyButton({
+  qa,
+  copied,
+  onCopy,
+}: {
+  qa: QuestionAnswer;
+  copied: boolean;
+  onCopy: () => void;
+}) {
   return (
-    <div
-      className="sticky top-0 z-10 mb-3 flex flex-wrap items-center gap-1.5 bg-white/90 py-1 backdrop-blur dark:bg-neutral-950/80"
-      aria-label="Copy an answer"
-    >
-      <span className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">Copy</span>
-      {questionAnswers.map((qa, index) => (
-        <button
-          key={qa.label}
-          type="button"
-          onClick={() => void copy(index)}
-          title={`${qa.label}: ${qa.answer}${qa.check ? ' (double-check)' : ''} — press ${qa.label.slice(1)}`}
-          aria-label={`Copy ${qa.label} answer: ${qa.answer}`}
-          className={cn(
-            'inline-flex max-w-[14rem] items-center gap-1 rounded-md border px-2 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500',
-            copied === qa.label
-              ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300'
-              : 'border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800',
-          )}
-        >
-          <span className="font-semibold">{qa.label}</span>
-          <span className="truncate">{copied === qa.label ? 'Copied' : qa.answer}</span>
-          {qa.check ? (
-            <span aria-label="double-check" className="text-amber-600">
-              ⚠️
-            </span>
-          ) : null}
-        </button>
-      ))}
-    </div>
+    <span className="ml-1.5 inline-flex items-center gap-1 align-[-3px]">
+      <button
+        type="button"
+        onClick={onCopy}
+        aria-label={`Copy ${qa.label} answer`}
+        title={
+          copied
+            ? 'Copied'
+            : `Copy ${qa.label}: ${qa.answer}${qa.check ? ' (double-check)' : ''} — press ${qa.label.slice(1)}`
+        }
+        className={cn(
+          'inline-flex h-5 w-5 items-center justify-center rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500',
+          copied
+            ? 'text-emerald-600 dark:text-emerald-400'
+            : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-200',
+        )}
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5" aria-hidden />
+        ) : (
+          <Copy className="h-3.5 w-3.5" aria-hidden />
+        )}
+      </button>
+      {qa.check ? (
+        <span role="img" aria-label="double-check" title="Double-check this one">
+          ⚠️
+        </span>
+      ) : null}
+    </span>
   );
 }
 
-function ThreadTurn({ turn }: { turn: AnswerMessage }) {
+function ThreadTurn({
+  turn,
+  questionAction,
+}: {
+  turn: AnswerMessage;
+  questionAction?: (label: string) => ReactNode;
+}) {
   if (turn.role === 'user' && isScreenQuestionPrompt(turn.content)) {
     return (
       <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-sky-700 dark:text-sky-300">
@@ -756,7 +793,7 @@ function ThreadTurn({ turn }: { turn: AnswerMessage }) {
   }
   return (
     <div className="rounded-lg bg-neutral-100/60 p-2.5 dark:bg-neutral-900/40">
-      <Markdown text={turn.content} />
+      <Markdown text={turn.content} questionAction={questionAction} />
     </div>
   );
 }

@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { BundledLanguage, Highlighter } from 'shiki';
 import { Check, Code2, Copy } from 'lucide-react';
 
+import { headingLabel } from '@/lib/question-answers';
 import { cn } from '@/lib/utils';
 
 const SUPPORTED_LANGS: BundledLanguage[] = [
@@ -195,7 +196,33 @@ function CodeBlock({ children, className }: { children: string; className?: stri
   );
 }
 
-export function Markdown({ text, className }: { text: string; className?: string }) {
+// Minimal hast shape — enough to read a paragraph's leading bold text.
+type HastNode = { type: string; tagName?: string; value?: string; children?: HastNode[] };
+
+function hastText(node: HastNode | undefined): string {
+  if (!node) return '';
+  if (node.type === 'text') return node.value ?? '';
+  return (node.children ?? []).map(hastText).join('');
+}
+
+/** "Q2" when the paragraph starts with a bold "Q2 · …" heading. */
+function paragraphQuestionLabel(node: HastNode | undefined): string | null {
+  const first = node?.children?.find((c) => !(c.type === 'text' && !c.value?.trim()));
+  if (!first || first.type !== 'element' || first.tagName !== 'strong') return null;
+  return headingLabel(hastText(first));
+}
+
+export function Markdown({
+  text,
+  className,
+  questionAction,
+}: {
+  text: string;
+  className?: string;
+  /** Rendered at the end of each bold "Q<n> · …" heading paragraph, e.g. a
+   *  per-question copy button. */
+  questionAction?: (label: string) => ReactNode;
+}) {
   return (
     // Deliberately NOT using `prose` — every prose selector tied or beat
     // our overrides on specificity, washing out the answer text. We
@@ -210,11 +237,17 @@ export function Markdown({ text, className }: { text: string; className?: string
           // Colors come from CSS variables via inline `style` — beats any
           // class-level cascade including the Typography plugin defaults.
           // See globals.css for the variable definitions.
-          p: ({ children, ...rest }) => (
-            <p className="my-3" style={{ color: 'rgb(var(--md-fg))' }} {...rest}>
-              {children}
-            </p>
-          ),
+          p: ({ children, node, ...rest }) => {
+            const label = questionAction
+              ? paragraphQuestionLabel(node as HastNode | undefined)
+              : null;
+            return (
+              <p className="my-3" style={{ color: 'rgb(var(--md-fg))' }} {...rest}>
+                {children}
+                {label && questionAction ? questionAction(label) : null}
+              </p>
+            );
+          },
           // pl-5 (padding) not ml-5 (margin): with list-style-position
           // outside, the marker renders in the element's own padding box.
           // Margin would place the bullet in negative space outside the

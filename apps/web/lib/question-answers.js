@@ -2,7 +2,7 @@
 //   **Q2 · True or false: …**
 //   - **Answer:** A) True
 //   - ⚠️ Check: …
-// so the answer panel can offer one-key copy per question.
+// so the answer panel can offer copy per question (by key or heading icon).
 
 const HEADING = /^\*\*Q(\d+)\s*[·:.\-–—]/;
 const ANSWER = /^[-*]\s*\*\*Answer:?\*\*:?\s*(.+)$/;
@@ -40,4 +40,19 @@ function extractQuestionAnswers(texts) {
     .map((qa) => ({ label: `Q${qa.number}`, answer: qa.answer, check: qa.check }));
 }
 
-module.exports = { extractQuestionAnswers };
+const HEADING_TEXT = /^Q(\d+)\s*[·:.\-–—]/;
+
+/**
+ * The question label ("Q2") of a rendered heading's text, e.g. the bold
+ * "Q2 · True or false: …", or null when the text isn't a question heading.
+ * @param {string} text
+ * @returns {string | null}
+ */
+function headingLabel(text) {
+  const match = String(text || '')
+    .trim()
+    .match(HEADING_TEXT);
+  return match ? `Q${Number(match[1])}` : null;
+}
+
+module.exports = { extractQuestionAnswers, headingLabel };
