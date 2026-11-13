@@ -23,6 +23,13 @@ from app.redis_client import (
     set_screen_references,
 )
 from app.services.claude_api import normalize_claude_model
+from app.services.screen_memory import (  # noqa: F401 - re-exported
+    MAX_REFERENCE_CHARS,
+    REFERENCE_HEADER,
+    compose_screen_context,
+    merge_references,
+    reference_saved_event,
+)
 from app.services.coding_extraction import (
     arm_cooldown,
     cached_result,
@@ -145,52 +152,6 @@ def mark_scan_incomplete(problem: ExtractedProblem) -> ExtractedProblem:
     if marker not in problem.missing_sections:
         problem.missing_sections.append(marker)
     return problem
-
-
-# Budget for remembered passages / preambles. Oldest are dropped first; the
-# whole screen context is capped at 20k chars in redis_client.
-MAX_REFERENCE_CHARS = 12_000
-REFERENCE_HEADER = (
-    "Earlier reference material on screen (passages / preambles the questions may refer to):"
-)
-
-
-def _norm(text: str) -> str:
-    return " ".join(text.split()).lower()
-
-
-def merge_references(references: list[str], new: str) -> list[str]:
-    """Add a newly seen passage, dropping exact repeats and shorter earlier
-    reads of the same passage (a rescan that captured more of it)."""
-    new = new.strip()[:MAX_REFERENCE_CHARS]
-    if not new:
-        return list(references)
-    new_norm = _norm(new)
-    if any(new_norm in _norm(ref) for ref in references):
-        return list(references)
-    merged = [ref for ref in references if _norm(ref) not in new_norm] + [new]
-    while len(merged) > 1 and sum(len(ref) for ref in merged) > MAX_REFERENCE_CHARS:
-        merged.pop(0)
-    return merged
-
-
-def compose_screen_context(current: str, references: list[str]) -> str:
-    """Current screen first (most relevant), then earlier reference material
-    that isn't already visible on the current screen."""
-    current_norm = _norm(current)
-    earlier = [ref for ref in references if _norm(ref) not in current_norm]
-    if not earlier:
-        return current
-    block = REFERENCE_HEADER + "\n\n" + "\n\n---\n\n".join(earlier)
-    return f"{current}\n\n{block}" if current else block
-
-
-def reference_saved_event(references: list[str], saved: str) -> dict[str, Any]:
-    """Tell the panel a passage was remembered, with a one-line preview."""
-    preview = " ".join(saved.split())
-    if len(preview) > 120:
-        preview = preview[:119].rstrip() + "…"
-    return {"type": "screen_reference_saved", "count": len(references), "preview": preview}
 
 
 def should_emit_screen_question(problem: ExtractedProblem) -> bool:
@@ -331,7 +292,7 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         and problem.visible_context
         and problem.confidence >= 0.5
     ):
-        updated = merge_references(references, problem.visible_context)
+        updated = merge_references(references, problem.visible_context, [])
         if updated != references:
             references = updated
             await set_screen_references(request.session_id, references)

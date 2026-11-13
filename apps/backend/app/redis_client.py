@@ -7,6 +7,7 @@ from typing import Any, cast
 from redis.asyncio import Redis, from_url
 
 from app.logging import log
+from app.services.screen_memory import ScreenReference, image_key
 from app.settings import settings
 
 _client: Redis | None = None
@@ -109,8 +110,11 @@ async def set_screen_context(session_id: str, content: str) -> None:
     ))
 
 
-async def get_screen_references(session_id: str) -> list[str]:
-    """Reference material (passages / preambles) seen earlier this session."""
+async def get_screen_references(session_id: str) -> list[ScreenReference]:
+    """Reference material (passages / preambles) seen earlier this session.
+
+    Accepts legacy entries that were stored as bare strings.
+    """
     client = await get_redis()
     if client is None:
         return []
@@ -121,32 +125,107 @@ async def get_screen_references(session_id: str) -> list[str]:
         value = json.loads(raw)
     except (TypeError, ValueError):
         return []
-    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+    if not isinstance(value, list):
+        return []
+    return [
+        ScreenReference.from_json(item) for item in value if isinstance(item, str | dict)
+    ]
 
 
-async def set_screen_references(session_id: str, references: list[str]) -> None:
+async def set_screen_references(session_id: str, references: list[ScreenReference]) -> None:
     client = await get_redis()
     if client is None:
         return
     await cast(
         Awaitable[Any],
         client.set(
-            f"session:{session_id}:screen_references", json.dumps(references), ex=QD_STATE_TTL_S
+            f"session:{session_id}:screen_references",
+            json.dumps([ref.to_json() for ref in references]),
+            ex=QD_STATE_TTL_S,
         ),
     )
 
 
-async def clear_screen_state(session_id: str) -> None:
-    """Forget the current screen text and remembered passages for a session."""
+def _screen_image_key(session_id: str, key: str) -> str:
+    return f"session:{session_id}:screen_image:{key}"
+
+
+async def put_screen_images(session_id: str, images_b64: list[str]) -> list[str]:
+    """Store screenshots (base64 text) for this session; returns their keys."""
+    keys = [image_key(img) for img in images_b64]
+    client = await get_redis()
+    if client is None:
+        return keys
+    for key, img in zip(keys, images_b64, strict=True):
+        await cast(
+            Awaitable[Any],
+            client.set(_screen_image_key(session_id, key), img, ex=QD_STATE_TTL_S),
+        )
+    return keys
+
+
+async def get_screen_image(session_id: str, key: str) -> str | None:
+    client = await get_redis()
+    if client is None:
+        return None
+    raw = await cast(Awaitable[str | None], client.get(_screen_image_key(session_id, key)))
+    return raw if isinstance(raw, str) and raw else None
+
+
+async def get_current_screen_images(session_id: str) -> list[str]:
+    client = await get_redis()
+    if client is None:
+        return []
+    raw = await cast(
+        Awaitable[str | None], client.get(f"session:{session_id}:screen_images_current")
+    )
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [k for k in value if isinstance(k, str)] if isinstance(value, list) else []
+
+
+async def set_current_screen_images(session_id: str, keys: list[str]) -> None:
     client = await get_redis()
     if client is None:
         return
-    await cast(
-        Awaitable[Any],
-        client.delete(
-            f"session:{session_id}:screen_context", f"session:{session_id}:screen_references"
-        ),
-    )
+    redis_key = f"session:{session_id}:screen_images_current"
+    if not keys:
+        await cast(Awaitable[Any], client.delete(redis_key))
+        return
+    await cast(Awaitable[Any], client.set(redis_key, json.dumps(keys), ex=QD_STATE_TTL_S))
+
+
+async def prune_screen_images(session_id: str, candidate_keys: list[str]) -> None:
+    """Delete stored bytes for candidates no longer used by the current screen
+    or any remembered passage."""
+    client = await get_redis()
+    if client is None or not candidate_keys:
+        return
+    in_use = set(await get_current_screen_images(session_id))
+    for ref in await get_screen_references(session_id):
+        in_use.update(ref.image_keys)
+    stale = [_screen_image_key(session_id, k) for k in set(candidate_keys) - in_use]
+    if stale:
+        await cast(Awaitable[Any], client.delete(*stale))
+
+
+async def clear_screen_state(session_id: str) -> None:
+    """Forget the current screen text, remembered passages and screenshots."""
+    client = await get_redis()
+    if client is None:
+        return
+    keys = [
+        f"session:{session_id}:screen_context",
+        f"session:{session_id}:screen_references",
+        f"session:{session_id}:screen_images_current",
+    ]
+    async for key in client.scan_iter(match=f"session:{session_id}:screen_image:*"):
+        keys.append(key)
+    await cast(Awaitable[Any], client.delete(*keys))
 
 
 async def get_screen_context(session_id: str) -> str | None:

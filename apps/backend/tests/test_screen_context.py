@@ -44,9 +44,9 @@ def test_screen_context_keeps_earlier_reference_after_screen_changes():
     from app.api.vision import compose_screen_context, merge_references
 
     passage = "Passage: Acme sells widgets in three regions..."
-    refs = merge_references([], passage)
+    refs = merge_references([], passage, [])
     # Re-reading the same passage doesn't duplicate it.
-    assert merge_references(refs, passage) == [passage]
+    assert [r.text for r in merge_references(refs, passage, [])] == [passage]
 
     context = compose_screen_context("Q3. Which region grew fastest?", refs)
     assert context.index("Q3. Which region grew fastest?") < context.index(passage)
@@ -55,21 +55,22 @@ def test_screen_context_keeps_earlier_reference_after_screen_changes():
 
 def test_reference_store_is_bounded_and_drops_oldest():
     from app.api.vision import MAX_REFERENCE_CHARS, merge_references
+    from app.services.screen_memory import ScreenReference
 
-    refs: list[str] = []
+    refs: list[ScreenReference] = []
     for i in range(10):
-        refs = merge_references(refs, f"passage {i} " + "x" * 3000)
-    assert sum(len(r) for r in refs) <= MAX_REFERENCE_CHARS
-    assert refs[-1].startswith("passage 9")
-    assert not any(r.startswith("passage 0") for r in refs)
+        refs = merge_references(refs, f"passage {i} " + "x" * 3000, [])
+    assert sum(len(r.text) for r in refs) <= MAX_REFERENCE_CHARS
+    assert refs[-1].text.startswith("passage 9")
+    assert not any(r.text.startswith("passage 0") for r in refs)
 
 
 def test_extended_or_rescanned_reference_replaces_its_shorter_version():
     from app.api.vision import merge_references
 
-    refs = merge_references([], "Case study: the team migrated")
-    refs = merge_references(refs, "Case study: the team migrated to Postgres in 2021.")
-    assert refs == ["Case study: the team migrated to Postgres in 2021."]
+    refs = merge_references([], "Case study: the team migrated", [])
+    refs = merge_references(refs, "Case study: the team migrated to Postgres in 2021.", [])
+    assert [r.text for r in refs] == ["Case study: the team migrated to Postgres in 2021."]
 
 
 def test_compose_without_references_is_just_current_screen():
@@ -136,9 +137,12 @@ def test_screen_question_event_carries_every_question():
 
 def test_reference_saved_event_has_a_short_preview():
     from app.api.vision import reference_saved_event
+    from app.services.screen_memory import ScreenReference
 
     passage = "Northwind Logistics operates warehouses in three regions. " * 10
-    event = reference_saved_event([passage, "second"], passage)
+    event = reference_saved_event(
+        [ScreenReference("1", passage, [], 1.0), ScreenReference("2", "second", [], 2.0)], passage
+    )
     assert event["type"] == "screen_reference_saved"
     assert event["count"] == 2
     assert event["preview"].startswith("Northwind Logistics operates")
