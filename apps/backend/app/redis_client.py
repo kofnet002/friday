@@ -110,6 +110,25 @@ async def set_screen_context(session_id: str, content: str) -> None:
     ))
 
 
+async def set_screen_current_text(session_id: str, text: str) -> None:
+    """Store the current screen's own text (without remembered passages) so the
+    composed screen context can be rebuilt when a passage is removed."""
+    client = await get_redis()
+    if client is None:
+        return
+    await cast(Awaitable[Any], client.set(
+        f"session:{session_id}:screen_current_text", text[:20_000], ex=QD_STATE_TTL_S
+    ))
+
+
+async def get_screen_current_text(session_id: str) -> str:
+    client = await get_redis()
+    if client is None:
+        return ""
+    raw = await cast(Awaitable[str | None], client.get(f"session:{session_id}:screen_current_text"))
+    return raw if isinstance(raw, str) else ""
+
+
 async def get_screen_references(session_id: str) -> list[ScreenReference]:
     """Reference material (passages / preambles) seen earlier this session.
 
@@ -220,6 +239,7 @@ async def clear_screen_state(session_id: str) -> None:
         return
     keys = [
         f"session:{session_id}:screen_context",
+        f"session:{session_id}:screen_current_text",
         f"session:{session_id}:screen_references",
         f"session:{session_id}:screen_images_current",
     ]

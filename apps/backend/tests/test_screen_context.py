@@ -186,3 +186,88 @@ def test_extraction_prompt_asks_for_tables_charts_and_visual_frames():
     assert "Markdown table" in P
     assert "[unreadable]" in P
     assert CODING_EXTRACTION_VERSION == "1.7.0"
+
+
+# --- passage viewer endpoints ---
+
+import base64  # noqa: E402
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.main import app  # noqa: E402
+from app.redis_client import (  # noqa: E402
+    get_screen_context,
+    put_screen_images,
+    set_screen_context,
+    set_screen_current_text,
+    set_screen_references,
+)
+from app.services.screen_memory import ScreenReference, compose_screen_context  # noqa: E402
+from tests.fake_redis import install_fake_redis  # noqa: E402
+
+_JPEG = b"\xff\xd8\xff\xe0" + b"fakejpegbody"
+
+
+@pytest.fixture
+def viewer(monkeypatch):
+    fake = install_fake_redis(monkeypatch)
+    return TestClient(app), fake
+
+
+def _seed(sid="s1"):
+    async def go():
+        (key,) = await put_screen_images(sid, [base64.b64encode(_JPEG).decode()])
+        refs = [
+            ScreenReference(id="legacy1", text="Old passage text"),
+            ScreenReference(id="ref2", text="Chart passage", image_keys=[key], saved_at=5.0),
+        ]
+        await set_screen_references(sid, refs)
+        await set_screen_current_text(sid, "Current screen")
+        await set_screen_context(sid, compose_screen_context("Current screen", refs))
+        return key
+
+    return go()
+
+
+def test_list_returns_legacy_and_object_refs(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    body = client.get("/api/vision/screen-context", params={"session_id": "s1"}).json()
+    assert [r["id"] for r in body["references"]] == ["legacy1", "ref2"]
+    assert body["references"][0]["images"] == []
+    assert body["references"][1] == {
+        "id": "ref2", "text": "Chart passage", "images": [key], "saved_at": 5.0
+    }
+
+
+def test_image_endpoint_serves_bytes_and_404s(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    r = client.get(f"/api/vision/screen-image/{key}", params={"session_id": "s1"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.content == _JPEG
+    assert client.get("/api/vision/screen-image/nope", params={"session_id": "s1"}).status_code == 404
+
+
+def test_delete_removes_passage_image_and_text(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    r = client.delete("/api/vision/screen-reference/ref2", params={"session_id": "s1"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "count": 1}
+    assert client.get(f"/api/vision/screen-image/{key}", params={"session_id": "s1"}).status_code == 404
+    ctx = asyncio.run(get_screen_context("s1"))
+    assert ctx is not None
+    assert "Chart passage" not in ctx
+    assert "Old passage text" in ctx
+    assert "Current screen" in ctx
+    missing = client.delete("/api/vision/screen-reference/zzz", params={"session_id": "s1"})
+    assert missing.status_code == 404

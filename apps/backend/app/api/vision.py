@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field, model_validator
 
 from app import session_bus
@@ -18,15 +18,18 @@ from app.redis_client import (
     add_seen_problem_fingerprint,
     clear_screen_state,
     get_current_screen_images,
+    get_screen_current_text,
+    get_screen_image,
     get_screen_references,
     prune_screen_images,
     put_screen_images,
     set_current_problem,
     set_current_screen_images,
     set_screen_context,
+    set_screen_current_text,
     set_screen_references,
 )
-from app.services.claude_api import normalize_claude_model
+from app.services.claude_api import image_media_type, normalize_claude_model
 from app.services.coding_extraction import (
     arm_cooldown,
     cached_result,
@@ -220,6 +223,45 @@ async def clear_screen_context(session_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+@router.get("/screen-context")
+async def list_screen_references(session_id: str) -> dict[str, Any]:
+    """Remembered passages for the viewer, oldest first."""
+    refs = await get_screen_references(session_id)
+    return {
+        "references": [
+            {"id": r.id, "text": r.text, "images": list(r.image_keys), "saved_at": r.saved_at}
+            for r in refs
+        ]
+    }
+
+
+@router.get("/screen-image/{key}")
+async def get_screen_image_bytes(key: str, session_id: str) -> Response:
+    encoded = await get_screen_image(session_id, key)
+    if not encoded:
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        data = _base64.b64decode(encoded)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Image not found") from None
+    return Response(content=data, media_type=image_media_type(data))
+
+
+@router.delete("/screen-reference/{ref_id}")
+async def delete_screen_reference(ref_id: str, session_id: str) -> dict[str, Any]:
+    """Forget one remembered passage and its screenshots."""
+    refs = await get_screen_references(session_id)
+    removed = next((r for r in refs if r.id == ref_id), None)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="Passage not found")
+    remaining = [r for r in refs if r.id != ref_id]
+    await set_screen_references(session_id, remaining)
+    await prune_screen_images(session_id, removed.image_keys)
+    current = await get_screen_current_text(session_id)
+    await set_screen_context(session_id, compose_screen_context(current, remaining))
+    return {"ok": True, "count": len(remaining)}
+
+
 @router.post("/extract")
 async def extract(request: ExtractRequest) -> dict[str, Any]:
     is_scan = request.images_base64 is not None
@@ -340,6 +382,7 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
     current_screen = "\n\n".join(
         part for part in (screen_text or None, problem.screen_code) if part
     )
+    await set_screen_current_text(request.session_id, current_screen)
     await set_screen_context(request.session_id, compose_screen_context(current_screen, references))
 
     emitted = False
