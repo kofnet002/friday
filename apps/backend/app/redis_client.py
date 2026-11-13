@@ -7,7 +7,7 @@ from typing import Any, cast
 from redis.asyncio import Redis, from_url
 
 from app.logging import log
-from app.services.screen_memory import ScreenReference, image_key
+from app.services.screen_memory import ScreenReference, image_key, strip_data_url
 from app.settings import settings
 
 _client: Redis | None = None
@@ -151,6 +151,7 @@ def _screen_image_key(session_id: str, key: str) -> str:
 
 async def put_screen_images(session_id: str, images_b64: list[str]) -> list[str]:
     """Store screenshots (base64 text) for this session; returns their keys."""
+    images_b64 = [strip_data_url(img) for img in images_b64]
     keys = [image_key(img) for img in images_b64]
     client = await get_redis()
     if client is None:

@@ -17,8 +17,12 @@ from app.prompts.coding_extraction import EXTRACTION_MIN_CONFIDENCE
 from app.redis_client import (
     add_seen_problem_fingerprint,
     clear_screen_state,
+    get_current_screen_images,
     get_screen_references,
+    prune_screen_images,
+    put_screen_images,
     set_current_problem,
+    set_current_screen_images,
     set_screen_context,
     set_screen_references,
 )
@@ -184,6 +188,30 @@ def screen_question_event(
     }
 
 
+async def update_screen_images(
+    sid: str,
+    encoded_images: list[str],
+    problem: ExtractedProblem,
+    *,
+    speculative: bool,
+) -> list[str]:
+    """Keep screenshots of frames with charts/diagrams as the current screen's
+    images. A text-only final read clears them; a speculative one leaves them.
+    Returns the stored keys for this read."""
+    frames = problem.valid_visual_frames(len(encoded_images))
+    if not frames:
+        if not speculative:
+            old = await get_current_screen_images(sid)
+            await set_current_screen_images(sid, [])
+            await prune_screen_images(sid, old)
+        return []
+    old = await get_current_screen_images(sid)
+    keys = await put_screen_images(sid, [encoded_images[i] for i in frames])
+    await set_current_screen_images(sid, keys)
+    await prune_screen_images(sid, old)
+    return keys
+
+
 @router.delete("/screen-context")
 async def clear_screen_context(session_id: str) -> dict[str, bool]:
     """Forget remembered passages and the current screen text, e.g. when the
@@ -285,6 +313,12 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
     # screen. Passages/preambles are the exception: questions are asked from
     # them after the user has scrolled on, so they are remembered separately
     # and appended as clearly-labelled earlier reference material.
+    visual_keys = await update_screen_images(
+        request.session_id,
+        [request.image_base64] if request.image_base64 is not None else encoded_images,
+        problem,
+        speculative=speculative,
+    )
     references = await get_screen_references(request.session_id)
     if (
         problem.is_reference_material
@@ -292,10 +326,13 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         and problem.visible_context
         and problem.confidence >= 0.5
     ):
-        updated = merge_references(references, problem.visible_context, [])
+        updated = merge_references(references, problem.visible_context, visual_keys)
         if updated != references:
+            kept = {k for ref in updated for k in ref.image_keys}
+            displaced = [k for ref in references for k in ref.image_keys if k not in kept]
             references = updated
             await set_screen_references(request.session_id, references)
+            await prune_screen_images(request.session_id, displaced)
             log.info("vision.reference_saved", session_id=request.session_id, count=len(references))
             await session_bus.publish(
                 request.session_id, reference_saved_event(references, problem.visible_context)

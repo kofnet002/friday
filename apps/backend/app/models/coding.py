@@ -53,6 +53,11 @@ class ExtractedProblem(BaseModel):
     # questions depend on, so those frames can be kept for later answers.
     visual_frames: list[int] = Field(default_factory=list)
 
+    @field_validator("visual_frames", mode="before")
+    @classmethod
+    def _null_visual_frames(cls, value: object) -> object:
+        return [] if value is None else value
+
     def valid_visual_frames(self, frame_count: int) -> list[int]:
         return sorted({i for i in self.visual_frames if 0 <= i < frame_count})
 

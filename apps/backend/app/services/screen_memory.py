@@ -59,9 +59,13 @@ def _norm(text: str) -> str:
     return " ".join(text.split()).lower()
 
 
+def strip_data_url(data_b64: str) -> str:
+    return _DATA_URL_PREFIX.sub("", data_b64.strip())
+
+
 def image_key(data_b64: str) -> str:
     """Stable key for a base64 image (any data-URL prefix is ignored)."""
-    body = _DATA_URL_PREFIX.sub("", data_b64.strip())
+    body = strip_data_url(data_b64)
     return hashlib.sha256(body.encode()).hexdigest()[:32]
 
 
