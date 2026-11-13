@@ -1498,6 +1498,7 @@ export function SessionClient() {
       candidate_id: opts.candidateId,
       session_context: answerScreenContext(),
       claude_model: screenClaudeModelFor(threadId),
+      from_screen: screenThreadIdsRef.current.has(threadId),
     });
     return id;
   };
@@ -1580,6 +1581,7 @@ export function SessionClient() {
       candidate_id: opts.candidateId,
       session_context: answerScreenContext(),
       claude_model: screenClaudeModelFor(current.threadId),
+      from_screen: screenThreadIdsRef.current.has(current.threadId),
     });
   };
   followUpRef.current = followUp;
