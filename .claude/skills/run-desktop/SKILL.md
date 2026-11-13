@@ -48,17 +48,35 @@ Commands: `shot <name>`, `buttons`, `click <exact name>`, `clickp <name start>`,
 multiple-choice questions. It waits 5 s after loading, then scrolls ~70% of a
 screen every 2.2 s, pausing like a reader, and stops at the bottom.
 
+**Open fixtures for a scan in the separate viewer, not with `testpage`.** Every
+capture Friday makes hides all of Friday's own windows, and the driver's
+`testpage` window belongs to Friday's Electron process, so a scan can't see it:
+it records no motion and ends idle after 12 s. `fixture-viewer/` is a tiny
+separate Electron app (a different process, like a real browser) that fills the
+primary display with the page. Start it from the repo root in the background, and
+start the scan within a couple of seconds: the fixtures begin scrolling 5 s after
+they load.
+
+```bash
+apps/desktop/node_modules/.bin/electron .claude/skills/run-desktop/fixture-viewer \
+  .claude/skills/run-desktop/fixtures/assessment-scan.html > "$OUT/viewer.log" 2>&1 &   # background
+```
+
 ```text
 click Assist
 click Screen
 watch                         # logs "[drive] status: …" lines as the scan runs
 click Start                   # start screen watching
-testpage .claude/skills/run-desktop/fixtures/assessment-scan.html
+# (launch the viewer now — see above)
 click Start guided screen scan
 wait 45000
 click AI Help
 shot answer
 ```
+
+Close the viewer afterwards (`pkill -f run-desktop/fixture-viewer`). Don't drive
+Safari/Chrome through AppleScript for this: it blocks on a macOS automation
+prompt. `testpage` is still fine for anything that doesn't capture the screen.
 
 Copy chips: in the answer view, keys 1–9 copy that question's answer. To check
 without touching the real keyboard, send the key to the window and read the
@@ -91,11 +109,14 @@ long page whose questions can only be answered by reading the figures: a bar cha
 (only Jan and Jun labelled), a two-series line chart, a refund-approval flowchart, a
 PNG floor plan (the dock numbers exist only in the image) and an SLA table. It
 scrolls itself one section per stop (7 stops, ~8 views — under the 12-view cap),
-so each figure is whole in one view. Run it the same way, with
-`testpage .claude/skills/run-desktop/fixtures/assessment-visuals.html`; answers
-arrive ~40 s after the scan starts. The Friday panel sits over the middle of the
-primary display and is captured with the page — move it to another display first
-if there is one (`evalMain` + `setBounds`; it can snap back when the view changes).
+so each figure is whole in one view. Run it the same way, opening
+`.claude/skills/run-desktop/fixtures/assessment-visuals.html` in `fixture-viewer`;
+answers arrive ~40 s after the scan starts. Friday's own panel is hidden from the
+captures, so it can stay over the page on the primary display. That is also how
+to check it: fetch the stored screenshots
+(`GET /api/vision/screen-image/{key}?session_id=…`; keys from
+`GET /api/vision/screen-context?session_id=…`) and confirm the page shows where
+the panel sat.
 Answer key (also in an HTML comment at the bottom):
 
 - Q1 B) April · Q2 B) 60,000 · Q3 B) Q1 2024 · Q4 C) Manager review
