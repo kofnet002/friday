@@ -127,9 +127,8 @@ async def get_screen_references(session_id: str) -> list[ScreenReference]:
         return []
     if not isinstance(value, list):
         return []
-    return [
-        ScreenReference.from_json(item) for item in value if isinstance(item, str | dict)
-    ]
+    refs = [ScreenReference.from_json(item) for item in value if isinstance(item, str | dict)]
+    return [ref for ref in refs if ref.text]
 
 
 async def set_screen_references(session_id: str, references: list[ScreenReference]) -> None:

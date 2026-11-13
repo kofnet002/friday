@@ -39,7 +39,12 @@ class ScreenReference:
     @classmethod
     def from_json(cls, obj: str | dict[str, Any]) -> ScreenReference:
         if isinstance(obj, str):
-            return cls(id=uuid.uuid4().hex, text=obj, image_keys=[], saved_at=0.0)
+            return cls(
+                id=hashlib.sha256(obj.encode()).hexdigest()[:32],
+                text=obj,
+                image_keys=[],
+                saved_at=0.0,
+            )
         keys = obj.get("image_keys")
         saved_at = obj.get("saved_at")
         return cls(
@@ -77,7 +82,13 @@ def merge_references(
             if len(ref.image_keys) < len(new_keys):
                 merged[i] = replace(ref, image_keys=new_keys)
             return merged
+    replaced = [ref for ref in refs if _norm(ref.text) in new_norm]
     merged = [ref for ref in refs if _norm(ref.text) not in new_norm]
+    if not new_keys:
+        # A longer read without figures keeps the figures of the reads it replaces.
+        new_keys = list(
+            dict.fromkeys(k for ref in replaced for k in ref.image_keys)
+        )[:MAX_IMAGES_PER_REFERENCE]
     merged.append(
         ScreenReference(
             id=uuid.uuid4().hex, text=new_text, image_keys=new_keys, saved_at=time.time()

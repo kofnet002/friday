@@ -23,13 +23,6 @@ from app.redis_client import (
     set_screen_references,
 )
 from app.services.claude_api import normalize_claude_model
-from app.services.screen_memory import (  # noqa: F401 - re-exported
-    MAX_REFERENCE_CHARS,
-    REFERENCE_HEADER,
-    compose_screen_context,
-    merge_references,
-    reference_saved_event,
-)
 from app.services.coding_extraction import (
     arm_cooldown,
     cached_result,
@@ -38,6 +31,13 @@ from app.services.coding_extraction import (
     image_content_hash,
     problem_fingerprint,
     store_result,
+)
+from app.services.screen_memory import (  # noqa: F401 - re-exported
+    MAX_REFERENCE_CHARS,
+    REFERENCE_HEADER,
+    compose_screen_context,
+    merge_references,
+    reference_saved_event,
 )
 from app.settings import settings
 

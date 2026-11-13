@@ -78,3 +78,34 @@ async def test_clear_screen_state_removes_images(monkeypatch):
     await rc.clear_screen_state("s1")
     assert [key for key in fake.store if key.startswith("session:s1:")] == []
     assert len(fake.store) == 1
+
+
+def test_legacy_string_id_is_stable():
+    assert ScreenReference.from_json("Passage A").id == ScreenReference.from_json("Passage A").id
+
+
+def test_longer_read_without_images_keeps_replaced_images():
+    refs = merge_references([], "Case study: the team", ["a", "b"])
+    refs = merge_references(refs, "Case study: the team migrated.", [])
+    assert [r.image_keys for r in refs] == [["a", "b"]]
+
+
+def test_contained_rescan_with_fewer_or_equal_images_changes_nothing():
+    refs = merge_references([], "Figure 1 sales", ["k1", "k2"])
+    assert merge_references(refs, "Figure 1", ["k3"]) == refs
+    assert merge_references(refs, "Figure 1 sales", ["k1", "k2"]) == refs
+
+
+@pytest.mark.asyncio
+async def test_legacy_references_load_from_redis(monkeypatch):
+    import json
+
+    fake = install_fake_redis(monkeypatch)
+    fake.store["session:s1:screen_references"] = json.dumps(
+        ["A", {"id": "x", "text": "B", "image_keys": ["k"], "saved_at": 1}, 5,
+         {"id": "y", "text": ""}]
+    )
+    first = await rc.get_screen_references("s1")
+    assert [r.text for r in first] == ["A", "B"]
+    assert first[1].image_keys == ["k"]
+    assert [r.id for r in await rc.get_screen_references("s1")] == [r.id for r in first]
