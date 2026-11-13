@@ -249,3 +249,75 @@ test('overlapping captures keep windows shielded until the last one ends', async
     windows = [];
   }
 });
+
+function scanFetch(speculativeProblem, finalProblem) {
+  return async (_url, options) => {
+    const body = JSON.parse(options.body);
+    const problem = body.speculative ? speculativeProblem : finalProblem;
+    return { ok: true, json: async () => ({ problem, emitted: true }) };
+  };
+}
+
+const SEVEN = {
+  questions: ['1', '2', '3', '4', '5', '6', '7'],
+  completeness: 'complete',
+  confidence: 0.9,
+};
+const WEAKER = { questions: ['1', '2', '3', '4'], completeness: 'partial', confidence: 0.4 };
+
+test('a weaker final read does not turn a fully read scan into a partial one', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = scanFetch(SEVEN, WEAKER);
+  const capture = activeCapture();
+  const states = [];
+  capture.on('scan_state', (state) => states.push(state));
+  try {
+    await capture.startGuidedScan();
+    await new Promise((resolve) => setImmediate(resolve));
+    await capture.finishGuidedScan();
+    assert.equal(states.at(-1).state, 'complete');
+    assert.equal(states.at(-1).partial, false);
+  } finally {
+    capture.stop();
+    global.fetch = originalFetch;
+  }
+});
+
+test('reaching the capture limit still reports a partial scan', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = scanFetch(SEVEN, SEVEN);
+  const capture = activeCapture();
+  const states = [];
+  capture.on('scan_state', (state) => states.push(state));
+  try {
+    await capture.startGuidedScan();
+    await new Promise((resolve) => setImmediate(resolve));
+    await capture._submitGuidedScan({ partial: true, limitReached: true, finishedBy: 'limit' });
+    assert.equal(states.at(-1).state, 'partial');
+    assert.equal(states.at(-1).limitReached, true);
+  } finally {
+    capture.stop();
+    global.fetch = originalFetch;
+  }
+});
+
+test('reads from an earlier scan never vouch for the next one', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = scanFetch(SEVEN, WEAKER);
+  const capture = activeCapture();
+  const states = [];
+  capture.on('scan_state', (state) => states.push(state));
+  try {
+    await capture.startGuidedScan();
+    await new Promise((resolve) => setImmediate(resolve));
+    await capture.cancelGuidedScan();
+    global.fetch = scanFetch(WEAKER, WEAKER);
+    await capture.startGuidedScan();
+    await new Promise((resolve) => setImmediate(resolve));
+    await capture.finishGuidedScan();
+    assert.equal(states.at(-1).state, 'partial');
+  } finally {
+    capture.stop();
+    global.fetch = originalFetch;
+  }
+});

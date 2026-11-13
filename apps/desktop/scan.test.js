@@ -63,3 +63,22 @@ test('auto-finishes after scrolling stops, waits longer when nothing was scrolle
   assert.equal(autoFinishReason({ ...base, scrolled: false, lastMotionAt: 0, now: 9000 }), null);
   assert.equal(autoFinishReason({ ...base, scrolled: false, lastMotionAt: 0, now: 12000 }), 'idle');
 });
+
+test('a scan is judged by its best read: most questions, then highest confidence', () => {
+  const { bestScanRead } = require('./scan');
+  const mid = {
+    questions: ['1', '2', '3', '4', '5', '6', '7'],
+    completeness: 'complete',
+    confidence: 0.9,
+  };
+  const final = { questions: ['1', '2', '3', '4'], completeness: 'partial', confidence: 0.4 };
+  assert.equal(bestScanRead([mid, final]), mid);
+  const sure = { questions: ['1', '2'], completeness: 'complete', confidence: 0.95 };
+  const unsure = { questions: ['1', '2'], completeness: 'partial', confidence: 0.5 };
+  assert.equal(bestScanRead([sure, unsure]), sure);
+  // A tie goes to the later read.
+  const again = { ...sure };
+  assert.equal(bestScanRead([sure, again]), again);
+  assert.equal(bestScanRead([null, undefined]), null);
+  assert.equal(bestScanRead([{ confidence: 0.2 }, null]).confidence, 0.2);
+});

@@ -8,7 +8,7 @@ const { BrowserWindow, desktopCapturer, screen } = require('electron');
 const { EventEmitter } = require('node:events');
 const { randomUUID } = require('node:crypto');
 const sharp = require('sharp');
-const { ScanSelector, signatureDistance, autoFinishReason } = require('./scan');
+const { ScanSelector, bestScanRead, signatureDistance, autoFinishReason } = require('./scan');
 
 // Mirrors packages/prompts/coding-extraction.ts CODING_EXTRACTION_CONFIG.
 const SAMPLE_INTERVAL_MS = 1000;
@@ -331,6 +331,8 @@ class CodingCapture extends EventEmitter {
     this.scanCapturedAt = 0;
     this.scanId = randomUUID();
     this.speculation = { inflight: false, dirty: false };
+    // Problems read by this scan's background reads, for judging the scan.
+    this.scanReads = [];
     this._emitScanState('capturing');
     await this._scanTick();
     return { ok: true };
@@ -494,8 +496,13 @@ class CodingCapture extends EventEmitter {
         claude_model: this.claudeModel || undefined,
       }),
     })
-      .then((response) => {
-        if (!response.ok) this.emit('log', `speculative scan read failed: ${response.status}`);
+      .then(async (response) => {
+        if (!response.ok) {
+          this.emit('log', `speculative scan read failed: ${response.status}`);
+          return;
+        }
+        const data = await response.json();
+        if (this.scanId === scanId && data?.problem) this.scanReads.push(data.problem);
       })
       .catch((error) => this.emit('log', `speculative scan read failed: ${error.message || error}`))
       .finally(() => {
@@ -539,15 +546,17 @@ class CodingCapture extends EventEmitter {
         cached: false,
         bytes: selector.frames.reduce((sum, frame) => sum + frame.bytes, 0),
       });
-      this._emitScanState(
-        data.problem?.completeness === 'complete' && !partial ? 'complete' : 'partial',
-        {
-          frames: selector.frames.length,
-          limitReached,
-          finishedBy,
-          partial: partial || data.problem?.completeness !== 'complete',
-        },
-      );
+      // Judge the scan by its best read: the final one can come back weaker
+      // than a background read that already saw every question. Only a real
+      // cause (capture limit, scan_incomplete) forces "partial" on its own.
+      const best = bestScanRead([...(this.scanReads || []), data.problem]);
+      const complete = best?.completeness === 'complete' && !partial;
+      this._emitScanState(complete ? 'complete' : 'partial', {
+        frames: selector.frames.length,
+        limitReached,
+        finishedBy,
+        partial: !complete,
+      });
       return { ok: true, partial };
     } catch (error) {
       const message = error && error.message ? error.message : String(error);

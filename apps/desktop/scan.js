@@ -100,8 +100,32 @@ class ScanSelector {
   }
 }
 
+// The read of a scan that saw the most: most questions, then highest
+// confidence; a tie goes to the later read. A scan's last read can come back
+// weaker than one made mid-scan (the model is not deterministic), so the
+// scan is judged by its best read, not only its last. Null when none.
+function bestScanRead(problems) {
+  let best = null;
+  for (const problem of problems) {
+    if (!problem) continue;
+    if (!best) {
+      best = problem;
+      continue;
+    }
+    const count = problem.questions?.length ?? 0;
+    const bestCount = best.questions?.length ?? 0;
+    if (
+      count > bestCount ||
+      (count === bestCount && (problem.confidence ?? 0) >= (best.confidence ?? 0))
+    )
+      best = problem;
+  }
+  return best;
+}
+
 module.exports = {
   ScanSelector,
+  bestScanRead,
   hammingDistance,
   signatureDistance,
   autoFinishReason,
