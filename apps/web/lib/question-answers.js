@@ -55,4 +55,62 @@ function headingLabel(text) {
   return match ? `Q${Number(match[1])}` : null;
 }
 
-module.exports = { extractQuestionAnswers, headingLabel };
+const SINGLE_QUESTION = /^\*\*💬\s*Question:?\*\*:?\s*Q(\d+)\s*[·:.\-–—]\s*(.+)$/;
+const STAR_ANSWER = /^\*\*⭐\s*Answer:?\*\*:?\s*$/;
+const BULLET = /^([-*])\s+(.*)$/;
+
+/**
+ * A screen question answered on its own (a later question in a scan) comes
+ * back in the single-question layout:
+ *   **💬 Question:** Q7 — title
+ *   **⭐ Answer:**
+ *   - …
+ * Rewrite it as the grouped layout (**Q7 · title** / - **Answer:** …) so a
+ * scan's answers read as one list and every question can be copied.
+ * Anything else is returned unchanged.
+ * @param {string} text
+ * @returns {string}
+ */
+function asQuestionBlocks(text) {
+  const lines = String(text || '').split('\n');
+  if (!lines.some((line) => SINGLE_QUESTION.test(line.trim()))) return String(text || '');
+  const out = [];
+  let inQuestion = false;
+  let labelNextBullet = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    const question = trimmed.match(SINGLE_QUESTION);
+    if (question) {
+      out.push(`**Q${Number(question[1])} · ${question[2].replace(/\*\*/g, '').trim()}**`);
+      inQuestion = true;
+      labelNextBullet = false;
+      continue;
+    }
+    if (inQuestion && STAR_ANSWER.test(trimmed)) {
+      labelNextBullet = true;
+      continue;
+    }
+    // Drop the blank lines between the heading, the ⭐ line and the bullets.
+    if (inQuestion && !trimmed && (labelNextBullet || out[out.length - 1]?.startsWith('**Q'))) {
+      continue;
+    }
+    const bullet = labelNextBullet ? trimmed.match(BULLET) : null;
+    if (bullet) {
+      out.push(
+        /^\*\*Answer:?\*\*/.test(bullet[2]) ? trimmed : `${bullet[1]} **Answer:** ${bullet[2]}`,
+      );
+      labelNextBullet = false;
+      inQuestion = false;
+      continue;
+    }
+    if (trimmed) {
+      labelNextBullet = false;
+      inQuestion = false;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+module.exports = { extractQuestionAnswers, headingLabel, asQuestionBlocks };

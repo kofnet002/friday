@@ -32,7 +32,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { friendlyError } from '@/lib/error-messages';
 import { Markdown } from '@/lib/markdown';
-import { extractQuestionAnswers } from '@/lib/question-answers';
+import { asQuestionBlocks, extractQuestionAnswers } from '@/lib/question-answers';
 import { isScreenQuestionPrompt } from '@/lib/screen-question-routing';
 import { cn } from '@/lib/utils';
 
@@ -393,7 +393,7 @@ export function AnswerPanel({
           isStreaming={isStreaming}
           marked={marked}
           privacyMode={privacyMode}
-          grow={isScreen}
+          screen={isScreen}
         />
       )}
 
@@ -553,7 +553,7 @@ function AnswerBody({
   isStreaming,
   marked,
   privacyMode,
-  grow = false,
+  screen = false,
 }: {
   answer: string;
   question: string | null;
@@ -561,9 +561,10 @@ function AnswerBody({
   isStreaming: boolean;
   marked: boolean;
   privacyMode: boolean;
-  /** Grow with the content instead of scrolling inside — for a host that
-   *  already scrolls (the Screen tab), so there's one scrollbar, not two. */
-  grow?: boolean;
+  /** Screen tab: grow with the content instead of scrolling inside (the tab
+   *  already scrolls, so there's one scrollbar, not two), and show the
+   *  thread's answers as one list of "Q<n> · …" blocks. */
+  screen?: boolean;
 }) {
   // Prior turns to show above the current streaming/finished answer. We
   // skip:
@@ -598,13 +599,16 @@ function AnswerBody({
 
   // Per-question answers from a grouped screen answer (all turns of the
   // thread), for per-heading / one-key copy.
+  // Later questions of a scan come back in the single-question layout; the
+  // Screen tab rewrites them to match the scan's "Q<n> · …" blocks.
+  const shown = (text: string) => (screen ? asQuestionBlocks(text) : text);
   const assistantTexts = [
     ...messages
       .slice(0, -1)
       .filter((m) => m.role === 'assistant')
       .map((m) => m.content),
     answer,
-  ];
+  ].map(shown);
   const questionAnswers = extractQuestionAnswers(assistantTexts);
   const { copiedLabel, copyQuestion } = useQuestionCopy(questionAnswers, !privacyMode);
   // A copy icon on each "Q<n> · …" heading copies that question's answer.
@@ -629,21 +633,29 @@ function AnswerBody({
         // Transparent answer body — no nested card chrome. Vertical
         // padding only; the popover's frame handles the rest.
         'py-1 transition-opacity',
-        !grow && 'min-h-[200px] flex-1 overflow-y-auto',
+        !screen && 'min-h-[200px] flex-1 overflow-y-auto',
         marked && 'opacity-50',
         privacyMode && 'select-none blur-md',
       )}
     >
       {priorTurns.length > 0 ? (
-        <div className="mb-4 flex flex-col gap-3 border-b border-neutral-200/70 pb-3 dark:border-neutral-800/70">
+        <div
+          className={cn(
+            'flex flex-col gap-3',
+            !screen && 'mb-4 border-b border-neutral-200/70 pb-3 dark:border-neutral-800/70',
+          )}
+        >
           {priorTurns.map((turn, i) => (
-            <ThreadTurn key={i} turn={turn} questionAction={questionAction} />
+            <ThreadTurn key={i} turn={turn} questionAction={questionAction} flat={screen} />
           ))}
         </div>
       ) : null}
 
       {answer ? (
-        <Markdown text={answer + (isStreaming ? ' ▍' : '')} questionAction={questionAction} />
+        <Markdown
+          text={shown(answer) + (isStreaming ? ' ▍' : '')}
+          questionAction={questionAction}
+        />
       ) : isStreaming ? (
         <div className="flex items-center gap-2 text-sm text-sky-600 dark:text-sky-400">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -797,11 +809,15 @@ function QuestionCopyButton({
 function ThreadTurn({
   turn,
   questionAction,
+  flat = false,
 }: {
   turn: AnswerMessage;
   questionAction?: (label: string) => ReactNode;
+  /** Screen tab: later questions continue the list — no divider, no card. */
+  flat?: boolean;
 }) {
   if (turn.role === 'user' && isScreenQuestionPrompt(turn.content)) {
+    if (flat) return null;
     return (
       <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-sky-700 dark:text-sky-300">
         More questions from the screen
@@ -817,6 +833,9 @@ function ThreadTurn({
         <p className="flex-1 text-sm text-neutral-700 dark:text-neutral-200">{turn.content}</p>
       </div>
     );
+  }
+  if (flat) {
+    return <Markdown text={asQuestionBlocks(turn.content)} questionAction={questionAction} />;
   }
   return (
     <div className="rounded-lg bg-neutral-100/60 p-2.5 dark:bg-neutral-900/40">

@@ -45,3 +45,35 @@ test('headingLabel recognises a question heading', () => {
   assert.equal(headingLabel('Answer:'), null);
   assert.equal(headingLabel('Quarterly · revenue'), null);
 });
+
+test('asQuestionBlocks turns a single-question answer into a Q heading block', () => {
+  const { asQuestionBlocks } = require('./question-answers');
+  const single = `**💬 Question:** Q7 — North March + June orders minus Online Q4 sales
+
+**⭐ Answer:**
+- **Answer:** A) 58
+- Figure 1: Mar ≈ 50.`;
+  assert.equal(
+    asQuestionBlocks(single),
+    `**Q7 · North March + June orders minus Online Q4 sales**
+- **Answer:** A) 58
+- Figure 1: Mar ≈ 50.`,
+  );
+  // The answer bullet gets its label when the model left it off.
+  const unlabeled = `**💬 Question:** Q7: Result?\n\n**⭐ Answer:**\n- **B) 68**\n- Sum = 120.`;
+  assert.equal(
+    asQuestionBlocks(unlabeled),
+    `**Q7 · Result?**\n- **Answer:** **B) 68**\n- Sum = 120.`,
+  );
+  assert.deepEqual(extractQuestionAnswers([asQuestionBlocks(unlabeled)]), [
+    { label: 'Q7', answer: 'B) 68', check: false },
+  ]);
+});
+
+test('asQuestionBlocks leaves other answers alone', () => {
+  const { asQuestionBlocks } = require('./question-answers');
+  const spoken = '**💬 Question:** What is a mutex?\n\n**⭐ Answer:**\n- A lock.';
+  assert.equal(asQuestionBlocks(spoken), spoken);
+  const grouped = '**Q1 · Title**\n- **Answer:** B) April';
+  assert.equal(asQuestionBlocks(grouped), grouped);
+});
