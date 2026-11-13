@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import type { AnswerMessage, AnswerProvider, QdModel, QdState } from '@friday/shared-types';
 
@@ -34,7 +34,10 @@ import { friendlyError } from '@/lib/error-messages';
 import { Markdown } from '@/lib/markdown';
 import { asQuestionBlocks, extractQuestionAnswers } from '@/lib/question-answers';
 import { isScreenQuestionPrompt } from '@/lib/screen-question-routing';
+import { isNearBottom } from '@/lib/stick-to-bottom';
 import { cn } from '@/lib/utils';
+
+import { AssistScrollContext } from './assist-panel';
 
 export type AnswerStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error';
 
@@ -543,9 +546,6 @@ export function AnswerPanel({
   );
 }
 
-// Within this many px of the bottom counts as "following the stream".
-const ANSWER_PIN_THRESHOLD_PX = 48;
-
 function AnswerBody({
   answer,
   question,
@@ -574,27 +574,54 @@ function AnswerBody({
   // Anything in between is real conversation history that should be visible.
   const priorTurns = messages.slice(1, -1);
 
-  // Keep the newest streamed text in view. Follows the bottom while
-  // "pinned"; scrolling up to re-read unpins (so tokens don't yank the view
-  // away), scrolling back near the bottom re-pins, and every new question or
-  // follow-up re-pins.
-  const scrollRef = useRef<HTMLDivElement>(null);
+  // Keep the newest streamed text in view ("stick to bottom"). Follows the
+  // bottom while "pinned"; scrolling up to re-read unpins (so tokens don't
+  // yank the view away) and scrolling back near the bottom re-pins.
+  //   - AI Help scrolls this body itself, and every new question or
+  //     follow-up re-pins.
+  //   - The Screen tab's body grows inside the Assist workspace's scroller,
+  //     so that scroller is followed instead. Only the reader's position
+  //     pins it; a new answer page just brings its start into view.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const hostScrollRef = useContext(AssistScrollContext);
+  const scroller = () => (screen ? (hostScrollRef?.current ?? null) : bodyRef.current);
   const pinnedRef = useRef(true);
   const turnKey = `${question ?? ''}|${messages.length}`;
 
   useLayoutEffect(() => {
-    pinnedRef.current = true;
-  }, [turnKey]);
+    if (!screen) pinnedRef.current = true;
+  }, [turnKey, screen]);
+
+  // A new screen answer page: show its start (below the sticky pager)
+  // without jumping when it's already in view.
+  useLayoutEffect(() => {
+    const el = hostScrollRef?.current;
+    const body = bodyRef.current;
+    if (!screen || !el || !body) return;
+    const top = body.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    if (top < 0 || top > el.clientHeight) body.scrollIntoView({ block: 'start' });
+    pinnedRef.current = isNearBottom(el);
+  }, [question, screen]);
+
+  useEffect(() => {
+    const el = hostScrollRef?.current;
+    if (!screen || !el) return;
+    const onHostScroll = () => {
+      pinnedRef.current = isNearBottom(el);
+    };
+    el.addEventListener('scroll', onHostScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onHostScroll);
+  }, [screen, hostScrollRef]);
 
   useLayoutEffect(() => {
-    const el = scrollRef.current;
+    const el = scroller();
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [answer, turnKey, isStreaming]);
 
   const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= ANSWER_PIN_THRESHOLD_PX;
+    if (screen) return;
+    const el = bodyRef.current;
+    if (el) pinnedRef.current = isNearBottom(el);
   };
 
   // Per-question answers from a grouped screen answer (all turns of the
@@ -627,12 +654,12 @@ function AnswerBody({
 
   return (
     <div
-      ref={scrollRef}
+      ref={bodyRef}
       onScroll={onScroll}
       className={cn(
         // Transparent answer body — no nested card chrome. Vertical
         // padding only; the popover's frame handles the rest.
-        'py-1 transition-opacity',
+        'scroll-mt-12 py-1 transition-opacity',
         !screen && 'min-h-[200px] flex-1 overflow-y-auto',
         marked && 'opacity-50',
         privacyMode && 'select-none blur-md',
