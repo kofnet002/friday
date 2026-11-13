@@ -627,8 +627,9 @@ function AnswerBody({
   useLayoutEffect(() => {
     const el = scroller();
     if (!el || !isPinned()) return;
-    if (screen) screenPinRef.current.ownScroll(performance.now());
     el.scrollTop = el.scrollHeight;
+    // Record where we landed, so a reader scrolling up mid-stream still unpins.
+    if (screen) screenPinRef.current.ownScroll(performance.now(), el.scrollTop);
   }, [answer, turnKey, isStreaming]);
 
   const onScroll = () => {

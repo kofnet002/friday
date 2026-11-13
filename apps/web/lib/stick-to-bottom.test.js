@@ -40,19 +40,41 @@ test('a screen answer page starts unpinned, even when it fits', () => {
   assert.equal(pin.pinned, false);
 });
 
-test('only the reader scrolling to the bottom pins it, and scrolling up unpins', () => {
+test('only the reader scrolling to the bottom pins it; a new page unpins', () => {
   const pin = screenPin();
   pin.newPage(0);
   pin.onScroll(atBottom, 1000);
   assert.equal(pin.pinned, true);
-  // Following the bottom is our own scroll: it keeps the pin.
-  pin.ownScroll(1100);
-  pin.onScroll(midway, 1120);
-  assert.equal(pin.pinned, true);
-  pin.onScroll(midway, 2000);
+  pin.newPage(2000);
   assert.equal(pin.pinned, false);
-  // A new page unpins again.
-  pin.onScroll(atBottom, 3000);
-  pin.newPage(4000);
+});
+
+test('our own scroll to the bottom keeps the pin while streaming', () => {
+  const pin = screenPin();
+  pin.newPage(0);
+  pin.onScroll(atBottom, 1000);
+  // A token grew the content and we followed it to the new bottom.
+  pin.ownScroll(1100, 700);
+  pin.onScroll({ scrollTop: 700, scrollHeight: 1100, clientHeight: 400 }, 1110);
+  assert.equal(pin.pinned, true);
+});
+
+test('a pinned reader scrolling up between tokens unpins, even right after our scroll', () => {
+  const pin = screenPin();
+  pin.newPage(0);
+  pin.onScroll(atBottom, 1000);
+  for (let t = 1100; t < 1500; t += 50) {
+    // Streaming: every token follows the bottom.
+    pin.ownScroll(t, 600);
+    pin.onScroll(atBottom, t + 5);
+  }
+  assert.equal(pin.pinned, true);
+  // The reader scrolls up 20 ms after a token's scroll.
+  pin.ownScroll(1500, 600);
+  pin.onScroll({ scrollTop: 540, scrollHeight: 1000, clientHeight: 400 }, 1520);
+  assert.equal(pin.pinned, false);
+  // The next token does not follow (the panel only follows while pinned), and
+  // a later scroll event at the reader's position keeps it unpinned.
+  pin.onScroll(midway, 1600);
   assert.equal(pin.pinned, false);
 });
