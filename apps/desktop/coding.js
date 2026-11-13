@@ -89,34 +89,49 @@ function setProtectedWindowCheck(check) {
   wantsProtection = typeof check === 'function' ? check : () => false;
 }
 
-function isWindowProtected(win) {
-  if (typeof win.isContentProtected === 'function' && win.isContentProtected()) return true;
-  return Boolean(wantsProtection(win));
+// Already protected before this capture (stealth, or a later Electron that
+// can say so): never touched by the shield.
+function alreadyProtected(win) {
+  if (wantsProtection(win)) return true;
+  return typeof win.isContentProtected === 'function' && Boolean(win.isContentProtected());
+}
+
+function setProtection(win, on) {
+  try {
+    if (!win.isDestroyed()) win.setContentProtection(on);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function shieldOwnWindows() {
   if (shieldDepth++ > 0) return;
   shielded = [];
   for (const win of BrowserWindow?.getAllWindows?.() ?? []) {
-    if (win.isDestroyed() || isWindowProtected(win)) continue;
-    win.setContentProtection(true);
-    shielded.push(win);
+    try {
+      if (win.isDestroyed() || alreadyProtected(win)) continue;
+    } catch {
+      continue;
+    }
+    if (setProtection(win, true)) shielded.push(win);
   }
 }
 
 function unshieldOwnWindows() {
   if (--shieldDepth > 0) return;
   shieldDepth = 0;
+  // Turn off exactly the windows this shield turned on — unless stealth was
+  // switched on meanwhile and wants them kept protected.
   for (const win of shielded) {
-    // Stealth may have been switched on mid-capture: then it stays on.
-    if (!win.isDestroyed() && !isWindowProtected(win)) win.setContentProtection(false);
+    if (!wantsProtection(win)) setProtection(win, false);
   }
   shielded = [];
 }
 
 async function getSourcesWithoutFriday(options) {
-  shieldOwnWindows();
   try {
+    shieldOwnWindows();
     return await desktopCapturer.getSources(options);
   } finally {
     unshieldOwnWindows();

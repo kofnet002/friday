@@ -321,3 +321,50 @@ test('reads from an earlier scan never vouch for the next one', async () => {
     global.fetch = originalFetch;
   }
 });
+
+test('windows reporting isContentProtected are restored after a capture they were shielded for', async () => {
+  const panel = fakeWindow('panel');
+  panel.isContentProtected = () => panel.protectedNow;
+  windows = [panel];
+  try {
+    await getSourcesWithoutFriday({ types: ['screen'] });
+    assert.deepEqual(panel.calls, [true, false]);
+    assert.equal(panel.protectedNow, false);
+    // Already protected (e.g. by stealth) before the capture: left alone.
+    panel.protectedNow = true;
+    panel.calls = [];
+    await getSourcesWithoutFriday({ types: ['screen'] });
+    assert.deepEqual(panel.calls, []);
+    assert.equal(panel.protectedNow, true);
+  } finally {
+    windows = [];
+  }
+});
+
+test('a window that refuses protection does not break the capture or the others', async () => {
+  const broken = fakeWindow('broken');
+  broken.setContentProtection = () => {
+    throw new Error('window gone');
+  };
+  const panel = fakeWindow('panel');
+  windows = [broken, panel];
+  let protectedDuringCapture = null;
+  electronMock.desktopCapturer.getSources = async () => {
+    protectedDuringCapture = panel.protectedNow;
+    return defaultGetSources();
+  };
+  try {
+    const sources = await getSourcesWithoutFriday({ types: ['screen'] });
+    assert.equal(sources.length, 1);
+    assert.equal(protectedDuringCapture, true);
+    assert.equal(panel.protectedNow, false);
+    // The shield depth went back to zero: the next capture shields again.
+    panel.calls = [];
+    windows = [panel];
+    await getSourcesWithoutFriday({ types: ['screen'] });
+    assert.deepEqual(panel.calls, [true, false]);
+  } finally {
+    electronMock.desktopCapturer.getSources = defaultGetSources;
+    windows = [];
+  }
+});
