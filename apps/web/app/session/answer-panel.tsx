@@ -223,7 +223,10 @@ export function AnswerPanel({
             'flex items-center gap-2.5',
             // In the Screen tab the answer grows with the tab's own scroll;
             // the pager stays pinned so navigation is always reachable.
-            isScreen && 'sticky top-0 z-10 -my-1 bg-white py-1 dark:bg-neutral-900',
+            // Same inset as the answer below; solid full-width background
+            // and a hairline so scrolled text slides cleanly under it.
+            isScreen &&
+              'sticky top-0 z-10 border-b border-neutral-200/80 bg-white px-3 py-2 dark:border-neutral-800/80 dark:bg-neutral-900',
           )}
         >
           {isScreen ? (
@@ -659,8 +662,8 @@ function AnswerBody({
       className={cn(
         // Transparent answer body — no nested card chrome. Vertical
         // padding only; the popover's frame handles the rest.
-        'scroll-mt-12 py-1 transition-opacity',
-        !screen && 'min-h-[200px] flex-1 overflow-y-auto',
+        'py-1 transition-opacity',
+        screen ? 'scroll-mt-14 px-3' : 'min-h-[200px] flex-1 overflow-y-auto',
         marked && 'opacity-50',
         privacyMode && 'select-none blur-md',
       )}
