@@ -130,3 +130,15 @@ test('a single question outside a scan is asked as-is', () => {
   assert.ok(!isScreenQuestionPrompt(plan.text));
   assert.ok(SCREEN_QUESTIONS_PREFIX.length > 0);
 });
+
+const { normalizeQuestion } = require('./screen-question-routing');
+
+test('normalizeQuestion folds typographic quotes and dashes', () => {
+  // A later watcher read of the same question used a curly apostrophe, which
+  // opened a second answer page for a question the scan had already answered.
+  assert.equal(
+    normalizeQuestion('Q7. Add the North region’s March — orders'),
+    normalizeQuestion("Q7. Add the North region's March - orders"),
+  );
+  assert.equal(normalizeQuestion('“Quoted”'), normalizeQuestion('"quoted"'));
+});

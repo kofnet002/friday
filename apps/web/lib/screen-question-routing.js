@@ -1,5 +1,11 @@
+// Two reads of the same page can differ only in typography (a curly vs a
+// straight apostrophe), so fold quotes and dashes before comparing.
 function normalizeQuestion(question) {
   return String(question || '')
+    .normalize('NFKC')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
     .trim()
     .replace(/\s+/g, ' ')
     .toLowerCase();
