@@ -5,7 +5,7 @@ Kept in sync with the TS file; update both when the schema changes.
 
 from __future__ import annotations
 
-CODING_EXTRACTION_VERSION = "1.8.0"
+CODING_EXTRACTION_VERSION = "1.9.0"
 
 CODING_EXTRACTION_SYSTEM_PROMPT = """\
 You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
@@ -44,7 +44,9 @@ RULES
   `visible_context`, including technical prose, diagrams and labels, code,
   errors, and command output. Preserve exact names and details, omit unrelated
   app chrome, and do not infer clipped or unreadable content. Keep it under
-  6,000 characters.
+  6,000 characters. `visible_context` holds only the page's own content: never
+  notes about what is or isn't visible in the screenshots (put those in
+  `missing_sections`).
 - questions: EVERY distinct question visible across the screenshot(s), in
   page order, each self-contained: its number, full wording, and all options
   verbatim. Set `question` to the first one. Do not merge separate questions.

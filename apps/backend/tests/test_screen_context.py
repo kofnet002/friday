@@ -186,7 +186,43 @@ def test_extraction_prompt_asks_for_tables_charts_and_visual_frames():
     assert "Markdown table" in P
     assert "[unreadable]" in P
     assert '"visual_frame_labels": string[]' in P
-    assert CODING_EXTRACTION_VERSION == "1.8.0"
+    assert CODING_EXTRACTION_VERSION == "1.9.0"
+
+
+def test_visible_context_holds_only_page_content_in_both_prompt_twins():
+    from pathlib import Path
+
+    from app.prompts.coding_extraction import (
+        CODING_EXTRACTION_SYSTEM_PROMPT as P,
+        CODING_EXTRACTION_VERSION,
+    )
+
+    rule = (
+        "`visible_context` holds only the page's own content: never notes about what is or"
+        " isn't visible in the screenshots (put those in `missing_sections`)."
+    )
+    assert " ".join(rule.split()) in " ".join(P.split())
+    ts = Path(__file__).parents[3] / "packages" / "prompts" / "coding-extraction.ts"
+    source = ts.read_text(encoding="utf-8").replace("\\`", "`")
+    assert " ".join(rule.split()) in " ".join(source.split())
+    assert f"CODING_EXTRACTION_VERSION = '{CODING_EXTRACTION_VERSION}'" in source
+
+
+def test_partial_screen_visuals_note_matches_its_ts_twin():
+    from pathlib import Path
+
+    from app.prompts.answer_generation import ANSWER_GENERATION_VERSION, SCREEN_VISUALS_NOTES
+
+    ts = Path(__file__).parents[3] / "packages" / "prompts" / "answer-generation.ts"
+    import re
+
+    # Join the TS string concatenations ('…' + "…") back into one text.
+    joined = re.sub(r"""['"]\s*\+\s*['"]""", "", ts.read_text(encoding="utf-8"))
+    source = " ".join(joined.split())
+    assert ANSWER_GENERATION_VERSION == "1.9.0"
+    assert f"ANSWER_GENERATION_VERSION = '{ANSWER_GENERATION_VERSION}'" in source
+    for note in SCREEN_VISUALS_NOTES.values():
+        assert " ".join(note.split()) in source
 
 
 def test_visual_frame_labels_align_with_visual_frames():

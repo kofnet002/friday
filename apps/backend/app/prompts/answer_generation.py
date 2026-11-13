@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-ANSWER_GENERATION_VERSION = "1.8.0"
+ANSWER_GENERATION_VERSION = "1.9.0"
 
 Role = Literal["user", "assistant"]
 
