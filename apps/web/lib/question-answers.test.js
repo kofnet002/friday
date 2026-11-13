@@ -77,3 +77,13 @@ test('asQuestionBlocks leaves other answers alone', () => {
   const grouped = '**Q1 · Title**\n- **Answer:** B) April';
   assert.equal(asQuestionBlocks(grouped), grouped);
 });
+
+test('a block with several Answer lines copies the last one', () => {
+  const corrected = `**Q7 · Result?**
+- **Answer:** A) 58
+- The earlier sum was wrong.
+- **Answer:** B) 68`;
+  assert.deepEqual(extractQuestionAnswers([corrected]), [
+    { label: 'Q7', answer: 'B) 68', check: false },
+  ]);
+});

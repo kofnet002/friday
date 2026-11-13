@@ -124,3 +124,11 @@ def test_claude_gets_images_and_fallback_is_told_visuals_are_unavailable(monkeyp
     assert "visual not available" not in claude_system
     assert "⚠️ Check: visual not available" in str(seen["gemini_system"])
     assert seen["claude_kwargs"]["images"] == images  # type: ignore[index]
+
+
+def test_screen_questions_get_one_final_answer_without_visible_corrections():
+    prompt = answer_system_prompt(AnswerContext(screen_context="Q1. Which month? A) Mar B) Apr"))
+    assert "Work the answer out before you write" in prompt
+    assert "exactly ONE `Answer:` line" in prompt
+    assert "Never write a correction" in prompt
+    assert "only in the `⚠️ Check:` line" in prompt

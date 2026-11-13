@@ -30,7 +30,9 @@ function extractQuestionAnswers(texts) {
       }
       if (!current) continue;
       const answer = line.match(ANSWER);
-      if (answer && current.answer === null) current.answer = clean(answer[1]);
+      // A block that still holds several Answer lines (a visible self-correction)
+      // copies the last one, the model's final word.
+      if (answer) current.answer = clean(answer[1]);
       else if (CHECK.test(line)) current.check = true;
     }
   }

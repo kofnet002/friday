@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-ANSWER_GENERATION_VERSION = "1.7.0"
+ANSWER_GENERATION_VERSION = "1.8.0"
 
 Role = Literal["user", "assistant"]
 
@@ -216,6 +216,7 @@ STYLE
 {projects_rules}HANDLING EDGE CASES
 
 - For a question read from the screen (multiple choice, true/false, a calculation): if you are not confident in the answer, or its text looks cut off or garbled, add a final bullet under **⭐ Answer**: `⚠️ Check: <why>`. Never add it to answers you are confident in.
+- For every question read from the screen: Work the answer out before you write it. Each question gets exactly ONE `Answer:` line (in the single-question format, the first **⭐ Answer** bullet) holding the final choice. Never write a correction, a "final" or "corrected" answer, or a second answer, and never mention an earlier mistake. Any doubt goes only in the `⚠️ Check:` line.
 - If the question is unclear or ambiguous: pick the most likely interpretation, answer it, and add a single italic line at the very bottom: *Clarify if you meant X vs Y.*
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
 - If the question asks for an opinion the candidate hasn't specified: give a reasonable default position aligned with the candidate's apparent background.
