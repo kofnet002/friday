@@ -83,3 +83,44 @@ def test_non_claude_answer_is_told_visuals_are_unavailable(monkeypatch):
 
     assert asyncio.run(run()) == ["ok"]
     assert "⚠️ Check: visual not available" in seen[0]
+
+
+def test_claude_gets_images_and_fallback_is_told_visuals_are_unavailable(monkeypatch):
+    import asyncio
+
+    from app.services import answer as answer_mod
+
+    seen: dict[str, object] = {}
+    images = [b"\x89PNG\r\n\x1a\nfake"]
+
+    async def fake_anthropic(system: str, *_a: object, **kw: object):
+        seen["claude_system"] = system
+        seen["claude_kwargs"] = kw
+        raise ValueError("claude hard failure")
+        yield ""  # pragma: no cover - makes this an async generator
+
+    async def fake_gemini(system: str, user: str):
+        seen["gemini_system"] = system
+        yield "ok"
+
+    monkeypatch.setattr(answer_mod, "_stream_anthropic", fake_anthropic)
+    monkeypatch.setattr(answer_mod, "_stream_gemini", fake_gemini)
+    monkeypatch.setattr(answer_mod, "_provider_chain", lambda p: ["claude", "gemini"])
+
+    async def run() -> list[str]:
+        return [
+            t
+            async for t in answer_mod.stream_answer(
+                "claude",
+                "What does the chart show?",
+                AnswerContext(screen_context="Chart page", screen_visuals="attached"),
+                images=images,
+            )
+        ]
+
+    assert asyncio.run(run()) == ["ok"]
+    claude_system = str(seen["claude_system"])
+    assert "source of truth" in claude_system
+    assert "visual not available" not in claude_system
+    assert "⚠️ Check: visual not available" in str(seen["gemini_system"])
+    assert seen["claude_kwargs"]["images"] == images  # type: ignore[index]

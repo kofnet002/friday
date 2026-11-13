@@ -93,10 +93,16 @@ async def load_answer_images(session_id: str, *, from_screen: bool) -> list[byte
                 continue
             try:
                 images.append(base64.b64decode(data))
-            except (binascii.Error, ValueError):
-                continue
+            except (binascii.Error, ValueError) as exc:
+                log.warning(
+                    "ws_answer.screen_image_decode_failed",
+                    session_id=session_id,
+                    key=key,
+                    error=str(exc),
+                )
         return images
-    except Exception:  # noqa: BLE001 - screenshots are optional
+    except Exception as exc:  # noqa: BLE001 - screenshots are optional
+        log.warning("ws_answer.screen_images_failed", session_id=session_id, error=str(exc))
         return []
 
 
