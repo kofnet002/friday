@@ -84,14 +84,32 @@ async def run_claude_cli_vision(
     model: str | None = None,
     session_id: str | None = None,
 ) -> str:
-    """One-shot vision call: write the screenshot to a scratch dir, let the CLI
-    read it (Read tool), and return the final answer text.
+    """One-shot vision call on a single screenshot (thin wrapper over
+    run_claude_cli_with_images; a lone image keeps the legacy `screen.<ext>` name).
 
     Used for screenshot extraction when Claude is the selected provider on the
-    subscription transport — the CLI does the OCR (see claude_api.claude_vision). `system`
-    is APPENDED to Claude Code's default prompt (so its image-reading behavior
-    stays intact); `prompt` must tell it to read the file we wrote and reply
-    with JSON only. Returns the raw result text (caller parses/validates).
+    subscription transport — the CLI does the OCR (see claude_api.claude_vision).
+    """
+    return await run_claude_cli_with_images(
+        images=[image_bytes], prompt=prompt, system=system, model=model, session_id=session_id
+    )
+
+
+async def run_claude_cli_with_images(
+    *,
+    images: list[bytes],
+    prompt: str,
+    system: str,
+    model: str | None = None,
+    session_id: str | None = None,
+) -> str:
+    """One-shot call with one or more images: write them to a scratch dir, let
+    the CLI read them (Read tool), and return the final answer text.
+
+    Several images are written as screen-1.<ext> … screen-N.<ext>; a single image
+    keeps the legacy `screen.<ext>` name. `system` is APPENDED to Claude Code's
+    default prompt (so its image-reading behavior stays intact); `prompt` must
+    tell it what to do with the files. Returns the raw result text.
     """
     reason = claude_cli_ready(session_id)
     if reason:
@@ -99,11 +117,17 @@ async def run_claude_cli_vision(
 
     env = resolve_agent_env(session_id)
     workspace = tempfile.mkdtemp(prefix="friday-vision-")
-    image_name = f"screen.{_image_ext(image_bytes)}"
+    if len(images) == 1:
+        image_names = [f"screen.{_image_ext(images[0])}"]
+        read_prefix = f"Read the image file {image_names[0]} in the current directory. "
+    else:
+        image_names = [f"screen-{i}.{_image_ext(img)}" for i, img in enumerate(images, 1)]
+        read_prefix = f"Read the image files {', '.join(image_names)} in the current directory. "
     proc: asyncio.subprocess.Process | None = None
     try:
         # Blocking write off the event loop (ASYNC230).
-        await asyncio.to_thread(Path(workspace, image_name).write_bytes, image_bytes)
+        for name, img in zip(image_names, images, strict=True):
+            await asyncio.to_thread(Path(workspace, name).write_bytes, img)
 
         cmd = [
             settings.claude_cli_path,
@@ -133,7 +157,7 @@ async def run_claude_cli_vision(
             start_new_session=True,
         )
         assert proc.stdin is not None
-        stdin_text = f"Read the image file {image_name} in the current directory. {prompt}"
+        stdin_text = f"{read_prefix}{prompt}"
         proc.stdin.write(stdin_text.encode("utf-8"))
         await proc.stdin.drain()
         proc.stdin.close()
