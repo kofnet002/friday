@@ -34,7 +34,7 @@ import { friendlyError } from '@/lib/error-messages';
 import { Markdown } from '@/lib/markdown';
 import { asQuestionBlocks, extractQuestionAnswers } from '@/lib/question-answers';
 import { isScreenQuestionPrompt } from '@/lib/screen-question-routing';
-import { isNearBottom } from '@/lib/stick-to-bottom';
+import { isNearBottom, screenPin } from '@/lib/stick-to-bottom';
 import { cn } from '@/lib/utils';
 
 import { AssistScrollContext } from './assist-panel';
@@ -583,28 +583,30 @@ function AnswerBody({
   //   - AI Help scrolls this body itself, and every new question or
   //     follow-up re-pins.
   //   - The Screen tab's body grows inside the Assist workspace's scroller,
-  //     so that scroller is followed instead. Only the reader's position
-  //     pins it; a new answer page just brings its start into view.
+  //     so that scroller is followed instead. A new answer page starts
+  //     UNPINNED with its start brought into view; only the reader scrolling
+  //     to the bottom pins it (see screenPin).
   const bodyRef = useRef<HTMLDivElement>(null);
   const hostScrollRef = useContext(AssistScrollContext);
   const scroller = () => (screen ? (hostScrollRef?.current ?? null) : bodyRef.current);
   const pinnedRef = useRef(true);
+  const screenPinRef = useRef(screenPin());
+  const isPinned = () => (screen ? screenPinRef.current.pinned : pinnedRef.current);
   const turnKey = `${question ?? ''}|${messages.length}`;
 
   useLayoutEffect(() => {
     if (!screen) pinnedRef.current = true;
   }, [turnKey, screen]);
 
-  // A new screen answer page: show its start (below the sticky pager)
-  // without jumping when it's already in view, and pin only if the reader
-  // is then at the bottom.
+  // A new screen answer page: unpin and show its start (below the sticky
+  // pager) without jumping when it's already in view.
   const revealStart = () => {
     const el = hostScrollRef?.current;
     const body = bodyRef.current;
+    screenPinRef.current.newPage(performance.now());
     if (!el || !body) return;
     const top = body.getBoundingClientRect().top - el.getBoundingClientRect().top;
     if (top < 0 || top > el.clientHeight) body.scrollIntoView({ block: 'start' });
-    pinnedRef.current = isNearBottom(el);
   };
   useLayoutEffect(() => {
     if (screen) revealStart();
@@ -612,22 +614,21 @@ function AnswerBody({
 
   // Arriving from another view remounts the host scroller (its `key` is the
   // view), whose ref is attached only after this child's layout effects —
-  // so the step above found no scroller. Do it here on mount instead, or
-  // the first token would follow a `pinned` that was never measured.
+  // so the step above found no scroller. Reveal the start here on mount too.
   useEffect(() => {
     const el = hostScrollRef?.current;
     if (!screen || !el) return;
     revealStart();
-    const onHostScroll = () => {
-      pinnedRef.current = isNearBottom(el);
-    };
+    const onHostScroll = () => screenPinRef.current.onScroll(el, performance.now());
     el.addEventListener('scroll', onHostScroll, { passive: true });
     return () => el.removeEventListener('scroll', onHostScroll);
   }, [screen, hostScrollRef]);
 
   useLayoutEffect(() => {
     const el = scroller();
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+    if (!el || !isPinned()) return;
+    if (screen) screenPinRef.current.ownScroll(performance.now());
+    el.scrollTop = el.scrollHeight;
   }, [answer, turnKey, isStreaming]);
 
   const onScroll = () => {
