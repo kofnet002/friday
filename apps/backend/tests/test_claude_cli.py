@@ -132,3 +132,25 @@ async def test_cli_passes_effort_when_given(monkeypatch: pytest.MonkeyPatch) -> 
     assert cmd[cmd.index("--effort") + 1] == "medium"
     await claude_cli.run_claude_cli_with_images(images=[JPEG], prompt="Describe.", system="sys")
     assert "--effort" not in seen["cmd"]
+
+
+async def test_cli_drops_effort_for_models_that_reject_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    _patch(monkeypatch, seen)
+    await claude_cli.run_claude_cli_with_images(
+        images=[JPEG], prompt="Describe.", system="sys", model="claude-haiku-4-5", effort="medium"
+    )
+    assert "--effort" not in seen["cmd"]
+    await claude_cli.run_claude_cli_with_images(
+        images=[JPEG], prompt="Describe.", system="sys", model="claude-haiku-5-5", effort="medium"
+    )
+    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "medium"
+
+
+def test_accepts_effort_follows_the_model() -> None:
+    from app.services.claude_api import accepts_effort
+
+    assert accepts_effort("claude-haiku-5-5")
+    assert accepts_effort(None)  # the CLI's own default model
+    assert not accepts_effort("claude-haiku-4-5")
+    assert not accepts_effort("claude-sonnet-4-5-20250929")

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from app.logging import log
 from app.services.claude_agent_auth import claude_cli_ready, resolve_agent_env
-from app.services.claude_api import image_media_type
+from app.services.claude_api import accepts_effort, image_media_type
 from app.services.coding_agent import _STREAM_READ_LIMIT, _drain, _kill
 from app.settings import settings
 
@@ -155,7 +155,7 @@ async def run_claude_cli_with_images(
         ]
         if model:
             cmd += ["--model", model]
-        if effort:
+        if effort and accepts_effort(model):
             cmd += ["--effort", effort]
 
         proc = await asyncio.create_subprocess_exec(
@@ -241,7 +241,7 @@ async def stream_claude_cli_text(
         cmd += ["--system-prompt", system]
     if model:
         cmd += ["--model", model]
-    if effort:
+    if effort and accepts_effort(model):
         cmd += ["--effort", effort]
     # No --allowedTools / --dangerously-skip-permissions: in non-interactive
     # print mode the CLI can't prompt for tool approval, so it just answers in

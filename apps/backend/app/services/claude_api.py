@@ -121,6 +121,12 @@ def anthropic_client() -> AsyncAnthropic:
     return _client(settings.anthropic_api_key)
 
 
+def accepts_effort(model: str | None) -> bool:
+    """Whether `model` takes an effort setting. None (a transport's own default
+    model) is assumed to; callers drop effort silently otherwise."""
+    return not (model and model.startswith(_NO_EFFORT_PREFIXES))
+
+
 def _request_kwargs(
     *,
     system: str,
@@ -154,7 +160,7 @@ def _request_kwargs(
         kwargs["thinking"] = {"type": "disabled"}
     elif not model.startswith(_NO_DEFAULT_THINKING_PREFIXES):
         kwargs["max_tokens"] = max_tokens + _THINKING_HEADROOM
-    if effort and not model.startswith(_NO_EFFORT_PREFIXES):
+    if effort and accepts_effort(model):
         kwargs["output_config"] = {"effort": effort}
     betas: list[str] = []
     if model in _FALLBACK_MODELS:
