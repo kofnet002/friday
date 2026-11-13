@@ -71,3 +71,74 @@ test('several questions become one numbered request, in page order', () => {
 test('nothing to combine yields null', () => {
   assert.equal(combineScreenQuestions([]), null);
 });
+
+const {
+  planScreenAnswer,
+  isScreenQuestionPrompt,
+  SCREEN_QUESTIONS_PREFIX,
+} = require('./screen-question-routing');
+
+test('mid-scan read answers visible questions in a new grouped answer, holding the last', () => {
+  const plan = planScreenAnswer({
+    questions: ['Q1', 'Q2', 'Q3 which of the fol'],
+    completeness: 'partial',
+    speculative: true,
+    answered: new Set(),
+    hasScanEntry: false,
+  });
+  assert.equal(plan.mode, 'new');
+  assert.deepEqual(plan.questions, ['Q1', 'Q2']);
+  assert.match(plan.text, /^Answer each of these 2 on-screen questions/);
+  assert.equal(plan.review, null, 'no review prompt while still scrolling');
+});
+
+test('questions found later in the same scan are a follow-up on the same page', () => {
+  const plan = planScreenAnswer({
+    questions: ['Q1', 'Q2', 'Q3 full text'],
+    completeness: 'complete',
+    speculative: false,
+    answered: new Set(['q1', 'q2']),
+    hasScanEntry: true,
+  });
+  assert.equal(plan.mode, 'followup');
+  assert.deepEqual(plan.questions, ['Q3 full text']);
+  // Even one question keeps the grouped, numbered format on a scan page.
+  assert.ok(isScreenQuestionPrompt(plan.text));
+});
+
+test('nothing new means nothing to send', () => {
+  const plan = planScreenAnswer({
+    questions: ['Q1'],
+    completeness: 'complete',
+    speculative: false,
+    answered: new Set(['q1']),
+    hasScanEntry: true,
+  });
+  assert.equal(plan.mode, 'none');
+});
+
+test('a single question outside a scan is asked as-is', () => {
+  const plan = planScreenAnswer({
+    questions: ['What is a mutex?'],
+    completeness: 'complete',
+    speculative: false,
+    answered: new Set(),
+    hasScanEntry: false,
+  });
+  assert.equal(plan.mode, 'new');
+  assert.equal(plan.text, 'What is a mutex?');
+  assert.ok(!isScreenQuestionPrompt(plan.text));
+  assert.ok(SCREEN_QUESTIONS_PREFIX.length > 0);
+});
+
+const { normalizeQuestion } = require('./screen-question-routing');
+
+test('normalizeQuestion folds typographic quotes and dashes', () => {
+  // A later watcher read of the same question used a curly apostrophe, which
+  // opened a second answer page for a question the scan had already answered.
+  assert.equal(
+    normalizeQuestion('Q7. Add the North region’s March — orders'),
+    normalizeQuestion("Q7. Add the North region's March - orders"),
+  );
+  assert.equal(normalizeQuestion('“Quoted”'), normalizeQuestion('"quoted"'));
+});

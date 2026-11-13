@@ -44,9 +44,9 @@ def test_screen_context_keeps_earlier_reference_after_screen_changes():
     from app.api.vision import compose_screen_context, merge_references
 
     passage = "Passage: Acme sells widgets in three regions..."
-    refs = merge_references([], passage)
+    refs = merge_references([], passage, [])
     # Re-reading the same passage doesn't duplicate it.
-    assert merge_references(refs, passage) == [passage]
+    assert [r.text for r in merge_references(refs, passage, [])] == [passage]
 
     context = compose_screen_context("Q3. Which region grew fastest?", refs)
     assert context.index("Q3. Which region grew fastest?") < context.index(passage)
@@ -55,21 +55,22 @@ def test_screen_context_keeps_earlier_reference_after_screen_changes():
 
 def test_reference_store_is_bounded_and_drops_oldest():
     from app.api.vision import MAX_REFERENCE_CHARS, merge_references
+    from app.services.screen_memory import ScreenReference
 
-    refs: list[str] = []
+    refs: list[ScreenReference] = []
     for i in range(10):
-        refs = merge_references(refs, f"passage {i} " + "x" * 3000)
-    assert sum(len(r) for r in refs) <= MAX_REFERENCE_CHARS
-    assert refs[-1].startswith("passage 9")
-    assert not any(r.startswith("passage 0") for r in refs)
+        refs = merge_references(refs, f"passage {i} " + "x" * 3000, [])
+    assert sum(len(r.text) for r in refs) <= MAX_REFERENCE_CHARS
+    assert refs[-1].text.startswith("passage 9")
+    assert not any(r.text.startswith("passage 0") for r in refs)
 
 
 def test_extended_or_rescanned_reference_replaces_its_shorter_version():
     from app.api.vision import merge_references
 
-    refs = merge_references([], "Case study: the team migrated")
-    refs = merge_references(refs, "Case study: the team migrated to Postgres in 2021.")
-    assert refs == ["Case study: the team migrated to Postgres in 2021."]
+    refs = merge_references([], "Case study: the team migrated", [])
+    refs = merge_references(refs, "Case study: the team migrated to Postgres in 2021.", [])
+    assert [r.text for r in refs] == ["Case study: the team migrated to Postgres in 2021."]
 
 
 def test_compose_without_references_is_just_current_screen():
@@ -132,3 +133,243 @@ def test_screen_question_event_carries_every_question():
     assert event["questions"] == ["Q1", "Q2", "Q3"]
     assert event["question"] == "Q1"
     assert event["source"] == "guided_scan"
+
+
+def test_reference_saved_event_has_a_short_preview():
+    from app.api.vision import reference_saved_event
+    from app.services.screen_memory import ScreenReference
+
+    passage = "Northwind Logistics operates warehouses in three regions. " * 10
+    event = reference_saved_event(
+        [ScreenReference("1", passage, [], 1.0), ScreenReference("2", "second", [], 2.0)], passage
+    )
+    assert event["type"] == "screen_reference_saved"
+    assert event["count"] == 2
+    assert event["preview"].startswith("Northwind Logistics operates")
+    assert len(event["preview"]) <= 121
+
+
+def test_clear_screen_context_endpoint_clears_session_state(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.api import vision
+    from app.main import app
+
+    cleared: list[str] = []
+
+    async def fake_clear(session_id: str) -> None:
+        cleared.append(session_id)
+
+    monkeypatch.setattr(vision, "clear_screen_state", fake_clear)
+    response = TestClient(app).delete("/api/vision/screen-context", params={"session_id": "s1"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert cleared == ["s1"]
+
+
+def test_visual_frames_default_empty():
+    assert ExtractedProblem(is_coding_problem=False, confidence=0.9).visual_frames == []
+
+
+def test_valid_visual_frames_drops_out_of_range_and_duplicates():
+    p = ExtractedProblem(is_coding_problem=False, confidence=0.9, visual_frames=[3, 0, 0, -1, 7])
+    assert p.valid_visual_frames(4) == [0, 3]
+
+
+def test_extraction_prompt_asks_for_tables_charts_and_visual_frames():
+    from app.prompts.coding_extraction import (
+        CODING_EXTRACTION_SYSTEM_PROMPT as P,
+        CODING_EXTRACTION_VERSION,
+    )
+
+    assert '"visual_frames": number[]' in P
+    assert "Markdown table" in P
+    assert "[unreadable]" in P
+    assert '"visual_frame_labels": string[]' in P
+    assert CODING_EXTRACTION_VERSION == "1.9.0"
+
+
+def test_visible_context_holds_only_page_content_in_both_prompt_twins():
+    from pathlib import Path
+
+    from app.prompts.coding_extraction import (
+        CODING_EXTRACTION_SYSTEM_PROMPT as P,
+        CODING_EXTRACTION_VERSION,
+    )
+
+    rule = (
+        "`visible_context` holds only the page's own content: never notes about what is or"
+        " isn't visible in the screenshots (put those in `missing_sections`)."
+    )
+    assert " ".join(rule.split()) in " ".join(P.split())
+    ts = Path(__file__).parents[3] / "packages" / "prompts" / "coding-extraction.ts"
+    source = ts.read_text(encoding="utf-8").replace("\\`", "`")
+    assert " ".join(rule.split()) in " ".join(source.split())
+    assert f"CODING_EXTRACTION_VERSION = '{CODING_EXTRACTION_VERSION}'" in source
+
+
+def test_partial_screen_visuals_note_matches_its_ts_twin():
+    from pathlib import Path
+
+    from app.prompts.answer_generation import ANSWER_GENERATION_VERSION, SCREEN_VISUALS_NOTES
+
+    ts = Path(__file__).parents[3] / "packages" / "prompts" / "answer-generation.ts"
+    import re
+
+    # Join the TS string concatenations ('…' + "…") back into one text.
+    joined = re.sub(r"""['"]\s*\+\s*['"]""", "", ts.read_text(encoding="utf-8"))
+    source = " ".join(joined.split())
+    assert ANSWER_GENERATION_VERSION == "1.9.0"
+    assert f"ANSWER_GENERATION_VERSION = '{ANSWER_GENERATION_VERSION}'" in source
+    for note in SCREEN_VISUALS_NOTES.values():
+        assert " ".join(note.split()) in source
+
+
+def test_visual_frame_labels_align_with_visual_frames():
+    def make(frames, labels):
+        return ExtractedProblem(
+            is_coding_problem=False,
+            confidence=0.9,
+            visual_frames=frames,
+            visual_frame_labels=labels,
+        )
+
+    assert make([0, 2], ["Figure 1"]).visual_frame_labels == ["Figure 1", ""]
+    assert make([1], ["Figure 2", "extra"]).visual_frame_labels == ["Figure 2"]
+    assert make([1], None).visual_frame_labels == [""]
+    assert make(None, None).visual_frame_labels == []
+    # A bad caption never fails the whole read.
+    assert make([0, 1, 2], [None, 7, "  Figure 3 "]).visual_frame_labels == ["", "", "Figure 3"]
+    assert make([0], "not a list").visual_frame_labels == [""]
+    # Labels follow their frame through dedupe / range filtering.
+    p = make([3, 0, 0, 9], ["Fig D", "Fig A", "dup", "out"])
+    assert p.labelled_visual_frames(4) == [(0, "Fig A"), (3, "Fig D")]
+
+
+# --- passage viewer endpoints ---
+
+import base64  # noqa: E402
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.main import app  # noqa: E402
+from app.redis_client import (  # noqa: E402
+    get_screen_context,
+    put_screen_images,
+    set_screen_context,
+    set_screen_current_text,
+    set_screen_references,
+)
+from app.services.screen_memory import ScreenReference, compose_screen_context  # noqa: E402
+from tests.fake_redis import install_fake_redis  # noqa: E402
+
+_JPEG = b"\xff\xd8\xff\xe0" + b"fakejpegbody"
+
+
+@pytest.fixture
+def viewer(monkeypatch):
+    fake = install_fake_redis(monkeypatch)
+    return TestClient(app), fake
+
+
+def _seed(sid="s1"):
+    async def go():
+        (key,) = await put_screen_images(
+            sid, [base64.b64encode(_JPEG).decode()], ["Figure 1 (bar chart: Sales)"]
+        )
+        refs = [
+            ScreenReference(id="legacy1", text="Old passage text"),
+            ScreenReference(id="ref2", text="Chart passage", image_keys=[key], saved_at=5.0),
+        ]
+        await set_screen_references(sid, refs)
+        await set_screen_current_text(sid, "Current screen")
+        await set_screen_context(sid, compose_screen_context("Current screen", refs))
+        return key
+
+    return go()
+
+
+def test_list_returns_legacy_and_object_refs(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    body = client.get("/api/vision/screen-context", params={"session_id": "s1"}).json()
+    assert [r["id"] for r in body["references"]] == ["legacy1", "ref2"]
+    assert body["references"][0]["images"] == []
+    assert body["references"][1] == {
+        "id": "ref2",
+        "text": "Chart passage",
+        "images": [{"key": key, "label": "Figure 1 (bar chart: Sales)"}],
+        "saved_at": 5.0,
+    }
+
+
+def test_image_endpoint_serves_bytes_and_404s(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    r = client.get(f"/api/vision/screen-image/{key}", params={"session_id": "s1"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.content == _JPEG
+    assert client.get("/api/vision/screen-image/nope", params={"session_id": "s1"}).status_code == 404
+
+
+def test_delete_removes_passage_image_and_text(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    r = client.delete("/api/vision/screen-reference/ref2", params={"session_id": "s1"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "count": 1}
+    assert client.get(f"/api/vision/screen-image/{key}", params={"session_id": "s1"}).status_code == 404
+    ctx = asyncio.run(get_screen_context("s1"))
+    assert ctx is not None
+    assert "Chart passage" not in ctx
+    assert "Old passage text" in ctx
+    assert "Current screen" in ctx
+    missing = client.delete("/api/vision/screen-reference/zzz", params={"session_id": "s1"})
+    assert missing.status_code == 404
+
+
+def test_screen_images_are_never_cached(viewer):
+    import asyncio
+
+    client, _ = viewer
+    key = asyncio.run(_seed())
+    r = client.get(f"/api/vision/screen-image/{key}", params={"session_id": "s1"})
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+    assert r.headers["pragma"] == "no-cache"
+
+
+def test_image_key_must_be_32_hex_chars(viewer):
+    import asyncio
+
+    client, fake = viewer
+    key = asyncio.run(_seed())
+    # Only image keys we mint (32 lowercase hex) are looked up at all.
+    fake.store["session:s1:screen_image:notakey"] = base64.b64encode(_JPEG).decode()
+    for bad in ("notakey", key.upper(), key[:-1], key + "0", "*"):
+        r = client.get(f"/api/vision/screen-image/{bad}", params={"session_id": "s1"})
+        assert r.status_code == 404, bad
+
+
+def test_viewer_endpoints_reject_malformed_session_ids(viewer):
+    import asyncio
+
+    client, fake = viewer
+    asyncio.run(_seed())
+    before = dict(fake.store)
+    for sid in ("*", "s?", "s1:screen_image", "a b", "x" * 65, ""):
+        params = {"session_id": sid}
+        assert client.delete("/api/vision/screen-context", params=params).status_code == 422
+        assert client.get("/api/vision/screen-context", params=params).status_code == 422
+    assert fake.store == before
+    # A real (uuid4) session id is accepted.
+    sid = "0b7d3c8e-4a52-4f0e-9a1d-3f6c2b1e9d70"
+    assert client.get("/api/vision/screen-context", params={"session_id": sid}).status_code == 200

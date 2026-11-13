@@ -104,7 +104,7 @@ produce sub-threshold confidence — prefer **`VISION_PROVIDER=openai`** (gpt-4o
 ### Claude transport (`CLAUDE_TRANSPORT`)
 
 Every non-agent Claude call — answers, instant solves, vision, question
-detection, function calling, `/api/chat` — picks its transport in one place,
+detection, `/api/chat` — picks its transport in one place,
 `services/claude_api.py: claude_transport()`:
 
 | `CLAUDE_TRANSPORT` | API key set      | Only subscription token |
@@ -116,7 +116,7 @@ detection, function calling, `/api/chat` — picks its transport in one place,
 Live Copilot answers use their own model, `ANTHROPIC_ANSWER_MODEL` (default
 `claude-sonnet-5-5`): measured on the real answer prompt it starts streaming in
 ~1.0 s median versus ~2.3 s for Opus 5.5, at half the price, with equivalent
-answers. `ANTHROPIC_MODEL` (Opus 5.5) keeps coding solves and function calling.
+answers. `ANTHROPIC_MODEL` (Opus 5.5) keeps coding solves.
 
 The Agent is unaffected: it always drives the CLI and, when a subscription
 token exists, strips `ANTHROPIC_API_KEY` from its env so it can't fall back to

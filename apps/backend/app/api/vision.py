@@ -1,25 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 import base64 as _base64
+import hashlib
+import re
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field, model_validator
 
 from app import session_bus
 from app.logging import log
 from app.models.coding import ExtractedProblem
 from app.prompts.coding_extraction import EXTRACTION_MIN_CONFIDENCE
-from app.prompts.function_call_extraction import FUNCTION_CALL_EXTRACTION_MIN_CONFIDENCE
 from app.redis_client import (
     add_seen_problem_fingerprint,
+    clear_screen_state,
+    get_current_screen_images,
+    get_screen_current_text,
+    get_screen_generation,
+    get_screen_image,
+    get_screen_image_label,
     get_screen_references,
+    prune_screen_images,
+    put_screen_images,
     set_current_problem,
+    set_current_screen_images,
     set_screen_context,
+    set_screen_current_text,
     set_screen_references,
 )
-from app.services import function_call_extraction as fc_extraction
-from app.services.claude_api import normalize_claude_model
+from app.services.claude_api import image_media_type, normalize_claude_model
 from app.services.coding_extraction import (
     arm_cooldown,
     cached_result,
@@ -29,15 +42,30 @@ from app.services.coding_extraction import (
     problem_fingerprint,
     store_result,
 )
+from app.services.screen_memory import (  # noqa: F401 - re-exported
+    MAX_REFERENCE_CHARS,
+    REFERENCE_HEADER,
+    compose_screen_context,
+    merge_references,
+    reference_saved_event,
+)
 from app.settings import settings
 
 router = APIRouter(prefix="/api/vision")
+
+# Session ids are minted as uuid4 strings by the web client; allow that
+# alphabet (letters, digits, - and _) and nothing that could reach another
+# session's Redis keys or act as a glob (`*`, `?`, `[`, `:`).
+SESSION_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+SessionId = Query(pattern=SESSION_ID_PATTERN)
+# Screenshot keys are image_key() digests: 32 lowercase hex characters.
+_IMAGE_KEY = re.compile(r"^[0-9a-f]{32}$")
 
 
 class ExtractRequest(BaseModel):
     image_base64: str | None = Field(default=None, min_length=16)
     images_base64: list[str] | None = None
-    session_id: str = Field(min_length=1)
+    session_id: str = Field(pattern=SESSION_ID_PATTERN)
     force: bool = False
     # Optional override of the provider used for vision extraction. When
     # absent the service resolves it from the session's default_provider,
@@ -47,6 +75,12 @@ class ExtractRequest(BaseModel):
     claude_model: str | None = None
     scan_cropped: bool = False
     scan_incomplete: bool = False
+    # Guided-scan id shared by every request of one scan. `speculative` reads
+    # run while the user is still scrolling: they answer fully visible
+    # questions early, and the final request reuses their result when it
+    # covers the same views.
+    scan_id: str | None = Field(default=None, max_length=64)
+    speculative: bool = False
 
     @model_validator(mode="after")
     def exactly_one_source(self) -> "ExtractRequest":
@@ -81,6 +115,54 @@ def decode_images(encoded_images: list[str]) -> list[bytes]:
     return decoded
 
 
+def scan_digest(images: list[bytes]) -> str:
+    """Identity of an ordered set of scan views."""
+    digest = hashlib.sha256()
+    for image in images:
+        digest.update(len(image).to_bytes(8, "big"))
+        digest.update(image)
+    return digest.hexdigest()
+
+
+class ScanExtractionCache:
+    """Shares one vision read per (session, views) between the speculative
+    request made while the user scrolls and the final request at the end.
+    In-process and small: entries only need to live for the length of a scan.
+    A failed read is dropped so the next request retries it."""
+
+    def __init__(self, max_entries: int = 16) -> None:
+        self._max_entries = max_entries
+        self._tasks: OrderedDict[tuple[str, str], asyncio.Task[ExtractedProblem]] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+    async def run(
+        self,
+        key: tuple[str, str],
+        extract: Callable[[], Awaitable[ExtractedProblem]],
+    ) -> ExtractedProblem:
+        task = self._tasks.get(key)
+        if task is None:
+            task = asyncio.ensure_future(extract())
+            self._tasks[key] = task
+            while len(self._tasks) > self._max_entries:
+                self._tasks.popitem(last=False)
+        try:
+            # shield: a cancelled caller (client went away) must not cancel
+            # the read another request is waiting on.
+            problem = await asyncio.shield(task)
+        except Exception:
+            if self._tasks.get(key) is task:
+                del self._tasks[key]
+            raise
+        # Callers mutate their copy (e.g. mark_scan_incomplete).
+        return problem.model_copy(deep=True)
+
+
+_scan_extractions = ScanExtractionCache()
+
+
 def mark_scan_incomplete(problem: ExtractedProblem) -> ExtractedProblem:
     """Make an extraction partial when capture ended at a hard scan limit."""
     problem.completeness = "partial"
@@ -88,44 +170,6 @@ def mark_scan_incomplete(problem: ExtractedProblem) -> ExtractedProblem:
     if marker not in problem.missing_sections:
         problem.missing_sections.append(marker)
     return problem
-
-
-# Budget for remembered passages / preambles. Oldest are dropped first; the
-# whole screen context is capped at 20k chars in redis_client.
-MAX_REFERENCE_CHARS = 12_000
-REFERENCE_HEADER = (
-    "Earlier reference material on screen (passages / preambles the questions may refer to):"
-)
-
-
-def _norm(text: str) -> str:
-    return " ".join(text.split()).lower()
-
-
-def merge_references(references: list[str], new: str) -> list[str]:
-    """Add a newly seen passage, dropping exact repeats and shorter earlier
-    reads of the same passage (a rescan that captured more of it)."""
-    new = new.strip()[:MAX_REFERENCE_CHARS]
-    if not new:
-        return list(references)
-    new_norm = _norm(new)
-    if any(new_norm in _norm(ref) for ref in references):
-        return list(references)
-    merged = [ref for ref in references if _norm(ref) not in new_norm] + [new]
-    while len(merged) > 1 and sum(len(ref) for ref in merged) > MAX_REFERENCE_CHARS:
-        merged.pop(0)
-    return merged
-
-
-def compose_screen_context(current: str, references: list[str]) -> str:
-    """Current screen first (most relevant), then earlier reference material
-    that isn't already visible on the current screen."""
-    current_norm = _norm(current)
-    earlier = [ref for ref in references if _norm(ref) not in current_norm]
-    if not earlier:
-        return current
-    block = REFERENCE_HEADER + "\n\n" + "\n\n---\n\n".join(earlier)
-    return f"{current}\n\n{block}" if current else block
 
 
 def should_emit_screen_question(problem: ExtractedProblem) -> bool:
@@ -137,16 +181,113 @@ def should_emit_screen_question(problem: ExtractedProblem) -> bool:
     )
 
 
-def screen_question_event(problem: ExtractedProblem, *, is_scan: bool) -> dict[str, Any]:
+def screen_question_event(
+    problem: ExtractedProblem,
+    *,
+    is_scan: bool,
+    speculative: bool = False,
+    scan_id: str | None = None,
+) -> dict[str, Any]:
     return {
         "type": "screen_question_detected",
         "question": problem.question,
         "questions": problem.questions,
         "screen_code": problem.screen_code,
-        "completeness": problem.completeness,
+        # Mid-scan the page isn't fully read yet, whatever the model says.
+        "completeness": "partial" if speculative else problem.completeness,
         "missing_sections": problem.missing_sections,
         "source": "guided_scan" if is_scan else "single_frame",
+        "speculative": speculative,
+        "scan_id": scan_id,
     }
+
+
+async def update_screen_images(
+    sid: str,
+    encoded_images: list[str],
+    problem: ExtractedProblem,
+    *,
+    speculative: bool,
+) -> list[str]:
+    """Keep screenshots of frames with charts/diagrams as the current screen's
+    images. A text-only final read clears them; a speculative one leaves them.
+    Returns the stored keys for this read."""
+    frames = problem.labelled_visual_frames(len(encoded_images))
+    if not frames:
+        if not speculative:
+            old = await get_current_screen_images(sid)
+            await set_current_screen_images(sid, [])
+            await prune_screen_images(sid, old)
+        return []
+    old = await get_current_screen_images(sid)
+    keys = await put_screen_images(
+        sid, [encoded_images[i] for i, _ in frames], [label for _, label in frames]
+    )
+    await set_current_screen_images(sid, keys)
+    await prune_screen_images(sid, old)
+    return keys
+
+
+@router.delete("/screen-context")
+async def clear_screen_context(session_id: str = SessionId) -> dict[str, bool]:
+    """Forget remembered passages and the current screen text, e.g. when the
+    user moves on to a different assessment."""
+    await clear_screen_state(session_id)
+    return {"ok": True}
+
+
+@router.get("/screen-context")
+async def list_screen_references(session_id: str = SessionId) -> dict[str, Any]:
+    """Remembered passages for the viewer, oldest first."""
+    refs = await get_screen_references(session_id)
+    return {
+        "references": [
+            {
+                "id": r.id,
+                "text": r.text,
+                "images": [
+                    {"key": key, "label": await get_screen_image_label(session_id, key)}
+                    for key in r.image_keys
+                ],
+                "saved_at": r.saved_at,
+            }
+            for r in refs
+        ]
+    }
+
+
+@router.get("/screen-image/{key}")
+async def get_screen_image_bytes(key: str, session_id: str = SessionId) -> Response:
+    if not _IMAGE_KEY.match(key):
+        raise HTTPException(status_code=404, detail="Image not found")
+    encoded = await get_screen_image(session_id, key)
+    if not encoded:
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        data = _base64.b64decode(encoded)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Image not found") from None
+    # Screenshots of an assessment: never written to a browser/disk cache.
+    return Response(
+        content=data,
+        media_type=image_media_type(data),
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
+@router.delete("/screen-reference/{ref_id}")
+async def delete_screen_reference(ref_id: str, session_id: str = SessionId) -> dict[str, Any]:
+    """Forget one remembered passage and its screenshots."""
+    refs = await get_screen_references(session_id)
+    removed = next((r for r in refs if r.id == ref_id), None)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="Passage not found")
+    remaining = [r for r in refs if r.id != ref_id]
+    await set_screen_references(session_id, remaining)
+    await prune_screen_images(session_id, removed.image_keys)
+    current = await get_screen_current_text(session_id)
+    await set_screen_context(session_id, compose_screen_context(current, remaining))
+    return {"ok": True, "count": len(remaining)}
 
 
 @router.post("/extract")
@@ -200,13 +341,26 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
                     "image_hash": image_hash,
                 }
 
-    try:
-        problem = await extract_problem(
+    speculative = is_scan and request.speculative
+    # A Clear all (or a new watch, which clears) while the model reads must
+    # win: if the generation moved by the time we'd save, this read is stale.
+    generation = await get_screen_generation(request.session_id)
+
+    async def run_extraction() -> ExtractedProblem:
+        return await extract_problem(
             image_base64 if not is_scan else image_list,
             request.session_id,
             provider=request.provider,
             claude_model=normalize_claude_model(request.claude_model),
         )
+
+    try:
+        if is_scan:
+            problem = await _scan_extractions.run(
+                (request.session_id, scan_digest(image_list)), run_extraction
+            )
+        else:
+            problem = await run_extraction()
     except Exception as exc:  # noqa: BLE001 - surface the provider error to the client
         log.error("vision.extract_error", session_id=request.session_id, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)[:500]) from exc
@@ -226,12 +380,27 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         )
         if part
     )
+    if await get_screen_generation(request.session_id) != generation:
+        log.info("vision.extract_discarded_after_clear", session_id=request.session_id)
+        return {
+            "problem": problem.model_dump(),
+            "emitted": False,
+            "cached": False,
+            "image_hash": image_hash,
+            "skipped": "cleared",
+        }
     # Always replace the prior *current-screen* context. Keeping the previous
     # value when a new screen has no extractable question/code can make a
     # spoken question get answered against stale content from an earlier
     # screen. Passages/preambles are the exception: questions are asked from
     # them after the user has scrolled on, so they are remembered separately
     # and appended as clearly-labelled earlier reference material.
+    visual_keys = await update_screen_images(
+        request.session_id,
+        [request.image_base64] if request.image_base64 is not None else encoded_images,
+        problem,
+        speculative=speculative,
+    )
     references = await get_screen_references(request.session_id)
     if (
         problem.is_reference_material
@@ -239,21 +408,42 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         and problem.visible_context
         and problem.confidence >= 0.5
     ):
-        updated = merge_references(references, problem.visible_context)
+        updated = merge_references(references, problem.visible_context, visual_keys)
         if updated != references:
+            kept = {k for ref in updated for k in ref.image_keys}
+            displaced = [k for ref in references for k in ref.image_keys if k not in kept]
             references = updated
             await set_screen_references(request.session_id, references)
+            await prune_screen_images(request.session_id, displaced)
             log.info("vision.reference_saved", session_id=request.session_id, count=len(references))
+            await session_bus.publish(
+                request.session_id, reference_saved_event(references, problem.visible_context)
+            )
     current_screen = "\n\n".join(
         part for part in (screen_text or None, problem.screen_code) if part
     )
+    await set_screen_current_text(request.session_id, current_screen)
     await set_screen_context(request.session_id, compose_screen_context(current_screen, references))
 
     emitted = False
     if should_emit_screen_question(problem):
         emitted = await session_bus.publish(
-            request.session_id, screen_question_event(problem, is_scan=is_scan)
+            request.session_id,
+            screen_question_event(
+                problem, is_scan=is_scan, speculative=speculative, scan_id=request.scan_id
+            ),
         )
+    if speculative:
+        # A coding problem can still be cut off mid-scroll; leave solving to
+        # the final request so a truncated problem never opens a tab.
+        return {
+            "problem": problem.model_dump(),
+            "emitted": emitted,
+            "cached": False,
+            "image_hash": image_hash,
+            "source": "guided_scan",
+            "speculative": True,
+        }
     if (
         problem.is_coding_problem
         and problem.confidence >= EXTRACTION_MIN_CONFIDENCE
@@ -301,70 +491,11 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
             has_statement=bool(problem.problem_statement),
         )
 
-    # Function-calling assessments aren't coding problems, so the coding
-    # detector rejects them (is_coding_problem=false → emitted=false). When
-    # that happens, give the frame a second look for a "pick the tool + build
-    # the payload" test. Runs ONLY here — coding frames never pay for it.
-    function_call: dict[str, Any] | None = None
-    if not emitted and not is_scan and settings.function_call_detection_enabled:
-        function_call = await _maybe_detect_function_call(
-            request.session_id, image_base64, image_hash, force=request.force or is_scan
-        )
-
     return {
         "problem": problem.model_dump(),
         "emitted": emitted,
-        "function_call": function_call,
         "cached": False,
         "image_hash": image_hash,
         "source": "guided_scan" if is_scan else "single_frame",
     }
 
-
-async def _maybe_detect_function_call(
-    session_id: str, image_base64: str, image_hash: str, *, force: bool
-) -> dict[str, Any] | None:
-    """Second-pass detection for function-calling assessments. Returns a small
-    summary (`{detected, emitted, fingerprint}`) or None when detection was
-    skipped/failed. Best-effort: never raises into the vision response — a
-    coding detection already succeeded or legitimately found nothing, and a FC
-    detection error must not 502 the frame."""
-    # Own dedup cache + cooldown (separate Redis namespace from coding) so we
-    # don't re-run the model every frame while the same assessment sits on
-    # screen. A force re-extract bypasses both.
-    if not force:
-        if await fc_extraction.cached_result(session_id, image_hash) is not None:
-            return None
-        if settings.vision_cooldown_s > 0 and await fc_extraction.cooldown_detection(session_id):
-            return None
-
-    try:
-        fc = await fc_extraction.extract_function_call(image_base64, session_id)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("fc_extraction.failed", session_id=session_id, error=str(exc)[:200])
-        return None
-
-    await fc_extraction.store_result(session_id, image_hash, fc)
-
-    if not (fc.is_function_call and fc.confidence >= FUNCTION_CALL_EXTRACTION_MIN_CONFIDENCE):
-        log.info(
-            "fc.not_emitted",
-            session_id=session_id,
-            is_function_call=fc.is_function_call,
-            confidence=fc.confidence,
-        )
-        return None
-
-    if settings.vision_cooldown_s > 0:
-        await fc_extraction.arm_cooldown(session_id, fc)
-    fingerprint = fc_extraction.function_call_fingerprint(fc)
-    emitted = await session_bus.publish(
-        session_id,
-        {
-            "type": "function_call_detected",
-            "assessment": fc.model_dump(),
-            "fingerprint": fingerprint,
-        },
-    )
-    log.info("fc.emitted", session_id=session_id, fingerprint=fingerprint, emitted=emitted)
-    return {"detected": True, "emitted": emitted, "fingerprint": fingerprint}

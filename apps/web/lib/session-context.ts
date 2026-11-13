@@ -220,6 +220,56 @@ export interface SessionUsageSummary {
  * desktop-driven /api/vision/extract calls (which don't otherwise know the
  * user's current pick) honor it.
  */
+/** Forget the session's remembered passages and current screen text. */
+export async function clearScreenContext(sessionId: string): Promise<boolean> {
+  if (!sessionId) return false;
+  try {
+    const res = await fetch(
+      `${BACKEND_HTTP_URL}/api/vision/screen-context?session_id=${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** A kept screenshot; `label` names the figures it shows (null if unlabelled). */
+export type SavedImage = { key: string; label: string | null };
+
+export type SavedPassage = { id: string; text: string; images: SavedImage[]; saved_at: number };
+
+/** The session's remembered passages, oldest first; null when unreachable. */
+export async function fetchSavedPassages(sessionId: string): Promise<SavedPassage[] | null> {
+  if (!sessionId) return null;
+  try {
+    const res = await fetch(
+      `${BACKEND_HTTP_URL}/api/vision/screen-context?session_id=${encodeURIComponent(sessionId)}`,
+    );
+    if (!res.ok) return null;
+    return ((await res.json()) as { references: SavedPassage[] }).references;
+  } catch {
+    return null;
+  }
+}
+
+export async function removeSavedPassage(sessionId: string, id: string): Promise<boolean> {
+  if (!sessionId || !id) return false;
+  try {
+    const res = await fetch(
+      `${BACKEND_HTTP_URL}/api/vision/screen-reference/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function screenImageUrl(sessionId: string, key: string): string {
+  return `${BACKEND_HTTP_URL}/api/vision/screen-image/${encodeURIComponent(key)}?session_id=${encodeURIComponent(sessionId)}`;
+}
+
 export async function patchSessionProvider(
   sessionId: string,
   provider: AnswerProvider,

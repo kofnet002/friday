@@ -192,6 +192,11 @@ export type AnswerClientMessage =
       /** Started before the question was confirmed; the server persists it
        *  only after a matching `commit`. */
       speculative?: boolean;
+      /** Claude model for this answer when provider is 'claude' — set for
+       *  questions read off the screen so they use the Screen panel's pick. */
+      claude_model?: ClaudeModel;
+      /** Question read off the screen or a follow-up in such a thread. */
+      from_screen?: boolean;
     }
   /** Confirms a speculative answer so the server saves it. `question` is
    *  the confirmed wording, saved instead of the raw turn text the answer
@@ -342,6 +347,19 @@ export interface ScreenQuestionDetectedEvent {
   completeness: 'complete' | 'partial' | 'uncertain';
   missing_sections: string[];
   source: 'single_frame' | 'guided_scan';
+  /** Read mid-scan from the views captured so far; more may follow. */
+  speculative?: boolean;
+  /** Shared by every event of one guided scan. */
+  scan_id?: string | null;
+}
+
+/** A passage / preamble / table was remembered as reference material. */
+export interface ScreenReferenceSavedEvent {
+  type: 'screen_reference_saved';
+  /** How many passages are remembered for this session. */
+  count: number;
+  /** First ~120 characters of the passage just saved. */
+  preview: string;
 }
 
 /** Operating modes for /ws/coding-solution. `solve` is the existing
@@ -438,76 +456,7 @@ export type CodingSolutionServerMessage =
   | { type: 'agent_solution'; text: string; provisional?: boolean }
   | CodingProblemDetectedEvent
   | ScreenQuestionDetectedEvent
-  | FunctionCallDetectedEvent;
-
-// ─── function-calling assessments ────────────────────────────────────────────
-// A "Function Calling Test": given a task and a catalog of tools, pick the
-// correct tool and construct its argument payload. Detected on-screen by vision
-// (like a coding problem) or entered by hand; solved + self-verified via the
-// REST endpoints under /api/function-call.
-
-/** One callable tool. `parameters` (OpenAI shape) or `input_schema`
- *  (Anthropic shape) is a JSON-Schema object describing the arguments. */
-export interface FunctionCallToolSpec {
-  name: string;
-  description?: string | null;
-  parameters?: Record<string, unknown> | null;
-  input_schema?: Record<string, unknown> | null;
-}
-
-/** Mirrors backend app.models.function_calling.ExtractedFunctionCall. */
-export interface ExtractedFunctionCall {
-  is_function_call: boolean;
-  title?: string | null;
-  question?: string | null;
-  tools?: FunctionCallToolSpec[] | null;
-  confidence: number;
-}
-
-/** Pushed over /ws/coding-solution when vision detects a function-calling
- *  assessment on a frame the coding detector rejected. */
-export interface FunctionCallDetectedEvent {
-  type: 'function_call_detected';
-  assessment: ExtractedFunctionCall;
-  fingerprint: string;
-}
-
-/** One structural self-verify check. `kind` ∈ tool-exists | unknown-tool |
- *  missing-required | unexpected-param | type-mismatch. */
-export interface FunctionCallCheckResult {
-  ok: boolean;
-  kind: string;
-  detail: string;
-  field?: string | null;
-}
-
-/** Structural self-verify of a predicted call against the tool catalog.
- *  `ran` false = skipped (no tool named / empty catalog). */
-export interface FunctionCallCheck {
-  ran: boolean;
-  ok: boolean;
-  skip_reason?: string | null;
-  checks: FunctionCallCheckResult[];
-}
-
-/** Graded comparison against an answer key (present only when the request
- *  supplied expected_tool). */
-export interface FunctionCallGrade {
-  correct: boolean;
-  tool_match: boolean;
-  payload_match: boolean;
-  expected_tool: string;
-  predicted_tool?: string | null;
-  payload_diff?: string | null;
-}
-
-/** Response of POST /api/function-call/solve. */
-export interface FunctionCallSolveResponse {
-  prediction: { tool: string | null; arguments: Record<string, unknown> };
-  model: string;
-  check: FunctionCallCheck;
-  grade?: FunctionCallGrade;
-}
+  | ScreenReferenceSavedEvent;
 
 // ─── project context library ─────────────────────────────────────────────────
 // Mirrors app.api.projects. Projects are library-level (not per session);

@@ -131,3 +131,154 @@ async def test_live_answers_use_answer_model(monkeypatch: pytest.MonkeyPatch) ->
     out = [t async for t in answer_mod._stream_anthropic("sys", "q", "q", ())]
     assert out == ["ok"] and seen == ["claude-sonnet-5-5"]
     assert answer_mod.claude_answer_model() == "claude-sonnet-5-5"
+
+
+def test_content_captions_each_image_in_order() -> None:
+    from app.services.claude_api import _content
+
+    images = [(b"one", "image/png"), (b"two", "image/jpeg")]
+    blocks = _content("Question?", images, captions=["Figure 1 (bar chart)", ""])
+    assert isinstance(blocks, list)
+    assert [b["type"] for b in blocks] == ["text", "image", "text", "image", "text"]
+    assert blocks[0]["text"] == "Screenshot 1 of 2: Figure 1 (bar chart)"
+    assert blocks[2]["text"] == "Screenshot 2 of 2: unlabelled"
+    assert blocks[-1]["text"] == "Question?"
+    # No captions: images then text, as before.
+    plain = _content("Q", images)
+    assert isinstance(plain, list)
+    assert [b["type"] for b in plain] == ["image", "image", "text"]
+
+
+async def test_answer_images_reach_the_api_with_their_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import answer as answer_mod
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(**kw: object) -> AsyncIterator[str]:
+        seen.update(kw)
+        yield "ok"
+
+    _creds(monkeypatch, key="sk", token="", mode="auto")
+    monkeypatch.setattr(answer_mod, "stream_claude_api", fake_stream)
+    out = [
+        t
+        async for t in answer_mod._stream_anthropic(
+            "sys", "q", "q", (), images=[b"\x89PNG\r\n\x1a\nx"], image_labels=["Figure 2"]
+        )
+    ]
+    assert out == ["ok"]
+    assert seen["image_captions"] == ["Figure 2"]
+
+
+async def test_unlabelled_images_are_sent_without_captions(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import answer as answer_mod
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(**kw: object) -> AsyncIterator[str]:
+        seen.update(kw)
+        yield "ok"
+
+    _creds(monkeypatch, key="sk", token="", mode="auto")
+    monkeypatch.setattr(answer_mod, "stream_claude_api", fake_stream)
+    png = b"\x89PNG\r\n\x1a\nx"
+    for labels in (None, ["", " "]):
+        seen.clear()
+        _ = [
+            t
+            async for t in answer_mod._stream_anthropic(
+                "sys", "q", "q", (), images=[png, png], image_labels=labels
+            )
+        ]
+        assert seen["image_captions"] is None
+
+
+async def test_unlabelled_images_on_the_cli_get_no_file_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import answer as answer_mod
+    from app.services import claude_cli
+
+    seen: dict[str, object] = {}
+
+    async def fake_cli(**kw: object) -> str:
+        seen.update(kw)
+        return "ok"
+
+    _creds(monkeypatch, key="", token="oat", mode="auto")
+    monkeypatch.setattr(claude_cli, "run_claude_cli_with_images", fake_cli)
+    png = b"\x89PNG\r\n\x1a\nx"
+    out = [
+        t
+        async for t in answer_mod._stream_anthropic(
+            "sys", "q", "q", (), images=[png], image_labels=[""]
+        )
+    ]
+    assert out == ["ok"] and seen["labels"] is None
+    seen.clear()
+    _ = [
+        t
+        async for t in answer_mod._stream_anthropic(
+            "sys", "q", "q", (), images=[png, png], image_labels=["Figure 1", ""]
+        )
+    ]
+    assert seen["labels"] == ["Figure 1", ""]
+
+
+async def test_answer_effort_reaches_the_api_and_defaults_to_the_answer_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.prompts.answer_generation import AnswerContext
+    from app.services import answer as answer_mod
+
+    efforts: list[object] = []
+
+    async def fake_stream(**kw: object) -> AsyncIterator[str]:
+        efforts.append(kw["effort"])
+        yield "ok"
+
+    _creds(monkeypatch, key="sk", token="", mode="auto")
+    monkeypatch.setattr(settings, "anthropic_effort", "low")
+    monkeypatch.setattr(answer_mod, "stream_claude_api", fake_stream)
+    monkeypatch.setattr(answer_mod, "_provider_chain", lambda _p: ["claude"])
+    for effort in ("medium", None):
+        _ = [
+            t
+            async for t in answer_mod.stream_answer(
+                "claude", "Q1?", AnswerContext(screen_context="page"), effort=effort
+            )
+        ]
+    assert efforts == ["medium", "low"]
+
+
+async def test_screen_effort_reaches_the_cli_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import answer as answer_mod
+    from app.services import claude_cli
+
+    seen: list[object] = []
+
+    async def fake_text(**kw: object) -> AsyncIterator[str]:
+        seen.append(kw.get("effort"))
+        yield "ok"
+
+    async def fake_images(**kw: object) -> str:
+        seen.append(kw.get("effort"))
+        return "ok"
+
+    _creds(monkeypatch, key="", token="oat", mode="auto")
+    monkeypatch.setattr(claude_cli, "stream_claude_cli_text", fake_text)
+    monkeypatch.setattr(claude_cli, "run_claude_cli_with_images", fake_images)
+    png = b"\x89PNG\r\n\x1a\nx"
+    _ = [t async for t in answer_mod._stream_anthropic("s", "q", "q", (), effort="medium")]
+    _ = [
+        t
+        async for t in answer_mod._stream_anthropic(
+            "s", "q", "q", (), images=[png], effort="medium"
+        )
+    ]
+    _ = [t async for t in answer_mod._stream_anthropic("s", "q", "q", ())]
+    assert seen == ["medium", "medium", None]

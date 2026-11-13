@@ -1,12 +1,16 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { createContext, useRef, type ReactNode, type RefObject } from 'react';
 import { Eye, Headphones, Loader2, MonitorUp, Play } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 export type AssistView = 'answers' | 'screen';
+
+/** The Assist workspace's scroll container, for content that follows its
+ *  own streaming text (the Screen tab's answers). */
+export const AssistScrollContext = createContext<RefObject<HTMLDivElement | null> | null>(null);
 
 interface AssistPanelProps {
   view: AssistView;
@@ -30,6 +34,7 @@ export function AssistPanel({
   privacyMode,
   children,
 }: AssistPanelProps) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const bothSourcesLive = audioStatus === 'live' && screenStatus === 'live';
   const hasPausedSource = audioStatus === 'paused' || screenStatus === 'paused';
   const startLabel = hasPausedSource
@@ -45,7 +50,7 @@ export function AssistPanel({
   ];
 
   return (
-    <section aria-label="Assist workspace" className="flex h-full min-h-0 flex-col gap-3">
+    <section aria-label="Assist workspace" className="relative flex h-full min-h-0 flex-col gap-3">
       <header
         className={cn(
           'flex flex-wrap items-center justify-between gap-3 border-b pb-3 transition-[border-color,box-shadow] duration-300 motion-reduce:transition-none',
@@ -138,9 +143,10 @@ export function AssistPanel({
 
       <div
         key={view}
+        ref={scrollRef}
         className="min-h-0 flex-1 overflow-auto animate-in fade-in slide-in-from-bottom-1 duration-200 motion-reduce:animate-none"
       >
-        {children}
+        <AssistScrollContext.Provider value={scrollRef}>{children}</AssistScrollContext.Provider>
       </div>
     </section>
   );

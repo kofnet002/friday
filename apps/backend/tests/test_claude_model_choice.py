@@ -31,3 +31,11 @@ def test_selected_claude_model_wins_for_solves_and_refines():
 def test_every_choice_is_priced():
     for model in CLAUDE_MODEL_CHOICES:
         assert model in PRICING
+
+
+def test_screen_answers_can_use_the_screen_panel_model():
+    from app.services.answer import claude_answer_model
+    from app.settings import settings
+
+    assert claude_answer_model().endswith(settings.anthropic_answer_model)
+    assert claude_answer_model("claude-haiku-5-5").endswith("claude-haiku-5-5")

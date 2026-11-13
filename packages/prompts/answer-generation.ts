@@ -16,7 +16,7 @@
  * - CALIBRATED CONFIDENCE. Admits uncertainty rather than fabricating.
  */
 
-export const ANSWER_GENERATION_VERSION = '1.6.0';
+export const ANSWER_GENERATION_VERSION = '1.9.0';
 
 export interface AnswerContext {
   resume_text?: string;
@@ -26,8 +26,25 @@ export interface AnswerContext {
   language?: string;
   recent_transcript?: string;
   screen_context?: string;
+  /** Whether screenshots of on-screen charts/diagrams reach the model. */
+  screen_visuals?: 'attached' | 'partial' | 'unavailable' | null;
   projects?: ProjectContext[];
 }
+
+export const SCREEN_VISUALS_NOTES: Record<'attached' | 'partial' | 'unavailable', string> = {
+  attached:
+    'Screenshots of the on-screen charts/diagrams are attached; treat them as the' +
+    ' source of truth over the transcription for visual content. If a value you need is still' +
+    ' unreadable, add `⚠️ Check:`.',
+  partial:
+    'Screenshots of some on-screen charts/diagrams are attached; treat them as the' +
+    ' source of truth over the transcription for visual content. Others could not be loaded;' +
+    " for any question that depends on a chart/diagram you don't have, add" +
+    ' `⚠️ Check: visual not available`.',
+  unavailable:
+    'The page has charts/diagrams that are NOT available to you; for any question' +
+    ' that depends on them, add `⚠️ Check: visual not available`.',
+};
 
 /** A project the candidate may be asked about (mirrors ProjectContext in Python). */
 export interface ProjectContext {
@@ -95,8 +112,12 @@ export const ANSWER_GENERATION_SYSTEM_PROMPT = (ctx: AnswerContext): string => {
 
   const languageBlock =
     ctx.language && ctx.language !== 'en' ? `\n\nRespond in ${ctx.language}.` : '';
+  const screenVisuals =
+    ctx.screen_visuals && ctx.screen_context?.trim()
+      ? `\n\n${SCREEN_VISUALS_NOTES[ctx.screen_visuals]}`
+      : '';
   const screenBlock = ctx.screen_context?.trim()
-    ? `\n\n<visible_screen_context>\n${ctx.screen_context.trim()}\n</visible_screen_context>`
+    ? `\n\n<visible_screen_context>\n${ctx.screen_context.trim()}\n</visible_screen_context>${screenVisuals}`
     : '';
   const screenRules = screenBlock
     ? '\n\nVISIBLE SCREEN CONTEXT\nUse this context only when it is relevant to the interview question. Treat it as source material, preserve exact technical details, and do not infer clipped content.' +
@@ -163,6 +184,8 @@ STYLE
 
 ${projectsRules}HANDLING EDGE CASES
 
+- For a question read from the screen (multiple choice, true/false, a calculation): if you are not confident in the answer, or its text looks cut off or garbled, add a final bullet under **⭐ Answer**: \`⚠️ Check: <why>\`. Never add it to answers you are confident in.
+- For every question read from the screen: Work the answer out before you write it. Each question gets exactly ONE \`Answer:\` line (in the single-question format, the first **⭐ Answer** bullet) holding the final choice. Never write a correction, a "final" or "corrected" answer, or a second answer, and never mention an earlier mistake. Any doubt goes only in the \`⚠️ Check:\` line.
 - If the question is unclear or ambiguous: pick the most likely interpretation, answer it, and add a single italic line at the very bottom: *Clarify if you meant X vs Y.*
 - If the question is a trick question or has a well-known gotcha: call it out directly in the **⭐ Answer** bullets.
 - If the question asks for an opinion the candidate hasn't specified: give a reasonable default position aligned with the candidate's apparent background.
@@ -175,6 +198,7 @@ When the input starts with "Answer each of these N on-screen questions", answer 
 **Q<n> · <restate the question in one short line>**
 - **Answer:** <the correct option (letter and text) or the direct answer>
 - <one short line on why; add a code block only if that question asks for code>
+- ⚠️ Check: <why> — ONLY when you are not confident in that answer, or the question text looks cut off, garbled, or ambiguous. Omit this line otherwise.
 
 Use the question's own number from the screen for <n> (e.g. "Question 3" → **Q3**, "2)" → **Q2**); if it has none, use its position in the list. Separate blocks with a blank line. No other headings, no preamble.
 

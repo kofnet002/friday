@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
@@ -18,7 +19,13 @@ from app.services import _breaker
 from app.services._fallback import stream_with_fallback
 from app.services._retry import retry_stream
 from app.services.claude_agent_auth import claude_available
-from app.services.claude_api import claude_transport, claude_usage_model, stream_claude_api
+from app.services.claude_api import (
+    Effort,
+    claude_transport,
+    claude_usage_model,
+    image_media_type,
+    stream_claude_api,
+)
 from app.settings import settings
 
 Provider = Literal["gemini", "openai", "deepseek", "claude"]
@@ -60,10 +67,11 @@ def _provider_chain(primary: Provider) -> list[Provider]:
     return chain or [primary]
 
 
-def claude_answer_model() -> str:
+def claude_answer_model(model: str | None = None) -> str:
     """Model label to bill answer usage against (``claude-code:<model>`` on
-    the subscription transport, which deliberately has no PRICING row)."""
-    return claude_usage_model(settings.anthropic_answer_model)
+    the subscription transport, which deliberately has no PRICING row).
+    `model` overrides the configured answer model (screen-mode pick)."""
+    return claude_usage_model(model or settings.anthropic_answer_model)
 
 
 async def stream_answer(
@@ -72,6 +80,10 @@ async def stream_answer(
     context: AnswerContext,
     *,
     on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
+    claude_model: str | None = None,
+    images: list[bytes] | None = None,
+    image_labels: list[str] | None = None,
+    effort: Effort | None = None,
 ) -> AsyncIterator[str]:
     """Yield answer tokens for the given question using the selected provider.
 
@@ -86,13 +98,28 @@ async def stream_answer(
     When `on_fallback` is provided and the primary provider fails before
     emitting any tokens, the next provider in the chain is tried. The
     callback fires once per switch so the WS layer can notify the client.
+
+    `images` (screenshots of on-screen charts/diagrams) reach only the
+    `claude` provider. Every other provider in the chain — including a
+    fallback after Claude fails — is told the visuals are unavailable so it
+    flags answers that depend on them. `image_labels` (aligned with `images`)
+    caption each screenshot with the figures it shows.
+
+    `effort` sets Claude's thinking depth (None: `anthropic_effort`); screen
+    questions pass `anthropic_screen_effort`. Other providers ignore it.
     """
-    system = answer_system_prompt(context)
+    claude_system = answer_system_prompt(context)
+    other_system = (
+        answer_system_prompt(dataclasses.replace(context, screen_visuals="unavailable"))
+        if images
+        else claude_system
+    )
 
     # Build a per-provider factory that handles in-provider transient
     # retries (`retry_stream`). The outer fallback helper switches providers
     # only after these retries are exhausted or hit a hard error.
     def make_factory(p: Provider) -> AsyncIterator[str]:
+        system = claude_system if p == "claude" else other_system
         if p == "gemini":
             # Gemini path: embed the thread inside the user prompt. We don't
             # use Gemini's native multi-turn contents array here to keep
@@ -119,7 +146,14 @@ async def stream_answer(
                     question, context.recent_transcript, context.prior_turns, context.code_refs
                 )
                 base = lambda: _stream_anthropic(  # noqa: E731
-                    system, user, threaded, context.prior_turns
+                    system,
+                    user,
+                    threaded,
+                    context.prior_turns,
+                    model=claude_model,
+                    images=images or None,
+                    image_labels=image_labels,
+                    effort=effort,
                 )
             else:
                 base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
@@ -211,6 +245,11 @@ async def _stream_anthropic(
     user: str,
     threaded_user: str,
     prior: tuple[PriorTurn, ...],
+    *,
+    model: str | None = None,
+    images: list[bytes] | None = None,
+    image_labels: list[str] | None = None,
+    effort: Effort | None = None,
 ) -> AsyncIterator[str]:
     """Stream an answer from Claude on the transport claude_transport() picks.
 
@@ -221,15 +260,49 @@ async def _stream_anthropic(
     - **cli** → the local `claude` CLI in print mode, billed against the
       subscription. It accepts a single prompt, so we send `threaded_user`
       (history embedded in the prompt) instead.
+
+    `images` go before the text on the API; the CLI can only read images
+    from files in a one-shot call, so with images it yields the whole answer
+    at once instead of streaming. Each image carries its label from
+    `image_labels`: a caption block on the API, a file list on the CLI.
+
+    `effort` (None: `anthropic_effort`) is sent where the model accepts it
+    (claude_api drops it otherwise); the CLI gets `--effort` only when one is
+    given, so its other calls run exactly as before.
     """
+    model = model or settings.anthropic_answer_model
+    # Captions only when some image has a label; otherwise exactly as before.
+    labels = (
+        image_labels
+        if images and image_labels and any(label.strip() for label in image_labels)
+        else None
+    )
     transport = claude_transport()
+    if transport == "cli" and images:
+        from app.services.claude_cli import run_claude_cli_with_images
+
+        text = await run_claude_cli_with_images(
+            images=images,
+            prompt=threaded_user,
+            system=system,
+            model=model,
+            labels=labels,
+            effort=effort,
+        )
+        if not text.strip():
+            # Raise (before any token) so the fallback chain runs instead of
+            # the stream ending silently with no answer.
+            raise RuntimeError("Claude CLI returned an empty answer for the screenshots")
+        yield text
+        return
     if transport == "cli":
         from app.services.claude_cli import stream_claude_cli_text
 
         async for text in stream_claude_cli_text(
             prompt=threaded_user,
             system=system,
-            model=settings.anthropic_answer_model,
+            model=model,
+            effort=effort,
         ):
             if text:
                 yield text
@@ -242,10 +315,12 @@ async def _stream_anthropic(
     async for text in stream_claude_api(
         system=system,
         user=user,
-        model=settings.anthropic_answer_model,
+        model=model,
         max_tokens=1500,
-        effort=settings.anthropic_effort,
+        effort=effort or settings.anthropic_effort,
         prior=((turn.role, turn.content) for turn in prior),
+        image=[(b, image_media_type(b)) for b in images] if images else None,
+        image_captions=labels,
         cache_system=True,
     ):
         yield text

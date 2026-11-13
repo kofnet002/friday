@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import type { AnswerMessage, AnswerProvider, QdModel, QdState } from '@friday/shared-types';
 
@@ -32,7 +32,16 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { friendlyError } from '@/lib/error-messages';
 import { Markdown } from '@/lib/markdown';
+import {
+  asQuestionBlocks,
+  extractQuestionAnswers,
+  screenAnswerTurns,
+} from '@/lib/question-answers';
+import { isScreenQuestionPrompt } from '@/lib/screen-question-routing';
+import { isNearBottom, screenPin } from '@/lib/stick-to-bottom';
 import { cn } from '@/lib/utils';
+
+import { AssistScrollContext } from './assist-panel';
 
 export type AnswerStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error';
 
@@ -100,6 +109,10 @@ export interface AnswerPanelProps {
    * the streamed answer.
    */
   transcriptSlot?: ReactNode;
+  /** 'screen' renders answers to on-screen questions inside the Screen tab:
+   *  just the pager, answer and follow-ups — no listening chrome (model and
+   *  detection pickers, connection pills, Start CTA). */
+  variant?: 'listen' | 'screen';
 }
 
 export function AnswerPanel({
@@ -134,7 +147,9 @@ export function AnswerPanel({
   onPrev,
   onNext,
   transcriptSlot,
+  variant = 'listen',
 }: AnswerPanelProps) {
+  const isScreen = variant === 'screen';
   const [customPrompt, setCustomPrompt] = useState('');
   const [copied, setCopied] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -191,22 +206,7 @@ export function AnswerPanel({
 
   const copyAnswer = async () => {
     if (!answer) return;
-    try {
-      await navigator.clipboard.writeText(answer);
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = answer;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand('copy');
-      } catch {
-        /* swallow */
-      }
-      document.body.removeChild(ta);
-    }
+    if (!(await copyText(answer))) return;
     setCopied(true);
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
     copyTimerRef.current = window.setTimeout(() => setCopied(false), 1400);
@@ -216,66 +216,84 @@ export function AnswerPanel({
     // No outer card chrome — the surrounding popover already provides the
     // glass frame. Keep this transparent so we don't end up with nested
     // containers.
-    <div className="flex h-full flex-col gap-4">
+    <div className={cn('flex flex-col gap-4', !isScreen && 'h-full')}>
       {/* In privacyMode the entire header bar collapses: no Copilot badge,
           no connection / QD / fallback / error indicators, no model
           selectors, no history pager. An over-the-shoulder observer
           should see nothing that hints at AI assistance. */}
       {!privacyMode ? (
-        <div className="flex items-center gap-2.5">
-          <span
-            className="flex items-center gap-1.5 rounded-md bg-sky-100/70 px-2 py-1 text-sm font-semibold text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
-            aria-label="Copilot"
-          >
-            <Bot className="h-4 w-4" aria-hidden />
-            Copilot
-          </span>
-          <span
-            className={cn(
-              'flex items-center gap-1.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider',
-              connected
-                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
-                : 'bg-neutral-200/60 text-neutral-500 dark:bg-neutral-800/80 dark:text-neutral-500',
-            )}
-            title={connected ? 'WebSocket connected' : 'WebSocket disconnected'}
-          >
-            <span
-              className={cn(
-                'h-1.5 w-1.5 rounded-full',
-                connected ? 'animate-pulse bg-emerald-500' : 'bg-neutral-400',
-              )}
-            />
-            {connected ? 'live' : 'offline'}
-          </span>
-          <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
-          {audioUsage ? <AudioBudgetPill usage={audioUsage} /> : null}
-          <div className="ml-auto flex items-center gap-1.5">
-            <Select
-              value={qdModel}
-              onChange={(e) => onQdModelChange(e.target.value as QdModel)}
-              className="h-7 text-xs"
-              title="Model used to detect questions in the live transcript. Claude options use your Anthropic API key when set; otherwise they run on your Claude Code subscription, which adds a few seconds per detection."
-              aria-label="Question detection model"
-            >
-              {ALL_QD_MODELS.map((m) => (
-                <option key={m} value={m}>
-                  QD: {qdModelLabel(m)}
-                </option>
-              ))}
-            </Select>
-            {qdError ? <QdErrorBadge reason={qdError} /> : null}
-            {qdFallbackModel && !qdError ? <QdFallbackBadge model={qdFallbackModel} /> : null}
-          </div>
-          <Select
-            value={provider}
-            onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
-            className="h-7 text-xs"
-          >
-            <option value="gemini">Gemini 2.5 Flash</option>
-            <option value="openai">GPT-4o</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="claude">Claude Sonnet 5.5</option>
-          </Select>
+        <div
+          className={cn(
+            'flex items-center gap-2.5',
+            // In the Screen tab the answer grows with the tab's own scroll;
+            // the pager stays pinned so navigation is always reachable.
+            // Same inset as the answer below; solid full-width background
+            // and a hairline so scrolled text slides cleanly under it.
+            isScreen &&
+              'sticky top-0 z-10 border-b border-neutral-200/80 bg-white px-3 py-2 dark:border-neutral-800/80 dark:bg-neutral-900',
+          )}
+        >
+          {isScreen ? (
+            <span className="mr-auto text-xs font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-400">
+              Screen answers
+            </span>
+          ) : (
+            <>
+              <span
+                className="flex items-center gap-1.5 rounded-md bg-sky-100/70 px-2 py-1 text-sm font-semibold text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+                aria-label="Copilot"
+              >
+                <Bot className="h-4 w-4" aria-hidden />
+                Copilot
+              </span>
+              <span
+                className={cn(
+                  'flex items-center gap-1.5 rounded-full px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider',
+                  connected
+                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                    : 'bg-neutral-200/60 text-neutral-500 dark:bg-neutral-800/80 dark:text-neutral-500',
+                )}
+                title={connected ? 'WebSocket connected' : 'WebSocket disconnected'}
+              >
+                <span
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full',
+                    connected ? 'animate-pulse bg-emerald-500' : 'bg-neutral-400',
+                  )}
+                />
+                {connected ? 'live' : 'offline'}
+              </span>
+              <QdStatePill state={qdState} dedupAt={qdDedupAt} error={qdError} />
+              {audioUsage ? <AudioBudgetPill usage={audioUsage} /> : null}
+              <div className="ml-auto flex items-center gap-1.5">
+                <Select
+                  value={qdModel}
+                  onChange={(e) => onQdModelChange(e.target.value as QdModel)}
+                  className="h-7 text-xs"
+                  title="Model used to detect questions in the live transcript. Claude options use your Anthropic API key when set; otherwise they run on your Claude Code subscription, which adds a few seconds per detection."
+                  aria-label="Question detection model"
+                >
+                  {ALL_QD_MODELS.map((m) => (
+                    <option key={m} value={m}>
+                      QD: {qdModelLabel(m)}
+                    </option>
+                  ))}
+                </Select>
+                {qdError ? <QdErrorBadge reason={qdError} /> : null}
+                {qdFallbackModel && !qdError ? <QdFallbackBadge model={qdFallbackModel} /> : null}
+              </div>
+              <Select
+                value={provider}
+                onChange={(e) => onProviderChange(e.target.value as AnswerProvider)}
+                className="h-7 text-xs"
+              >
+                <option value="gemini">Gemini 2.5 Flash</option>
+                <option value="openai">GPT-4o</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="claude">Claude Sonnet 5.5</option>
+              </Select>
+            </>
+          )}
 
           {/* History pager — chevrons step through every Q&A asked this
             session (auto-detect or force-ask), so a new question never
@@ -324,7 +342,7 @@ export function AnswerPanel({
           which meant the mic went live the moment the user peeked at the
           panel. Now starting is an explicit act. Hidden once live so the
           panel reads the same as before mid-session. */}
-      {!listening ? (
+      {!listening && !isScreen ? (
         <StartListeningCta
           starting={starting}
           onStart={onStart}
@@ -385,6 +403,7 @@ export function AnswerPanel({
           isStreaming={isStreaming}
           marked={marked}
           privacyMode={privacyMode}
+          screen={isScreen}
         />
       )}
 
@@ -534,9 +553,6 @@ export function AnswerPanel({
   );
 }
 
-// Within this many px of the bottom counts as "following the stream".
-const ANSWER_PIN_THRESHOLD_PX = 48;
-
 function AnswerBody({
   answer,
   question,
@@ -544,6 +560,7 @@ function AnswerBody({
   isStreaming,
   marked,
   privacyMode,
+  screen = false,
 }: {
   answer: string;
   question: string | null;
@@ -551,6 +568,10 @@ function AnswerBody({
   isStreaming: boolean;
   marked: boolean;
   privacyMode: boolean;
+  /** Screen tab: grow with the content instead of scrolling inside (the tab
+   *  already scrolls, so there's one scrollbar, not two), and show the
+   *  thread's answers as one list of "Q<n> · …" blocks. */
+  screen?: boolean;
 }) {
   // Prior turns to show above the current streaming/finished answer. We
   // skip:
@@ -560,51 +581,135 @@ function AnswerBody({
   // Anything in between is real conversation history that should be visible.
   const priorTurns = messages.slice(1, -1);
 
-  // Keep the newest streamed text in view. Follows the bottom while
-  // "pinned"; scrolling up to re-read unpins (so tokens don't yank the view
-  // away), scrolling back near the bottom re-pins, and every new question or
-  // follow-up re-pins.
-  const scrollRef = useRef<HTMLDivElement>(null);
+  // Keep the newest streamed text in view ("stick to bottom"). Follows the
+  // bottom while "pinned"; scrolling up to re-read unpins (so tokens don't
+  // yank the view away) and scrolling back near the bottom re-pins.
+  //   - AI Help scrolls this body itself, and every new question or
+  //     follow-up re-pins.
+  //   - The Screen tab's body grows inside the Assist workspace's scroller,
+  //     so that scroller is followed instead. A new answer page starts
+  //     UNPINNED with its start brought into view; only the reader scrolling
+  //     to the bottom pins it (see screenPin).
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const hostScrollRef = useContext(AssistScrollContext);
+  const scroller = () => (screen ? (hostScrollRef?.current ?? null) : bodyRef.current);
   const pinnedRef = useRef(true);
+  const screenPinRef = useRef(screenPin());
+  const isPinned = () => (screen ? screenPinRef.current.pinned : pinnedRef.current);
   const turnKey = `${question ?? ''}|${messages.length}`;
 
   useLayoutEffect(() => {
-    pinnedRef.current = true;
-  }, [turnKey]);
+    if (!screen) pinnedRef.current = true;
+  }, [turnKey, screen]);
+
+  // A new screen answer page: unpin and show its start (below the sticky
+  // pager) without jumping when it's already in view.
+  const revealStart = () => {
+    const el = hostScrollRef?.current;
+    const body = bodyRef.current;
+    screenPinRef.current.newPage(performance.now());
+    if (!el || !body) return;
+    const top = body.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    if (top < 0 || top > el.clientHeight) body.scrollIntoView({ block: 'start' });
+  };
+  useLayoutEffect(() => {
+    if (screen) revealStart();
+  }, [question, screen]);
+
+  // Arriving from another view remounts the host scroller (its `key` is the
+  // view), whose ref is attached only after this child's layout effects —
+  // so the step above found no scroller. Reveal the start here on mount too.
+  useEffect(() => {
+    const el = hostScrollRef?.current;
+    if (!screen || !el) return;
+    revealStart();
+    const onHostScroll = () => screenPinRef.current.onScroll(el, performance.now());
+    el.addEventListener('scroll', onHostScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onHostScroll);
+  }, [screen, hostScrollRef]);
 
   useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+    const el = scroller();
+    if (!el || !isPinned()) return;
+    el.scrollTop = el.scrollHeight;
+    // Record where we landed, so a reader scrolling up mid-stream still unpins.
+    if (screen) screenPinRef.current.ownScroll(performance.now(), el.scrollTop);
   }, [answer, turnKey, isStreaming]);
 
   const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= ANSWER_PIN_THRESHOLD_PX;
+    if (screen) return;
+    const el = bodyRef.current;
+    if (el) pinnedRef.current = isNearBottom(el);
   };
+
+  // Per-question answers from a grouped screen answer (all turns of the
+  // thread), for per-heading / one-key copy.
+  // Later questions of a scan come back in the single-question layout; the
+  // Screen tab rewrites them to match the scan's "Q<n> · …" blocks — only
+  // answers to new on-screen questions, never typed follow-ups ("why Q3?").
+  const rewrite: boolean[] = screen ? screenAnswerTurns(messages) : [];
+  const shown = (text: string, i: number) => (rewrite[i] ? asQuestionBlocks(text) : text);
+  const lastIndex = messages.length - 1;
+  const assistantTexts = [
+    ...messages
+      .slice(0, -1)
+      .map((m, i) => (m.role === 'assistant' ? shown(m.content, i) : null))
+      .filter((text): text is string => text !== null),
+    shown(answer, lastIndex),
+  ];
+  const questionAnswers = extractQuestionAnswers(assistantTexts);
+  const { copiedLabel, copyQuestion } = useQuestionCopy(questionAnswers, !privacyMode);
+  // A copy icon on each "Q<n> · …" heading copies that question's answer.
+  const questionAction = privacyMode
+    ? undefined
+    : (label: string) => {
+        const qa = questionAnswers.find((q) => q.label === label);
+        return qa ? (
+          <QuestionCopyButton
+            qa={qa}
+            copied={copiedLabel === label}
+            onCopy={() => void copyQuestion(label)}
+          />
+        ) : null;
+      };
 
   return (
     <div
-      ref={scrollRef}
+      ref={bodyRef}
       onScroll={onScroll}
       className={cn(
         // Transparent answer body — no nested card chrome. Vertical
         // padding only; the popover's frame handles the rest.
-        'min-h-[200px] flex-1 overflow-y-auto py-1 transition-opacity',
+        'py-1 transition-opacity',
+        screen ? 'scroll-mt-14 px-3' : 'min-h-[200px] flex-1 overflow-y-auto',
         marked && 'opacity-50',
         privacyMode && 'select-none blur-md',
       )}
     >
       {priorTurns.length > 0 ? (
-        <div className="mb-4 flex flex-col gap-3 border-b border-neutral-200/70 pb-3 dark:border-neutral-800/70">
+        <div
+          className={cn(
+            'flex flex-col gap-3',
+            !screen && 'mb-4 border-b border-neutral-200/70 pb-3 dark:border-neutral-800/70',
+          )}
+        >
           {priorTurns.map((turn, i) => (
-            <ThreadTurn key={i} turn={turn} />
+            <ThreadTurn
+              key={i}
+              turn={turn}
+              questionAction={questionAction}
+              flat={screen}
+              blocks={rewrite[i + 1] ?? false}
+            />
           ))}
         </div>
       ) : null}
 
       {answer ? (
-        <Markdown text={answer + (isStreaming ? ' ▍' : '')} />
+        <Markdown
+          text={shown(answer, lastIndex) + (isStreaming ? ' ▍' : '')}
+          questionAction={questionAction}
+        />
       ) : isStreaming ? (
         <div className="flex items-center gap-2 text-sm text-sky-600 dark:text-sky-400">
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -642,7 +747,144 @@ function AnswerBody({
   );
 }
 
-function ThreadTurn({ turn }: { turn: AnswerMessage }) {
+type QuestionAnswer = { label: string; answer: string; check: boolean };
+
+/** Copies `text`; true only when it reached the clipboard. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch {
+      /* swallow */
+    }
+    document.body.removeChild(ta);
+    return copied;
+  }
+}
+
+/** Copies one question's answer by label, and binds keys 1–9 to Q1–Q9
+ *  while you're not typing somewhere. `copiedLabel` is set for ~1.4s. */
+function useQuestionCopy(questionAnswers: QuestionAnswer[], enabled: boolean) {
+  const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
+  const answersRef = useRef(questionAnswers);
+  answersRef.current = questionAnswers;
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const copyQuestion = async (label: string) => {
+    const qa = answersRef.current.find((q) => q.label === label);
+    if (!qa) return;
+    if (!(await copyText(qa.answer))) return;
+    setCopiedLabel(label);
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopiedLabel(null), 1400);
+  };
+  const copyRef = useRef(copyQuestion);
+  copyRef.current = copyQuestion;
+
+  useEffect(() => {
+    if (!enabled) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      ) {
+        return;
+      }
+      if (!/^[1-9]$/.test(event.key)) return;
+      const label = `Q${event.key}`;
+      if (!answersRef.current.some((qa) => qa.label === label)) return;
+      event.preventDefault();
+      void copyRef.current(label);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [enabled]);
+
+  return { copiedLabel, copyQuestion };
+}
+
+function QuestionCopyButton({
+  qa,
+  copied,
+  onCopy,
+}: {
+  qa: QuestionAnswer;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <span className="ml-1.5 inline-flex items-center gap-1 align-[-3px]">
+      <button
+        type="button"
+        onClick={onCopy}
+        aria-label={`Copy ${qa.label} answer`}
+        title={
+          copied
+            ? 'Copied'
+            : `Copy ${qa.label}: ${qa.answer}${qa.check ? ' (double-check)' : ''} — press ${qa.label.slice(1)}`
+        }
+        className={cn(
+          'inline-flex h-5 w-5 items-center justify-center rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500',
+          copied
+            ? 'text-emerald-600 dark:text-emerald-400'
+            : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-neutral-200',
+        )}
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5" aria-hidden />
+        ) : (
+          <Copy className="h-3.5 w-3.5" aria-hidden />
+        )}
+      </button>
+      {qa.check ? (
+        <span role="img" aria-label="double-check" title="Double-check this one">
+          ⚠️
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function ThreadTurn({
+  turn,
+  questionAction,
+  flat = false,
+  blocks = false,
+}: {
+  turn: AnswerMessage;
+  questionAction?: (label: string) => ReactNode;
+  /** Screen tab: later questions continue the list — no divider, no card. */
+  flat?: boolean;
+  /** Answers new on-screen questions: rewrite as "Q<n> · …" blocks. */
+  blocks?: boolean;
+}) {
+  if (turn.role === 'user' && isScreenQuestionPrompt(turn.content)) {
+    if (flat) return null;
+    return (
+      <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-sky-700 dark:text-sky-300">
+        More questions from the screen
+      </div>
+    );
+  }
   if (turn.role === 'user') {
     return (
       <div className="flex items-start gap-2">
@@ -653,9 +895,17 @@ function ThreadTurn({ turn }: { turn: AnswerMessage }) {
       </div>
     );
   }
+  if (flat) {
+    return (
+      <Markdown
+        text={blocks ? asQuestionBlocks(turn.content) : turn.content}
+        questionAction={questionAction}
+      />
+    );
+  }
   return (
     <div className="rounded-lg bg-neutral-100/60 p-2.5 dark:bg-neutral-900/40">
-      <Markdown text={turn.content} />
+      <Markdown text={turn.content} questionAction={questionAction} />
     </div>
   );
 }

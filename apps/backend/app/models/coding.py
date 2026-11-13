@@ -49,6 +49,43 @@ class ExtractedProblem(BaseModel):
     function_signature: str | None = None
     language_hint: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
+    # 0-based indices of the screenshots holding a chart/diagram/figure the
+    # questions depend on, so those frames can be kept for later answers.
+    visual_frames: list[int] = Field(default_factory=list)
+    # One short label per entry of visual_frames (same order) naming the
+    # figures that screenshot shows; sent as its caption with answers.
+    visual_frame_labels: list[str] = Field(default_factory=list)
+
+    @field_validator("visual_frames", mode="before")
+    @classmethod
+    def _null_visual_frames(cls, value: object) -> object:
+        return [] if value is None else value
+
+    @field_validator("visual_frame_labels", mode="before")
+    @classmethod
+    def _coerce_visual_frame_labels(cls, value: object) -> list[str]:
+        # A bad caption must never fail the whole read.
+        if not isinstance(value, list):
+            return []
+        return [item if isinstance(item, str) else "" for item in value]
+
+    @model_validator(mode="after")
+    def _align_visual_frame_labels(self) -> ExtractedProblem:
+        labels = [label.strip() for label in self.visual_frame_labels]
+        count = len(self.visual_frames)
+        self.visual_frame_labels = (labels + [""] * count)[:count]
+        return self
+
+    def valid_visual_frames(self, frame_count: int) -> list[int]:
+        return sorted({i for i in self.visual_frames if 0 <= i < frame_count})
+
+    def labelled_visual_frames(self, frame_count: int) -> list[tuple[int, str]]:
+        """Valid frame indices in page order, each with its label ("" if none)."""
+        labels: dict[int, str] = {}
+        for i, label in zip(self.visual_frames, self.visual_frame_labels, strict=False):
+            if 0 <= i < frame_count:
+                labels.setdefault(i, label)
+        return sorted(labels.items())
 
     @model_validator(mode="after")
     def _sync_questions(self) -> "ExtractedProblem":

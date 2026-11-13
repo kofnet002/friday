@@ -36,7 +36,6 @@ import type {
   CodingLanguage,
   CodingMode,
   CodingSolutionServerMessage,
-  ExtractedFunctionCall,
   ExtractedProblem,
   Project,
   QAHistoryRow,
@@ -49,12 +48,12 @@ import type {
 
 import { Button } from '@/components/ui/button';
 import { PanelErrorBoundary } from '@/components/error-boundary';
-import { FunctionCallView } from './function-call-view';
 import { AnswerWs } from '@/lib/answer-ws';
 import { CodingWs } from '@/lib/coding-ws';
 import {
   fetchSessionDetail,
   fetchSessionUsage,
+  clearScreenContext,
   getCodingClaudeModelPreference,
   getCodingLanguagePreference,
   getOrCreateSessionId,
@@ -71,11 +70,15 @@ import {
 } from '@/lib/session-context';
 import { TranscribeWs } from '@/lib/transcribe-ws';
 import { cn } from '@/lib/utils';
+import { normalizeQuestion, planScreenAnswer } from '@/lib/screen-question-routing';
 import {
-  combineScreenQuestions,
-  normalizeQuestion,
-  planScreenQuestions,
-} from '@/lib/screen-question-routing';
+  indexAfterRemoval,
+  isAtLatest,
+  latestIndex,
+  listPosition,
+  resolveIndex,
+  stepIndex,
+} from '@/lib/answer-lists';
 
 import { AssistPanel, type AssistView } from './assist-panel';
 import { SetupForm } from '../setup/setup-form';
@@ -122,6 +125,9 @@ interface AnswerEntry {
   error: string | null;
   marked: boolean;
   createdAt: number;
+  /** Answers a question read off the screen. Shown in the Screen tab;
+   *  everything else (spoken / typed) is shown in AI Help. */
+  fromScreen?: boolean;
 }
 
 type TranscriptSource = 'interviewer' | 'candidate';
@@ -201,7 +207,10 @@ export function SessionClient() {
   const [codingClaudeModel, setCodingClaudeModel] = useState<ClaudeModel>('claude-opus-5-5');
   const codingClaudeModelRef = useRef<ClaudeModel>('claude-opus-5-5');
   const [entries, setEntries] = useState<AnswerEntry[]>([]);
+  // entryIndex selects AI Help's entry and screenEntryIndex the Screen tab's;
+  // both index the shared `entries` list (see lib/answer-lists).
   const [entryIndex, setEntryIndex] = useState(-1);
+  const [screenEntryIndex, setScreenEntryIndex] = useState(-1);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [answerConnected, setAnswerConnected] = useState(false);
   const streamingIdRef = useRef<string | null>(null);
@@ -252,10 +261,47 @@ export function SessionClient() {
     completeness: 'partial' | 'uncertain';
     missingSections: string[];
   } | null>(null);
-  const askAnswerRef = useRef<(q: string, opts?: { autoDetected?: boolean }) => void>(() => {});
+  const askAnswerRef = useRef<
+    (q: string, opts?: { autoDetected?: boolean; fromScreen?: boolean }) => string | undefined
+  >(() => undefined);
+  // The answer page the current guided scan is filling, so questions found
+  // later in the scan join it instead of opening a new page.
+  const scanAnswerRef = useRef<{ scanId: string; entryId: string } | null>(null);
+  // Screen follow-ups waiting for the current answer to finish streaming
+  // (starting one would cancel the stream in flight).
+  const pendingScreenFollowUpsRef = useRef<{ entryId: string; text: string }[]>([]);
+  const followUpRef = useRef<(q: string, opts?: { entryId?: string }) => void>(() => {});
+  const flushScreenFollowUps = () => {
+    // Deferred so a terminal stream message finishes updating state first.
+    setTimeout(() => {
+      if (streamingIdRef.current) return;
+      const next = pendingScreenFollowUpsRef.current.shift();
+      if (next) followUpRef.current(next.text, { entryId: next.entryId });
+    }, 0);
+  };
+  const sendScreenFollowUp = (entryId: string, text: string) => {
+    pendingScreenFollowUpsRef.current.push({ entryId, text });
+    flushScreenFollowUps();
+  };
+  // Threads started from questions read off the screen. Their answers (and
+  // follow-ups) use the Screen panel's Claude model, not AI Help's.
+  const screenThreadIdsRef = useRef<Set<string>>(new Set());
+  const screenClaudeModelFor = (threadId: string): ClaudeModel | undefined =>
+    providerRef.current === 'claude' && screenThreadIdsRef.current.has(threadId)
+      ? codingClaudeModelRef.current
+      : undefined;
   // Questions already answered from the screen this session, so a rescan or
   // the watcher re-reading the same page doesn't answer them twice.
   const answeredScreenRef = useRef<Set<string>>(new Set());
+  const [passagesRefreshKey, setPassagesRefreshKey] = useState(0);
+  // Start fresh: forget remembered passages, the current screen text, which
+  // on-screen questions were already answered, and any question left for review.
+  const resetScreenContext = (sid: string) => {
+    answeredScreenRef.current = new Set();
+    setPendingScreenQuestion(null);
+    // Refetch only once the backend has cleared, or the list would reappear.
+    void clearScreenContext(sid).then(() => setPassagesRefreshKey((k) => k + 1));
+  };
   const [codingConnected, setCodingConnected] = useState(false);
   // Coding panel mode (solve / explain / debug / tests). Each non-solve
   // mode keeps its OWN scratch buffer — switching from Explain to Debug
@@ -295,12 +341,6 @@ export function SessionClient() {
   // spend is visible the way the cost pill shows API spend.
   const [agentStats, setAgentStats] = useState<AgentSessionStats>({ runs: 0, totalMs: 0 });
   const agentRunStartRef = useRef<number>(0);
-  // Latest function-calling assessment detected on-screen (or null). Rendered
-  // at the top of the coding panel; the view owns its own solve+verify fetch.
-  const [functionCall, setFunctionCall] = useState<{
-    assessment: ExtractedFunctionCall;
-    fingerprint: string;
-  } | null>(null);
 
   // Active feature popover (null = no popover open, transcript visible behind)
   const [activeFeature, setActiveFeature] = useState<FeatureKey | null>(null);
@@ -360,6 +400,7 @@ export function SessionClient() {
   // would route auto-detected follow-ups to the index from the first
   // render even after the user chevroned away.
   const entryIndexRef = useRef<number>(-1);
+  const screenEntryIndexRef = useRef<number>(-1);
   // Timestamp of the most recent force-ask. Auto-detected questions that
   // arrive within a short cooldown of a force-ask are suppressed — the
   // user already triggered a manual ask on substantially the same
@@ -380,10 +421,26 @@ export function SessionClient() {
   codingTabsRef.current = codingTabs;
   entriesRef.current = entries;
   entryIndexRef.current = entryIndex;
+  screenEntryIndexRef.current = screenEntryIndex;
 
-  const currentEntry = entryIndex >= 0 && entryIndex < entries.length ? entries[entryIndex] : null;
+  const currentIndex = resolveIndex(entries, entryIndex, false);
+  const currentEntry = currentIndex >= 0 ? (entries[currentIndex] ?? null) : null;
+  const screenIndex = resolveIndex(entries, screenEntryIndex, true);
+  const screenEntry = screenIndex >= 0 ? (entries[screenIndex] ?? null) : null;
+  /** AI Help's selected entry, else its newest; -1 when it has none. */
+  const spokenIndexNow = () => {
+    const idx = resolveIndex(entriesRef.current, entryIndexRef.current, false);
+    return idx >= 0 ? idx : latestIndex(entriesRef.current, false);
+  };
 
   const inElectron = typeof window !== 'undefined' && Boolean(window.friday);
+  // Decided after mount: the server can't see window.friday, so rendering
+  // the browser-only banner from `inElectron` made the server and the
+  // Electron client disagree (hydration mismatch).
+  const [showBrowserBanner, setShowBrowserBanner] = useState(false);
+  useEffect(() => {
+    setShowBrowserBanner(!window.friday);
+  }, []);
 
   // On mount: resolve session_id and provider pref, then open the answer WS.
   useEffect(() => {
@@ -652,18 +709,21 @@ export function SessionClient() {
         answerStartedAtRef.current = null;
         apply({ status: 'done' });
         streamingIdRef.current = null;
+        flushScreenFollowUps();
         return;
       }
       if (msg.type === 'cancelled') {
         answerStartedAtRef.current = null;
         apply({ status: 'cancelled' });
         streamingIdRef.current = null;
+        flushScreenFollowUps();
         return;
       }
       if (msg.type === 'error') {
         answerStartedAtRef.current = null;
         apply({ status: 'error', error: msg.message });
         streamingIdRef.current = null;
+        flushScreenFollowUps();
       }
       if (msg.type === 'limit_exceeded') {
         // Token budget spent: the backend refused the question outright.
@@ -770,7 +830,7 @@ export function SessionClient() {
       // Backend classifier already decided whether this is a follow-up of
       // the prior thread; route accordingly. Falling back to askAnswer
       // when the flag is missing keeps legacy events working.
-      if (msg.is_follow_up && entriesRef.current.length > 0) {
+      if (msg.is_follow_up && latestIndex(entriesRef.current, false) >= 0) {
         followUp(msg.question, { candidateId: msg.candidate_id });
       } else {
         askAnswer(msg.question, { autoDetected: true, candidateId: msg.candidate_id });
@@ -786,6 +846,10 @@ export function SessionClient() {
   };
 
   const onCodingSolutionMessage = useCallback((msg: CodingSolutionServerMessage) => {
+    if (msg.type === 'screen_reference_saved') {
+      setPassagesRefreshKey((k) => k + 1);
+      return;
+    }
     if (msg.type === 'screen_question_detected') {
       // During a combined session, the spoken question is the trigger and
       // the extracted screen text is supporting context for that answer.
@@ -798,19 +862,35 @@ export function SessionClient() {
         : undefined;
       const skip = new Set(answeredScreenRef.current);
       if (recentQuestion) skip.add(normalizeQuestion(recentQuestion));
-      const plan = planScreenQuestions(
-        msg.questions?.length ? msg.questions : [msg.question],
-        msg.completeness,
-        skip,
-      );
-      const combined = combineScreenQuestions(plan.answer);
-      if (combined) {
-        for (const question of plan.answer) {
+      // One answer page per guided scan: answers found mid-scan start it,
+      // questions found later in the same scan are added to it.
+      const scanEntry =
+        msg.scan_id && scanAnswerRef.current?.scanId === msg.scan_id
+          ? entriesRef.current.find((e) => e.id === scanAnswerRef.current?.entryId)
+          : undefined;
+      const plan = planScreenAnswer({
+        questions: msg.questions?.length ? msg.questions : [msg.question],
+        completeness: msg.completeness,
+        speculative: Boolean(msg.speculative),
+        answered: skip,
+        hasScanEntry: Boolean(scanEntry),
+      });
+      if (plan.text) {
+        for (const question of plan.questions) {
           answeredScreenRef.current.add(normalizeQuestion(question));
         }
-        // All questions from one page go out as one request → one answer page.
-        askAnswerRef.current(combined, { autoDetected: true });
-        setAssistView('answers');
+        if (plan.mode === 'followup' && scanEntry) {
+          sendScreenFollowUp(scanEntry.id, plan.text);
+        } else {
+          const entryId = askAnswerRef.current(plan.text, {
+            autoDetected: true,
+            fromScreen: true,
+          });
+          if (msg.scan_id && entryId) {
+            scanAnswerRef.current = { scanId: msg.scan_id, entryId };
+          }
+        }
+        setAssistView('screen');
         setActiveFeature('assist');
       }
       if (plan.review && msg.completeness !== 'complete') {
@@ -819,7 +899,7 @@ export function SessionClient() {
           completeness: msg.completeness,
           missingSections: msg.missing_sections ?? [],
         });
-        if (!plan.answer.length) setAssistView('screen');
+        if (!plan.text) setAssistView('screen');
         setActiveFeature('assist');
       }
       return;
@@ -829,20 +909,6 @@ export function SessionClient() {
     // is mounted, unlike /ws/transcribe which requires Start).
     if (msg.type === 'coding_problem_detected') {
       onCodingProblemDetected(msg.problem, msg.fingerprint);
-      return;
-    }
-    // Function-calling assessment detected on-screen (a frame the coding
-    // detector rejected). Surface it at the top of the coding panel; the
-    // FunctionCallView auto-solves + self-verifies. Dedup by fingerprint so a
-    // re-detect of the same screen doesn't re-trigger the solve.
-    if (msg.type === 'function_call_detected') {
-      setFunctionCall((prev) =>
-        prev?.fingerprint === msg.fingerprint
-          ? prev
-          : { assessment: msg.assessment, fingerprint: msg.fingerprint },
-      );
-      if (audioStatusRef.current !== 'recording') setAssistView('screen');
-      setActiveFeature('assist');
       return;
     }
     // `saved` only fires for solve mode (other modes are ephemeral on the
@@ -1286,8 +1352,7 @@ export function SessionClient() {
     // that one waits for confirmation instead.
     if (streamingIdRef.current && !pendingRef.current) return;
     discardPending();
-    const idx = entryIndexRef.current >= 0 ? entryIndexRef.current : entriesRef.current.length - 1;
-    const current = entriesRef.current[idx];
+    const current = entriesRef.current[spokenIndexNow()];
     let entry: AnswerEntry;
     let wire: AnswerMessage[];
     let targetId: string | null = null;
@@ -1360,8 +1425,7 @@ export function SessionClient() {
       setEntries((prev) => {
         const next = [...prev, entry];
         // Same auto-jump rule as an auto-detected askAnswer.
-        const idx = entryIndexRef.current;
-        if (prev.length === 0 || idx < 0 || idx >= prev.length - 1) {
+        if (isAtLatest(prev, entryIndexRef.current, false)) {
           setEntryIndex(next.length - 1);
         }
         return next;
@@ -1395,11 +1459,14 @@ export function SessionClient() {
       ? crypto.randomUUID()
       : `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  const askAnswer = (q: string, opts: { autoDetected?: boolean; candidateId?: string } = {}) => {
+  const askAnswer = (
+    q: string,
+    opts: { autoDetected?: boolean; candidateId?: string; fromScreen?: boolean } = {},
+  ) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
-      return;
+      return undefined;
     }
     // Cancel any in-flight stream before starting a new thread — tokens
     // route by streamingIdRef so otherwise the old entry would hang in
@@ -1407,6 +1474,7 @@ export function SessionClient() {
     cancelInFlight();
     const id = newId();
     const threadId = newId();
+    if (opts.fromScreen) screenThreadIdsRef.current.add(threadId);
     const messages: AnswerMessage[] = [
       { role: 'user', content: q },
       { role: 'assistant', content: '' },
@@ -1421,8 +1489,12 @@ export function SessionClient() {
       error: null,
       marked: false,
       createdAt: Date.now(),
+      fromScreen: Boolean(opts.fromScreen),
     };
     setPanelError(null);
+    // Screen answers page through the Screen tab's own list.
+    const indexRef = opts.fromScreen ? screenEntryIndexRef : entryIndexRef;
+    const setIndex = opts.fromScreen ? setScreenEntryIndex : setEntryIndex;
     setEntries((prev) => {
       const next = [...prev, entry];
       // Auto-jump rules:
@@ -1432,10 +1504,8 @@ export function SessionClient() {
       //     (idx < 0) or is parked at the latest entry. Anywhere else
       //     means the user is reading something older; don't yank them
       //     away mid-read.
-      const idx = entryIndexRef.current;
-      const wasAtLatest = prev.length === 0 || idx < 0 || idx >= prev.length - 1;
-      if (!opts.autoDetected || wasAtLatest) {
-        setEntryIndex(next.length - 1);
+      if (!opts.autoDetected || isAtLatest(prev, indexRef.current, Boolean(opts.fromScreen))) {
+        setIndex(next.length - 1);
       }
       return next;
     });
@@ -1449,7 +1519,10 @@ export function SessionClient() {
       auto_detected: opts.autoDetected,
       candidate_id: opts.candidateId,
       session_context: answerScreenContext(),
+      claude_model: screenClaudeModelFor(threadId),
+      from_screen: screenThreadIdsRef.current.has(threadId),
     });
+    return id;
   };
   askAnswerRef.current = askAnswer;
 
@@ -1469,13 +1542,13 @@ export function SessionClient() {
   };
   const answerCapturedScreenQuestion = () => {
     if (!pendingScreenQuestion) return;
-    askAnswerRef.current(pendingScreenQuestion.question);
+    askAnswerRef.current(pendingScreenQuestion.question, { fromScreen: true });
     setPendingScreenQuestion(null);
-    setAssistView('answers');
+    setAssistView('screen');
     setActiveFeature('assist');
   };
 
-  const followUp = (q: string, opts: { candidateId?: string } = {}) => {
+  const followUp = (q: string, opts: { candidateId?: string; entryId?: string } = {}) => {
     const ws = answerRef.current;
     if (!ws || !ws.isOpen()) {
       setPanelError('copilot WS not connected');
@@ -1484,9 +1557,11 @@ export function SessionClient() {
     // Read entryIndex from ref so this function (captured by stable
     // callbacks like onTranscribeMessage) targets the entry the user
     // is currently viewing, not the one they were viewing at first
-    // render. Falls back to the newest entry when nothing is selected.
-    const idx = entryIndexRef.current >= 0 ? entryIndexRef.current : entriesRef.current.length - 1;
-    const current = entriesRef.current[idx];
+    // render. Falls back to AI Help's newest entry when nothing is selected.
+    // Screen follow-ups (scan pages, the Screen tab) name their entry.
+    const current = opts.entryId
+      ? entriesRef.current.find((e) => e.id === opts.entryId)
+      : entriesRef.current[spokenIndexNow()];
     if (!current) {
       // No active thread — treat as a fresh ask. Matches what a user
       // probably means when they hit "More detail" on an empty panel.
@@ -1526,8 +1601,11 @@ export function SessionClient() {
       provider: providerRef.current,
       candidate_id: opts.candidateId,
       session_context: answerScreenContext(),
+      claude_model: screenClaudeModelFor(current.threadId),
+      from_screen: screenThreadIdsRef.current.has(current.threadId),
     });
   };
+  followUpRef.current = followUp;
 
   // ─── transcribe lifecycle ──────────────────────────────────────────────────
   const start = async (): Promise<boolean> => {
@@ -1650,22 +1728,28 @@ export function SessionClient() {
     setLatencyMs(null);
   };
 
-  // Removes the currently-displayed entry from the in-memory list. If it's
+  // Removes the entry a view is showing from the in-memory list. If it's
   // the streaming one, also tells the WS to cancel so the server stops
-  // generating tokens we'd just throw away.
-  const clearAnswer = () => {
-    if (entryIndex < 0) return;
-    const removed = entries[entryIndex];
-    if (removed && streamingIdRef.current === removed.id) {
+  // generating tokens we'd just throw away. Both views keep their place.
+  const clearAnswer = (fromScreen: boolean) => {
+    const removedIndex = resolveIndex(
+      entries,
+      fromScreen ? screenEntryIndex : entryIndex,
+      fromScreen,
+    );
+    if (removedIndex < 0) return;
+    const removed = entries[removedIndex];
+    if (!removed) return;
+    if (streamingIdRef.current === removed.id) {
       answerRef.current?.cancel();
       streamingIdRef.current = null;
     }
     setEntries((prev) => {
-      const next = prev.filter((_, i) => i !== entryIndex);
-      // Keep the user on the nearest neighbor (previous entry if there is
-      // one, otherwise the new tail; -1 if the list is now empty).
-      setEntryIndex(next.length === 0 ? -1 : Math.min(entryIndex, next.length - 1));
-      return next;
+      const at = prev.findIndex((e) => e.id === removed.id);
+      if (at < 0) return prev;
+      setEntryIndex(indexAfterRemoval(prev, entryIndexRef.current, at, false));
+      setScreenEntryIndex(indexAfterRemoval(prev, screenEntryIndexRef.current, at, true));
+      return prev.filter((_, i) => i !== at);
     });
   };
 
@@ -1673,24 +1757,24 @@ export function SessionClient() {
     answerRef.current?.cancel();
   };
 
-  const onMarkAnswered = () => {
-    const current = entryIndex >= 0 ? entries[entryIndex] : null;
-    if (!current) return;
-    updateEntry(current.id, { marked: !current.marked });
+  const onMarkAnswered = (entry: AnswerEntry | null) => {
+    if (!entry) return;
+    updateEntry(entry.id, { marked: !entry.marked });
   };
 
-  const onReask = () => {
-    const current = entryIndex >= 0 ? entries[entryIndex] : null;
-    if (!current?.question) return;
-    askAnswer(current.question);
+  const onReask = (entry: AnswerEntry | null) => {
+    if (!entry?.question) return;
+    askAnswer(entry.question, { fromScreen: entry.fromScreen });
   };
 
-  const goPrev = () => {
-    setEntryIndex((i) => Math.max(0, i - 1));
+  const goPrev = (fromScreen: boolean) => {
+    const setIndex = fromScreen ? setScreenEntryIndex : setEntryIndex;
+    setIndex((i) => stepIndex(entriesRef.current, i, -1, fromScreen));
   };
 
-  const goNext = () => {
-    setEntryIndex((i) => Math.min(entries.length - 1, i + 1));
+  const goNext = (fromScreen: boolean) => {
+    const setIndex = fromScreen ? setScreenEntryIndex : setEntryIndex;
+    setIndex((i) => stepIndex(entriesRef.current, i, 1, fromScreen));
   };
 
   const onCodingClaudeModelChange = (model: ClaudeModel) => {
@@ -1818,6 +1902,9 @@ export function SessionClient() {
     if (codingStartingRef.current) return false;
     screenContextRef.current = null;
     const sid = getOrCreateSessionId();
+    // A new watch usually means a new assessment — don't answer it against
+    // passages remembered from the last one.
+    resetScreenContext(sid);
     codingStartingRef.current = true;
     setCodingStarting(true);
     try {
@@ -1857,7 +1944,11 @@ export function SessionClient() {
         screenContextRef.current = parts.join('\n\n').slice(0, 20_000) || null;
       });
       const offErr = fridayApi.coding.onError((msg) => setCodingError(msg));
-      const offScan = fridayApi.coding.onScanState((state) => setScanState(state));
+      const offScan = fridayApi.coding.onScanState((state) => {
+        setScanState(state);
+        // A new scan (button or shortcut) replaces any question left for review.
+        if (state.state === 'capturing' && state.frames === 0) setPendingScreenQuestion(null);
+      });
       codingUnsubsRef.current = [offFrame, offExt, offErr, offScan];
       setCodingActive(true);
       return true;
@@ -1926,6 +2017,7 @@ export function SessionClient() {
     setAudioUsage(null);
     setEntries([]);
     setEntryIndex(-1);
+    setScreenEntryIndex(-1);
     setFinals([]);
     setInterims(EMPTY_INTERIMS);
     setError(null);
@@ -2220,6 +2312,71 @@ export function SessionClient() {
   const isLive = isRecording || isPaused;
   const elapsedDisplay = formatElapsed(elapsedMs);
 
+  // AI Help (spoken / typed answers) and the Screen tab (answers to on-screen
+  // questions) render the same answer panel over their own list.
+  const renderAnswerPanel = (fromScreen: boolean): ReactNode => {
+    const entry = fromScreen ? screenEntry : currentEntry;
+    const { position, count } = listPosition(
+      entries,
+      fromScreen ? screenIndex : currentIndex,
+      fromScreen,
+    );
+    return (
+      <AnswerPanel
+        variant={fromScreen ? 'screen' : 'listen'}
+        provider={provider}
+        onProviderChange={onProviderChange}
+        qdModel={qdModel}
+        onQdModelChange={onQdModelChange}
+        audioUsage={audioUsage}
+        qdState={qdState}
+        qdFallbackModel={qdFallbackModel}
+        qdError={qdError}
+        qdDedupAt={qdDedupAt}
+        question={entry?.question ?? null}
+        answer={entry?.answer ?? ''}
+        messages={entry?.messages ?? []}
+        status={entry?.status ?? 'idle'}
+        error={entry?.error ?? panelError}
+        marked={Boolean(entry?.marked)}
+        onMarkAnswered={() => onMarkAnswered(entry)}
+        onCancel={cancelAnswer}
+        onClear={() => clearAnswer(fromScreen)}
+        onReask={() => onReask(entry)}
+        entryIndex={position}
+        entryCount={count}
+        onPrev={() => goPrev(fromScreen)}
+        onNext={() => goNext(fromScreen)}
+        // Typing in the Screen tab stays in the screen thread, even before its
+        // answer has text (errored, cancelled, first token pending).
+        onSubmitCustom={
+          fromScreen
+            ? (q) =>
+                entry ? followUp(q, { entryId: entry.id }) : askAnswer(q, { fromScreen: true })
+            : submitCustom
+        }
+        // The Screen tab's follow-ups continue the screen thread it shows.
+        onFollowUp={(q) => followUp(q, fromScreen && entry ? { entryId: entry.id } : {})}
+        connected={answerConnected}
+        privacyMode={privacyMode}
+        listening={isLive}
+        starting={status === 'starting'}
+        onStart={start}
+        transcriptSlot={
+          fromScreen ? undefined : (
+            <Transcript
+              status={status}
+              finals={finals}
+              interims={interims}
+              privacyMode={privacyMode}
+              fill
+            />
+          )
+        }
+      />
+    );
+  };
+
   const renderFeatureContent = (key: FeatureKey | 'listen' | 'coding'): ReactNode => {
     if (key === 'assist') {
       return (
@@ -2240,66 +2397,11 @@ export function SessionClient() {
       return <SetupForm onComplete={() => setActiveFeature(null)} />;
     }
     if (key === 'listen') {
-      return (
-        <PanelErrorBoundary label="AI Help">
-          <AnswerPanel
-            provider={provider}
-            onProviderChange={onProviderChange}
-            qdModel={qdModel}
-            onQdModelChange={onQdModelChange}
-            audioUsage={audioUsage}
-            qdState={qdState}
-            qdFallbackModel={qdFallbackModel}
-            qdError={qdError}
-            qdDedupAt={qdDedupAt}
-            question={currentEntry?.question ?? null}
-            answer={currentEntry?.answer ?? ''}
-            messages={currentEntry?.messages ?? []}
-            status={currentEntry?.status ?? 'idle'}
-            error={currentEntry?.error ?? panelError}
-            marked={Boolean(currentEntry?.marked)}
-            onMarkAnswered={onMarkAnswered}
-            onCancel={cancelAnswer}
-            onClear={clearAnswer}
-            onReask={onReask}
-            entryIndex={entries.length === 0 ? 0 : entryIndex + 1}
-            entryCount={entries.length}
-            onPrev={goPrev}
-            onNext={goNext}
-            onSubmitCustom={submitCustom}
-            onFollowUp={followUp}
-            connected={answerConnected}
-            privacyMode={privacyMode}
-            listening={isLive}
-            starting={status === 'starting'}
-            onStart={start}
-            transcriptSlot={
-              <Transcript
-                status={status}
-                finals={finals}
-                interims={interims}
-                privacyMode={privacyMode}
-                fill
-              />
-            }
-          />
-        </PanelErrorBoundary>
-      );
+      return <PanelErrorBoundary label="AI Help">{renderAnswerPanel(false)}</PanelErrorBoundary>;
     }
     if (key === 'coding') {
       return (
         <PanelErrorBoundary label="Coding mode">
-          {functionCall ? (
-            <div className="mb-3">
-              <FunctionCallView
-                assessment={functionCall.assessment}
-                fingerprint={functionCall.fingerprint}
-                provider={provider}
-                sessionId={sessionId}
-                onDismiss={() => setFunctionCall(null)}
-              />
-            </div>
-          ) : null}
           <CodingPanel
             active={codingActive}
             onToggle={toggleCodingMode}
@@ -2346,6 +2448,10 @@ export function SessionClient() {
               setPendingScreenQuestion(null);
               void startGuidedScan();
             }}
+            sessionId={getOrCreateSessionId()}
+            passagesRefreshKey={passagesRefreshKey}
+            onClearScreenContext={() => resetScreenContext(getOrCreateSessionId())}
+            screenAnswers={screenEntry ? renderAnswerPanel(true) : null}
           />
         </PanelErrorBoundary>
       );
@@ -2604,7 +2710,7 @@ export function SessionClient() {
       </Popover.Root>
 
       {/* Banners */}
-      {!inElectron ? (
+      {showBrowserBanner ? (
         <div
           data-interactive="true"
           className="pointer-events-auto rounded-md border border-amber-400/50 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-200"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 from typing import Any, Literal
 
@@ -9,12 +11,22 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.db import append_qa, get_session
 from app.logging import log
 from app.prompts.answer_generation import AnswerContext, PriorTurn
-from app.redis_client import get_screen_context, recent_transcript_text, set_last_answer
+from app.redis_client import (
+    get_current_screen_images,
+    get_screen_context,
+    get_screen_image,
+    get_screen_image_label,
+    get_screen_references,
+    recent_transcript_text,
+    set_last_answer,
+)
 from app.services import latency
 from app.services.answer import Provider, claude_answer_model, stream_answer
+from app.services.claude_api import normalize_claude_model
 from app.services.limits import check_token_budget
 from app.services.code_search import find_code_refs
 from app.services.project_context import load_project_contexts
+from app.services.screen_memory import answer_image_keys
 from app.services.usage import ANSWER_PROMPT_OVERHEAD_TOKENS, record_answer_call
 from app.settings import settings
 
@@ -65,6 +77,52 @@ def resolve_screen_context(override: dict[str, Any], stored: str | None) -> str 
     if "screen_context" in override and override.get("screen_context") == "":
         return None
     return stored or override.get("screen_context") or None
+
+
+async def load_answer_images(
+    session_id: str, *, from_screen: bool
+) -> tuple[list[tuple[bytes, str]], int]:
+    """Kept screenshots (charts/diagrams) to attach to an answer, each with its
+    label ("" if none): the current screen's, plus remembered passages' for a
+    question read off the screen — and how many were wanted. Missing or
+    undecodable images are dropped (so fewer may load than were wanted);
+    Redis errors yield ([], 0)."""
+    try:
+        current = await get_current_screen_images(session_id)
+        refs = await get_screen_references(session_id)
+        keys = answer_image_keys(current, refs, include_references=from_screen)
+        images: list[tuple[bytes, str]] = []
+        for key in keys:
+            data = await get_screen_image(session_id, key)
+            if not data:
+                continue
+            try:
+                decoded = base64.b64decode(data)
+            except (binascii.Error, ValueError) as exc:
+                log.warning(
+                    "ws_answer.screen_image_decode_failed",
+                    session_id=session_id,
+                    key=key,
+                    error=str(exc),
+                )
+                continue
+            images.append((decoded, await get_screen_image_label(session_id, key) or ""))
+        return images, len(keys)
+    except Exception as exc:  # noqa: BLE001 - screenshots are optional
+        log.warning("ws_answer.screen_images_failed", session_id=session_id, error=str(exc))
+        return [], 0
+
+
+def screen_visuals_state(
+    loaded: int, wanted: int
+) -> Literal["attached", "partial", "unavailable"] | None:
+    """How the answer is told about the page's kept screenshots: all sent,
+    some sent (the rest failed to load), none could be loaded, or none kept."""
+    if not wanted:
+        return None
+    if not loaded:
+        return "unavailable"
+    return "attached" if loaded >= wanted else "partial"
 
 
 @router.websocket("/ws/answer")
@@ -176,6 +234,26 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             except Exception:  # noqa: BLE001 - screen context is optional
                 stored_screen = None
         screen_context = resolve_screen_context(override, stored_screen)
+        # A question read off the screen (or a follow-up in such a thread)
+        # also gets the remembered passages' screenshots.
+        from_screen = bool(request.get("from_screen"))
+        images: list[bytes] = []
+        image_labels: list[str] = []
+        wanted_images = 0
+        if session_id and screen_context:
+            loaded, wanted_images = await load_answer_images(session_id, from_screen=from_screen)
+            images = [data for data, _ in loaded]
+            image_labels = [label for _, label in loaded]
+        # Which screenshots an answer saw, so "the chart wasn't visible" answers
+        # can be traced to missing images vs. the model.
+        log.info(
+            "ws_answer.screen_images",
+            session_id=session_id,
+            from_screen=from_screen,
+            has_screen_context=bool(screen_context),
+            count=len(images),
+            labels=image_labels,
+        )
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
@@ -186,6 +264,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             language=override.get("language") or persisted.get("language") or "en",
             recent_transcript=recent_transcript,
             screen_context=screen_context,
+            screen_visuals=screen_visuals_state(len(images), wanted_images),
             prior_turns=prior_turns,
             projects=projects,
             code_refs=await find_code_refs(
@@ -199,6 +278,8 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             else (),
         )
 
+        # Screen-originated answers carry the Screen panel's Claude model.
+        claude_model = normalize_claude_model(request.get("claude_model"))
         auto_detected = bool(request.get("auto_detected", False))
         cid_raw = request.get("candidate_id")
         candidate_id = cid_raw if isinstance(cid_raw, str) and cid_raw else None
@@ -212,7 +293,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         elif provider == "deepseek":
             model = settings.deepseek_model
         elif provider == "claude":
-            model = claude_answer_model()
+            model = claude_answer_model(claude_model)
         else:
             model = settings.openai_model
 
@@ -238,7 +319,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             elif nxt == "deepseek":
                 effective_model = settings.deepseek_model
             elif nxt == "claude":
-                effective_model = claude_answer_model()
+                effective_model = claude_answer_model(claude_model)
             else:
                 effective_model = settings.openai_model
             await send(
@@ -254,7 +335,15 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         collected: list[str] = []
         try:
             async for token in stream_answer(
-                provider, question, context, on_fallback=_on_fallback
+                provider,
+                question,
+                context,
+                on_fallback=_on_fallback,
+                claude_model=claude_model,
+                images=images or None,
+                image_labels=image_labels if images else None,
+                # Screen questions think first so the visible answer is final.
+                effort=settings.anthropic_screen_effort if from_screen else None,
             ):
                 if not collected:
                     latency.mark(candidate_id, "first_token")

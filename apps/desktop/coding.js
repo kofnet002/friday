@@ -4,10 +4,11 @@
 // threshold constants mirror CODING_EXTRACTION_CONFIG from
 // packages/prompts/coding-extraction.ts.
 
-const { desktopCapturer, screen } = require('electron');
+const { BrowserWindow, desktopCapturer, screen } = require('electron');
 const { EventEmitter } = require('node:events');
+const { randomUUID } = require('node:crypto');
 const sharp = require('sharp');
-const { ScanSelector, signatureDistance, autoFinishReason } = require('./scan');
+const { ScanSelector, bestScanRead, signatureDistance, autoFinishReason } = require('./scan');
 
 // Mirrors packages/prompts/coding-extraction.ts CODING_EXTRACTION_CONFIG.
 const SAMPLE_INTERVAL_MS = 1000;
@@ -74,8 +75,71 @@ function hammingDistance(a, b) {
   return dist;
 }
 
+// Friday must never read its own window as part of the page — with stealth
+// off its panels (saved passages, answers) would come back as "passages".
+// Every capture runs with content protection on for all Friday windows, then
+// each window goes back to what the app wants it to be. Electron 33 has no
+// isContentProtected(), so main.js tells us which windows it keeps protected
+// (stealth); those are never switched off here.
+let wantsProtection = () => false;
+let shieldDepth = 0;
+let shielded = [];
+
+function setProtectedWindowCheck(check) {
+  wantsProtection = typeof check === 'function' ? check : () => false;
+}
+
+// Already protected before this capture (stealth, or a later Electron that
+// can say so): never touched by the shield.
+function alreadyProtected(win) {
+  if (wantsProtection(win)) return true;
+  return typeof win.isContentProtected === 'function' && Boolean(win.isContentProtected());
+}
+
+function setProtection(win, on) {
+  try {
+    if (!win.isDestroyed()) win.setContentProtection(on);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function shieldOwnWindows() {
+  if (shieldDepth++ > 0) return;
+  shielded = [];
+  for (const win of BrowserWindow?.getAllWindows?.() ?? []) {
+    try {
+      if (win.isDestroyed() || alreadyProtected(win)) continue;
+    } catch {
+      continue;
+    }
+    if (setProtection(win, true)) shielded.push(win);
+  }
+}
+
+function unshieldOwnWindows() {
+  if (--shieldDepth > 0) return;
+  shieldDepth = 0;
+  // Turn off exactly the windows this shield turned on — unless stealth was
+  // switched on meanwhile and wants them kept protected.
+  for (const win of shielded) {
+    if (!wantsProtection(win)) setProtection(win, false);
+  }
+  shielded = [];
+}
+
+async function getSourcesWithoutFriday(options) {
+  try {
+    shieldOwnWindows();
+    return await desktopCapturer.getSources(options);
+  } finally {
+    unshieldOwnWindows();
+  }
+}
+
 async function captureScreen(displayId) {
-  const sources = await desktopCapturer.getSources({
+  const sources = await getSourcesWithoutFriday({
     types: ['screen'],
     thumbnailSize: { width: MAX_WIDTH_PX, height: MAX_WIDTH_PX },
     fetchWindowIcons: false,
@@ -130,7 +194,7 @@ class CodingCapture extends EventEmitter {
   }
 
   async listDisplays() {
-    const sources = await desktopCapturer.getSources({
+    const sources = await getSourcesWithoutFriday({
       types: ['screen'],
       fetchWindowIcons: false,
     });
@@ -280,6 +344,10 @@ class CodingCapture extends EventEmitter {
     this.scanStartedAt = Date.now();
     this.scanMotion = { lastSig: null, lastMotionAt: 0, moving: false, scrolled: false };
     this.scanCapturedAt = 0;
+    this.scanId = randomUUID();
+    this.speculation = { inflight: false, dirty: false };
+    // Problems read by this scan's background reads, for judging the scan.
+    this.scanReads = [];
     this._emitScanState('capturing');
     await this._scanTick();
     return { ok: true };
@@ -320,8 +388,12 @@ class CodingCapture extends EventEmitter {
       } else {
         result = this.scan.add(frame);
       }
-      if (result.kept) this._announceViewCaptured();
-      else this._emitScanState('capturing');
+      if (result.kept) {
+        this._announceViewCaptured();
+        // The page is at rest on a new view (first view, or scrolling just
+        // settled): read what we have so far in the background.
+        if (!moved) this._speculate();
+      } else this._emitScanState('capturing');
 
       if (result.limitReached || now - this.scanStartedAt >= SCAN_MAX_DURATION_MS) {
         await this._submitGuidedScan({ partial: true, limitReached: true, finishedBy: 'limit' });
@@ -362,8 +434,10 @@ class CodingCapture extends EventEmitter {
       const result = this.scan.addManual(frame);
       // A deliberate capture counts as activity: don't auto-finish right after.
       if (this.scanMotion) this.scanMotion.lastMotionAt = Date.now();
-      if (result.kept) this._announceViewCaptured();
-      else this._emitScanState('capturing', { lastCapture: 'duplicate' });
+      if (result.kept) {
+        this._announceViewCaptured();
+        this._speculate();
+      } else this._emitScanState('capturing', { lastCapture: 'duplicate' });
       if (result.limitReached) {
         await this._submitGuidedScan({ partial: true, limitReached: true, finishedBy: 'limit' });
       }
@@ -409,6 +483,49 @@ class CodingCapture extends EventEmitter {
     return { ok: true };
   }
 
+  // Read the views captured so far while the user keeps scrolling. Fully
+  // visible questions get answered early, and when the scan ends on these
+  // same views the backend reuses this read instead of starting over. One
+  // read at a time; views kept meanwhile queue a single follow-up read.
+  _speculate() {
+    if (!this.scanning || !this.sessionId) return;
+    const spec = this.speculation;
+    if (spec.inflight) {
+      spec.dirty = true;
+      return;
+    }
+    spec.inflight = true;
+    spec.dirty = false;
+    const scanId = this.scanId;
+    const images = this.scan.frames.map((frame) => frame.base64);
+    void fetch(`${BACKEND_URL}/api/vision/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        images_base64: images,
+        session_id: this.sessionId,
+        force: true,
+        speculative: true,
+        scan_id: scanId,
+        provider: this.provider || undefined,
+        claude_model: this.claudeModel || undefined,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          this.emit('log', `speculative scan read failed: ${response.status}`);
+          return;
+        }
+        const data = await response.json();
+        if (this.scanId === scanId && data?.problem) this.scanReads.push(data.problem);
+      })
+      .catch((error) => this.emit('log', `speculative scan read failed: ${error.message || error}`))
+      .finally(() => {
+        spec.inflight = false;
+        if (spec.dirty && this.scanning && this.scanId === scanId) this._speculate();
+      });
+  }
+
   async _submitGuidedScan({ partial, limitReached, finishedBy = 'manual' }) {
     if (!this.scanning) return { ok: false, error: 'guided scan is not active' };
     if (this.scanTimer) clearTimeout(this.scanTimer);
@@ -430,6 +547,7 @@ class CodingCapture extends EventEmitter {
           session_id: this.sessionId,
           force: true,
           scan_incomplete: Boolean(partial),
+          scan_id: this.scanId || undefined,
           provider: this.provider || undefined,
           claude_model: this.claudeModel || undefined,
         }),
@@ -443,15 +561,17 @@ class CodingCapture extends EventEmitter {
         cached: false,
         bytes: selector.frames.reduce((sum, frame) => sum + frame.bytes, 0),
       });
-      this._emitScanState(
-        data.problem?.completeness === 'complete' && !partial ? 'complete' : 'partial',
-        {
-          frames: selector.frames.length,
-          limitReached,
-          finishedBy,
-          partial: partial || data.problem?.completeness !== 'complete',
-        },
-      );
+      // Judge the scan by its best read: the final one can come back weaker
+      // than a background read that already saw every question. Only a real
+      // cause (capture limit, scan_incomplete) forces "partial" on its own.
+      const best = bestScanRead([...(this.scanReads || []), data.problem]);
+      const complete = best?.completeness === 'complete' && !partial;
+      this._emitScanState(complete ? 'complete' : 'partial', {
+        frames: selector.frames.length,
+        limitReached,
+        finishedBy,
+        partial: !complete,
+      });
       return { ok: true, partial };
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
@@ -523,4 +643,4 @@ class CodingCapture extends EventEmitter {
   }
 }
 
-module.exports = { CodingCapture };
+module.exports = { CodingCapture, getSourcesWithoutFriday, setProtectedWindowCheck };

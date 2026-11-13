@@ -8,7 +8,7 @@
  * Target model: gemini-2.5-flash (vision + cheap) OR gpt-4o vision.
  */
 
-export const CODING_EXTRACTION_VERSION = '1.6.0';
+export const CODING_EXTRACTION_VERSION = '1.9.0';
 
 export const CODING_EXTRACTION_SYSTEM_PROMPT = `You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
 
@@ -32,6 +32,8 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
   "constraints": string[] | null,
   "function_signature": string | null,
   "language_hint": string | null,
+  "visual_frames": number[],
+  "visual_frame_labels": string[],
   "confidence": number
 }
 
@@ -43,7 +45,9 @@ RULES
   \`visible_context\`, including technical prose, diagrams and labels, code,
   errors, and command output. Preserve exact names and details, omit unrelated
   app chrome, and do not infer clipped or unreadable content. Keep it under
-  6,000 characters.
+  6,000 characters. \`visible_context\` holds only the page's own content: never
+  notes about what is or isn't visible in the screenshots (put those in
+  \`missing_sections\`).
 - questions: EVERY distinct question visible across the screenshot(s), in
   page order, each self-contained: its number, full wording, and all options
   verbatim. Set the question field to the first one. Do not merge separate questions.
@@ -57,6 +61,18 @@ RULES
 - When is_coding_problem is true, set is_screen_question false so coding tasks
   are routed only to the coding workflow.
 - Transcribe visible code into the screen_code field verbatim; never infer hidden lines.
+- Tables must be written in \`visible_context\` (and \`question\`) as a Markdown table
+  with every cell transcribed verbatim, header row included.
+- Charts and diagrams: write them out in \`visible_context\` with the type,
+  title, axes and units, every data point and label, the legend, and the
+  caption. Any value you cannot read with certainty is written \`[unreadable]\`;
+  never guess or estimate a value.
+- visual_frames: 0-based indices of the screenshots that contain a chart,
+  diagram, figure, or image needed to answer a visible question or that
+  belongs to reference material. Leave it empty for text- or table-only pages.
+- visual_frame_labels: one short label per visual_frames entry, same order,
+  naming the figures that screenshot shows, e.g. "Figure 2 (line chart: Sales
+  by channel); top of Figure 3 (flowchart)". Empty when visual_frames is empty.
 - Mark clipped/unreadable content partial or uncertain and name missing sections.
 - A question that refers to a passage, table, or preamble shown elsewhere
   ("based on the passage above") is NOT partial for that reason alone; judge

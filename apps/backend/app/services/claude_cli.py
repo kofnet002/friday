@@ -21,7 +21,7 @@ from pathlib import Path
 
 from app.logging import log
 from app.services.claude_agent_auth import claude_cli_ready, resolve_agent_env
-from app.services.claude_api import image_media_type
+from app.services.claude_api import accepts_effort, image_media_type
 from app.services.coding_agent import _STREAM_READ_LIMIT, _drain, _kill
 from app.settings import settings
 
@@ -84,14 +84,36 @@ async def run_claude_cli_vision(
     model: str | None = None,
     session_id: str | None = None,
 ) -> str:
-    """One-shot vision call: write the screenshot to a scratch dir, let the CLI
-    read it (Read tool), and return the final answer text.
+    """One-shot vision call on a single screenshot (thin wrapper over
+    run_claude_cli_with_images; a lone image keeps the legacy `screen.<ext>` name).
 
     Used for screenshot extraction when Claude is the selected provider on the
-    subscription transport — the CLI does the OCR (see claude_api.claude_vision). `system`
-    is APPENDED to Claude Code's default prompt (so its image-reading behavior
-    stays intact); `prompt` must tell it to read the file we wrote and reply
-    with JSON only. Returns the raw result text (caller parses/validates).
+    subscription transport — the CLI does the OCR (see claude_api.claude_vision).
+    """
+    return await run_claude_cli_with_images(
+        images=[image_bytes], prompt=prompt, system=system, model=model, session_id=session_id
+    )
+
+
+async def run_claude_cli_with_images(
+    *,
+    images: list[bytes],
+    prompt: str,
+    system: str,
+    model: str | None = None,
+    session_id: str | None = None,
+    labels: list[str] | None = None,
+    effort: str | None = None,
+) -> str:
+    """One-shot call with one or more images: write them to a scratch dir, let
+    the CLI read them (Read tool), and return the final answer text.
+
+    Several images are written as screen-1.<ext> … screen-N.<ext>; a single image
+    keeps the legacy `screen.<ext>` name. With `labels` (aligned with `images`)
+    the prompt lists each file with the figures it shows. `system` is APPENDED
+    to Claude Code's default prompt (so its image-reading behavior stays
+    intact); `prompt` must tell it what to do with the files. Returns the raw
+    result text.
     """
     reason = claude_cli_ready(session_id)
     if reason:
@@ -99,11 +121,23 @@ async def run_claude_cli_vision(
 
     env = resolve_agent_env(session_id)
     workspace = tempfile.mkdtemp(prefix="friday-vision-")
-    image_name = f"screen.{_image_ext(image_bytes)}"
+    if len(images) == 1:
+        image_names = [f"screen.{_image_ext(images[0])}"]
+        read_prefix = f"Read the image file {image_names[0]} in the current directory. "
+    else:
+        image_names = [f"screen-{i}.{_image_ext(img)}" for i, img in enumerate(images, 1)]
+        read_prefix = f"Read the image files {', '.join(image_names)} in the current directory. "
+    if labels is not None:
+        listing = "\n".join(
+            f"- {name}: {(labels[i].strip() if i < len(labels) else '') or 'unlabelled'}"
+            for i, name in enumerate(image_names)
+        )
+        read_prefix += f"What each file shows:\n{listing}\n\n"
     proc: asyncio.subprocess.Process | None = None
     try:
         # Blocking write off the event loop (ASYNC230).
-        await asyncio.to_thread(Path(workspace, image_name).write_bytes, image_bytes)
+        for name, img in zip(image_names, images, strict=True):
+            await asyncio.to_thread(Path(workspace, name).write_bytes, img)
 
         cmd = [
             settings.claude_cli_path,
@@ -111,8 +145,12 @@ async def run_claude_cli_vision(
             "--output-format",
             "stream-json",
             "--verbose",
-            # Read is all it needs — load the screenshot. Skip permissions so
-            # the read isn't blocked in non-interactive mode (scratch dir only).
+            # Read is all it needs — load the screenshot. --tools makes it the
+            # ONLY tool available (no Bash, Write, WebFetch …), so skipping
+            # permissions — needed for the read in non-interactive mode — can't
+            # let the prompt drive anything else. cwd is a scratch dir.
+            "--tools",
+            "Read",
             "--allowedTools",
             "Read",
             "--dangerously-skip-permissions",
@@ -121,6 +159,8 @@ async def run_claude_cli_vision(
         ]
         if model:
             cmd += ["--model", model]
+        if effort and accepts_effort(model):
+            cmd += ["--effort", effort]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -133,7 +173,7 @@ async def run_claude_cli_vision(
             start_new_session=True,
         )
         assert proc.stdin is not None
-        stdin_text = f"Read the image file {image_name} in the current directory. {prompt}"
+        stdin_text = f"{read_prefix}{prompt}"
         proc.stdin.write(stdin_text.encode("utf-8"))
         await proc.stdin.drain()
         proc.stdin.close()
@@ -178,6 +218,7 @@ async def stream_claude_cli_text(
     system: str | None = None,
     model: str | None = None,
     session_id: str | None = None,
+    effort: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream a plain text completion from `claude -p` (no tools).
 
@@ -204,6 +245,8 @@ async def stream_claude_cli_text(
         cmd += ["--system-prompt", system]
     if model:
         cmd += ["--model", model]
+    if effort and accepts_effort(model):
+        cmd += ["--effort", effort]
     # No --allowedTools / --dangerously-skip-permissions: in non-interactive
     # print mode the CLI can't prompt for tool approval, so it just answers in
     # text — exactly what a solve wants.
