@@ -154,3 +154,43 @@ def test_accepts_effort_follows_the_model() -> None:
     assert accepts_effort(None)  # the CLI's own default model
     assert not accepts_effort("claude-haiku-4-5")
     assert not accepts_effort("claude-sonnet-4-5-20250929")
+
+
+def _only_read_tool(cmd: list[str]) -> None:
+    # The CLI runs with --dangerously-skip-permissions, so the tool set itself
+    # must be restricted: Read is the only tool it gets.
+    assert cmd[cmd.index("--tools") + 1] == "Read"
+    assert cmd[cmd.index("--tools") + 2].startswith("--")
+
+
+async def test_vision_path_restricts_tools_to_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    _patch(monkeypatch, seen)
+    await claude_cli.run_claude_cli_vision(image_bytes=PNG, prompt="P", system="sys")
+    _only_read_tool(seen["cmd"])
+    assert Path(seen["cwd"]).name.startswith("friday-vision-")
+
+
+async def test_answer_with_images_restricts_tools_to_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import answer as answer_mod
+
+    seen: dict[str, Any] = {}
+    _patch(monkeypatch, seen)
+    monkeypatch.setattr(answer_mod, "claude_transport", lambda: "cli")
+    out = [t async for t in answer_mod._stream_anthropic("sys", "q", "q", (), images=[PNG])]
+    assert out == ["the answer"]
+    _only_read_tool(seen["cmd"])
+
+
+async def test_empty_cli_image_answer_raises_so_the_fallback_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import answer as answer_mod
+
+    async def empty(**_kw: Any) -> str:
+        return ""
+
+    monkeypatch.setattr(answer_mod, "claude_transport", lambda: "cli")
+    monkeypatch.setattr(claude_cli, "run_claude_cli_with_images", empty)
+    with pytest.raises(RuntimeError, match="empty"):
+        _ = [t async for t in answer_mod._stream_anthropic("sys", "q", "q", (), images=[PNG])]

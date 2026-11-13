@@ -145,8 +145,12 @@ async def run_claude_cli_with_images(
             "--output-format",
             "stream-json",
             "--verbose",
-            # Read is all it needs — load the screenshot. Skip permissions so
-            # the read isn't blocked in non-interactive mode (scratch dir only).
+            # Read is all it needs — load the screenshot. --tools makes it the
+            # ONLY tool available (no Bash, Write, WebFetch …), so skipping
+            # permissions — needed for the read in non-interactive mode — can't
+            # let the prompt drive anything else. cwd is a scratch dir.
+            "--tools",
+            "Read",
             "--allowedTools",
             "Read",
             "--dangerously-skip-permissions",

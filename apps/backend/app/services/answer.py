@@ -289,8 +289,11 @@ async def _stream_anthropic(
             labels=labels,
             effort=effort,
         )
-        if text:
-            yield text
+        if not text.strip():
+            # Raise (before any token) so the fallback chain runs instead of
+            # the stream ending silently with no answer.
+            raise RuntimeError("Claude CLI returned an empty answer for the screenshots")
+        yield text
         return
     if transport == "cli":
         from app.services.claude_cli import stream_claude_cli_text
