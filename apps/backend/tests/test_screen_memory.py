@@ -206,3 +206,66 @@ async def test_labels_are_stored_pruned_and_cleared_with_their_images(monkeypatc
     await rc.clear_screen_state(sid)
     assert await rc.get_screen_image_label(sid, k3) is None
     assert [key for key in fake.store if key.startswith("session:s1:")] == []
+
+
+def _smoke11_reads() -> list[dict[str, object]]:
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "data" / "smoke11_preamble_reads.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_title_prefixed_reread_from_the_smoke_merges():
+    from difflib import SequenceMatcher
+
+    from app.services.screen_memory import _norm
+
+    # The Task 11 smoke pair: one read starts with the page title, the other
+    # straight at the preamble (ratio 0.727, all four screenshots shared).
+    first, second = _smoke11_reads()
+    ratio = SequenceMatcher(None, _norm(str(first["text"])), _norm(str(second["text"]))).ratio()
+    assert 0.6 <= ratio < 0.8
+    refs = merge_references([], str(first["text"]), list(first["image_keys"]))  # type: ignore[arg-type]
+    first_id = refs[0].id
+    refs = merge_references(refs, str(second["text"]), list(second["image_keys"]))  # type: ignore[arg-type]
+    assert len(refs) == 1
+    assert refs[0].id == first_id
+    assert refs[0].text == str(first["text"]).strip()
+
+
+def test_two_shared_screenshots_make_one_passage():
+    refs = merge_references([], "Section 2: Regional sales. East grew fastest.", ["a", "b", "x"])
+    refs = merge_references(refs, "Regional performance overview, with notes on staffing.", ["b", "a"])
+    assert len(refs) == 1
+
+
+def test_heading_prefix_within_the_opening_merges_when_wording_is_close():
+    body = (
+        "Preamble: Questions 1 to 7 refer to the figures in this section. Read each "
+        "figure carefully; not every value is printed and the text does not repeat them."
+    )
+    titled = "Operations Analyst Assessment, Section C\n" + body.replace("Preamble: ", "Preamble. ")
+    refs = merge_references([], titled, ["a"])
+    refs = merge_references(refs, body + " Lakeview Retail runs one distribution centre.", ["z"])
+    assert len(refs) == 1
+
+
+def test_shared_screenshot_and_heading_prefix_but_different_text_stay_separate():
+    import re
+    from difflib import SequenceMatcher
+
+    from app.services.screen_memory import _norm
+
+    first = "Figure 2: Sales by channel, quarterly, 2023 to 2024. Online overtook in-store in Q1 2024."
+    second = (
+        "Questions 5 to 7. Figure 2: Sales by channel, quarterly, 2023 to 2024 is needed for "
+        "question 7: add the North region's March and June orders, subtract Online Q4 sales, "
+        "and pick the result from A to D. Question 6 uses Table 2 and its uptime targets."
+    )
+    head = re.sub(r"[^a-z0-9]", "", _norm(first))[:40]
+    assert head in re.sub(r"[^a-z0-9]", "", _norm(second))[:120]
+    assert SequenceMatcher(None, _norm(first), _norm(second)).ratio() < 0.6
+    refs = merge_references([], first, ["shared"])
+    refs = merge_references(refs, second, ["shared", "other"])
+    assert len(refs) == 2

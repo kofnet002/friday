@@ -20,6 +20,12 @@ MAX_IMAGES_PER_ANSWER = 8
 SAME_PASSAGE_RATIO = 0.8
 # Or: it shares a figure with a saved passage and starts the same way.
 SAME_PASSAGE_HEAD_CHARS = 40
+# A heading found near the start of the other read (a page title before
+# it, say) counts when the wording is still this close.
+SAME_PASSAGE_HEAD_WINDOW = 120
+SAME_PASSAGE_PREFIXED_RATIO = 0.6
+# Reads sharing this many screenshots show the same passage.
+SAME_PASSAGE_SHARED_IMAGES = 2
 REFERENCE_HEADER = (
     "Earlier reference material on screen (passages / preambles the questions may refer to):"
 )
@@ -75,19 +81,43 @@ def image_key(data_b64: str) -> str:
     return hashlib.sha256(body.encode()).hexdigest()[:32]
 
 
+def _alnum(norm_text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", norm_text)
+
+
 def _head(norm_text: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", norm_text)[:SAME_PASSAGE_HEAD_CHARS]
+    return _alnum(norm_text)[:SAME_PASSAGE_HEAD_CHARS]
+
+
+def _head_near_start(a_norm: str, b_norm: str) -> bool:
+    """One read's opening line appears near the start of the other's (e.g. the
+    other also caught the page title above it)."""
+    a, b = _alnum(a_norm), _alnum(b_norm)
+    a_head, b_head = a[:SAME_PASSAGE_HEAD_CHARS], b[:SAME_PASSAGE_HEAD_CHARS]
+    return bool(a_head and b_head) and (
+        a_head in b[:SAME_PASSAGE_HEAD_WINDOW] or b_head in a[:SAME_PASSAGE_HEAD_WINDOW]
+    )
 
 
 def _same_passage(ref: ScreenReference, new_norm: str, new_keys: list[str]) -> bool:
-    """A re-read of a saved passage: worded nearly the same, or showing one of
-    its figures under the same opening line."""
+    """A re-read of a saved passage: worded nearly the same, showing several
+    of its screenshots, showing one of its figures under the same opening
+    line, or opening the same way (after a title, say) in close wording."""
     ref_norm = _norm(ref.text)
+    shared = set(ref.image_keys) & set(new_keys)
+    if len(shared) >= SAME_PASSAGE_SHARED_IMAGES:
+        return True
     matcher = SequenceMatcher(None, ref_norm, new_norm)
     if matcher.quick_ratio() >= SAME_PASSAGE_RATIO and matcher.ratio() >= SAME_PASSAGE_RATIO:
         return True
     head = _head(new_norm)
-    return bool(head) and bool(set(ref.image_keys) & set(new_keys)) and _head(ref_norm) == head
+    if head and shared and _head(ref_norm) == head:
+        return True
+    return (
+        _head_near_start(ref_norm, new_norm)
+        and matcher.quick_ratio() >= SAME_PASSAGE_PREFIXED_RATIO
+        and matcher.ratio() >= SAME_PASSAGE_PREFIXED_RATIO
+    )
 
 
 def merge_references(
