@@ -230,6 +230,16 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
             loaded = await load_answer_images(session_id, from_screen=from_screen)
             images = [data for data, _ in loaded]
             image_labels = [label for _, label in loaded]
+        # Which screenshots an answer saw, so "the chart wasn't visible" answers
+        # can be traced to missing images vs. the model.
+        log.info(
+            "ws_answer.screen_images",
+            session_id=session_id,
+            from_screen=from_screen,
+            has_screen_context=bool(screen_context),
+            count=len(images),
+            labels=image_labels,
+        )
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
