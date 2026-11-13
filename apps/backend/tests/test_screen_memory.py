@@ -102,10 +102,86 @@ async def test_legacy_references_load_from_redis(monkeypatch):
 
     fake = install_fake_redis(monkeypatch)
     fake.store["session:s1:screen_references"] = json.dumps(
-        ["A", {"id": "x", "text": "B", "image_keys": ["k"], "saved_at": 1}, 5,
-         {"id": "y", "text": ""}]
+        [
+            "A",
+            {"id": "x", "text": "B", "image_keys": ["k"], "saved_at": 1},
+            5,
+            {"id": "y", "text": ""},
+        ]
     )
     first = await rc.get_screen_references("s1")
     assert [r.text for r in first] == ["A", "B"]
     assert first[1].image_keys == ["k"]
     assert [r.id for r in await rc.get_screen_references("s1")] == [r.id for r in first]
+
+
+# Task 9 shapes: re-reads of one page come back worded a little differently.
+PREAMBLE_A = (
+    "Read the passage below and answer questions 1 to 7. The figures show quarterly "
+    "sales by channel for Northwind Traders in 2025, with online growing fastest."
+)
+PREAMBLE_B = (
+    "Read the passage below and answer Questions 1-7. The figures show the quarterly "
+    "sales by channel for Northwind Traders during 2025, with online growing fastest."
+)
+
+
+def test_reread_worded_differently_is_the_same_passage():
+    from difflib import SequenceMatcher
+
+    from app.services.screen_memory import _norm
+
+    assert SequenceMatcher(None, _norm(PREAMBLE_A), _norm(PREAMBLE_B)).ratio() >= 0.8
+    refs = merge_references([], PREAMBLE_A, ["k1"])
+    refs = merge_references(refs, PREAMBLE_B, ["k2"])
+    assert len(refs) == 1
+    assert refs[0].text == max(PREAMBLE_A, PREAMBLE_B, key=len)
+    assert refs[0].image_keys == ["k2", "k1"]
+
+
+def test_same_heading_and_shared_figures_merge_into_one_passage():
+    keys = ["a", "b", "c", "d"]
+    heading = "Section 2: Regional performance of all retail stores"
+    first = f"{heading}. Figure 2 shows sales by region."
+    second = (
+        f"{heading}\n\nThe east region overtook the west in Q3, "
+        "while Figure 3 traces the approval flow for new store openings."
+    )
+    refs = merge_references([], first, keys)
+    refs = merge_references(refs, second, list(reversed(keys)))
+    assert len(refs) == 1
+    assert refs[0].text == second.strip()
+    assert sorted(refs[0].image_keys) == keys
+
+
+def test_different_passages_stay_separate():
+    refs = merge_references([], "Section 1: Staffing. Hiring rose 4% in Q2.", ["a"])
+    refs = merge_references(refs, "Section 4: Logistics. Deliveries fell after the storm.", ["b"])
+    assert len(refs) == 2
+    # Shared figures alone don't make two passages one.
+    refs = merge_references(refs, "Appendix: Glossary of retail terms used above.", ["a"])
+    assert len(refs) == 3
+
+
+def test_merged_passage_keeps_the_older_id_and_position():
+    other = "Section 9: Unrelated notes about the warehouse audit."
+    refs = merge_references([], PREAMBLE_A, ["k1"])
+    refs = merge_references(refs, other, [])
+    first_id = refs[0].id
+    refs = merge_references(refs, PREAMBLE_B, ["k2"])
+    assert refs[0].id == first_id
+    assert refs[1].text == other
+    assert len(refs) == 2
+
+
+def test_several_matching_reads_collapse_into_one():
+    refs = [
+        ScreenReference("old", PREAMBLE_A, ["a", "b"], 1.0),
+        ScreenReference("mid", "Section 9: Unrelated notes.", [], 2.0),
+        ScreenReference("dup", PREAMBLE_B, ["c", "d"], 3.0),
+    ]
+    third = PREAMBLE_A.replace("fastest", "the fastest of all")
+    refs = merge_references(refs, third, ["e"])
+    assert [r.id for r in refs] == ["old", "mid"]
+    assert refs[0].text == third
+    assert refs[0].image_keys == ["e", "a", "b", "c"]

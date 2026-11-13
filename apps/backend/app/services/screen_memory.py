@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
 from typing import Any
 
 # Budget for remembered passages / preambles. Oldest are dropped first; the
@@ -14,6 +15,11 @@ from typing import Any
 MAX_REFERENCE_CHARS = 12_000
 MAX_IMAGES_PER_REFERENCE = 4
 MAX_IMAGES_PER_ANSWER = 8
+# A re-read worded this similarly (difflib ratio on normalized text) is the
+# same passage, not a new one.
+SAME_PASSAGE_RATIO = 0.8
+# Or: it shares a figure with a saved passage and starts the same way.
+SAME_PASSAGE_HEAD_CHARS = 40
 REFERENCE_HEADER = (
     "Earlier reference material on screen (passages / preambles the questions may refer to):"
 )
@@ -69,6 +75,21 @@ def image_key(data_b64: str) -> str:
     return hashlib.sha256(body.encode()).hexdigest()[:32]
 
 
+def _head(norm_text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", norm_text)[:SAME_PASSAGE_HEAD_CHARS]
+
+
+def _same_passage(ref: ScreenReference, new_norm: str, new_keys: list[str]) -> bool:
+    """A re-read of a saved passage: worded nearly the same, or showing one of
+    its figures under the same opening line."""
+    ref_norm = _norm(ref.text)
+    matcher = SequenceMatcher(None, ref_norm, new_norm)
+    if matcher.quick_ratio() >= SAME_PASSAGE_RATIO and matcher.ratio() >= SAME_PASSAGE_RATIO:
+        return True
+    head = _head(new_norm)
+    return bool(head) and bool(set(ref.image_keys) & set(new_keys)) and _head(ref_norm) == head
+
+
 def merge_references(
     refs: list[ScreenReference], new_text: str, image_keys: list[str]
 ) -> list[ScreenReference]:
@@ -88,16 +109,37 @@ def merge_references(
             return merged
     replaced = [ref for ref in refs if _norm(ref.text) in new_norm]
     merged = [ref for ref in refs if _norm(ref.text) not in new_norm]
+    same = [ref for ref in merged if _same_passage(ref, new_norm, new_keys)]
+    if same:
+        # One passage: it keeps the oldest read's id and place (the viewer's
+        # numbering and remove-by-id stay stable), the longest wording, and
+        # the newest figures first.
+        survivor = same[0]
+        group = [*same, *replaced]
+        text = max([new_text, *(ref.text for ref in group)], key=len)
+        keys = list(dict.fromkeys([*new_keys, *(k for ref in group for k in ref.image_keys)]))
+        merged = [
+            replace(ref, text=text, image_keys=keys[:MAX_IMAGES_PER_REFERENCE])
+            if ref is survivor
+            else ref
+            for ref in merged
+            if ref is survivor or all(ref is not other for other in same)
+        ]
+        return _trim(merged)
     if not new_keys:
         # A longer read without figures keeps the figures of the reads it replaces.
-        new_keys = list(
-            dict.fromkeys(k for ref in replaced for k in ref.image_keys)
-        )[:MAX_IMAGES_PER_REFERENCE]
+        new_keys = list(dict.fromkeys(k for ref in replaced for k in ref.image_keys))[
+            :MAX_IMAGES_PER_REFERENCE
+        ]
     merged.append(
         ScreenReference(
             id=uuid.uuid4().hex, text=new_text, image_keys=new_keys, saved_at=time.time()
         )
     )
+    return _trim(merged)
+
+
+def _trim(merged: list[ScreenReference]) -> list[ScreenReference]:
     while len(merged) > 1 and sum(len(ref.text) for ref in merged) > MAX_REFERENCE_CHARS:
         merged.pop(0)
     return merged
