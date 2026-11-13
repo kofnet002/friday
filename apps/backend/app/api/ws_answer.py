@@ -15,6 +15,7 @@ from app.redis_client import (
     get_current_screen_images,
     get_screen_context,
     get_screen_image,
+    get_screen_image_label,
     get_screen_references,
     recent_transcript_text,
     set_last_answer,
@@ -78,21 +79,24 @@ def resolve_screen_context(override: dict[str, Any], stored: str | None) -> str 
     return stored or override.get("screen_context") or None
 
 
-async def load_answer_images(session_id: str, *, from_screen: bool) -> list[bytes]:
-    """Kept screenshots (charts/diagrams) to attach to an answer: the current
-    screen's, plus remembered passages' for a question read off the screen.
-    Missing or undecodable images are dropped; Redis errors yield none."""
+async def load_answer_images(
+    session_id: str, *, from_screen: bool
+) -> list[tuple[bytes, str]]:
+    """Kept screenshots (charts/diagrams) to attach to an answer, each with its
+    label ("" if none): the current screen's, plus remembered passages' for a
+    question read off the screen. Missing or undecodable images are dropped;
+    Redis errors yield none."""
     try:
         current = await get_current_screen_images(session_id)
         refs = await get_screen_references(session_id)
         keys = answer_image_keys(current, refs, include_references=from_screen)
-        images: list[bytes] = []
+        images: list[tuple[bytes, str]] = []
         for key in keys:
             data = await get_screen_image(session_id, key)
             if not data:
                 continue
             try:
-                images.append(base64.b64decode(data))
+                decoded = base64.b64decode(data)
             except (binascii.Error, ValueError) as exc:
                 log.warning(
                     "ws_answer.screen_image_decode_failed",
@@ -100,6 +104,8 @@ async def load_answer_images(session_id: str, *, from_screen: bool) -> list[byte
                     key=key,
                     error=str(exc),
                 )
+                continue
+            images.append((decoded, await get_screen_image_label(session_id, key) or ""))
         return images
     except Exception as exc:  # noqa: BLE001 - screenshots are optional
         log.warning("ws_answer.screen_images_failed", session_id=session_id, error=str(exc))
@@ -219,8 +225,11 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
         # also gets the remembered passages' screenshots.
         from_screen = bool(request.get("from_screen"))
         images: list[bytes] = []
+        image_labels: list[str] = []
         if session_id and screen_context:
-            images = await load_answer_images(session_id, from_screen=from_screen)
+            loaded = await load_answer_images(session_id, from_screen=from_screen)
+            images = [data for data, _ in loaded]
+            image_labels = [label for _, label in loaded]
         context = AnswerContext(
             resume_text=override.get("resume_text") or persisted.get("resume_text"),
             extra_instructions=(
@@ -308,6 +317,7 @@ async def ws_answer(websocket: WebSocket, session_id: str | None = None) -> None
                 on_fallback=_on_fallback,
                 claude_model=claude_model,
                 images=images or None,
+                image_labels=image_labels if images else None,
             ):
                 if not collected:
                     latency.mark(candidate_id, "first_token")

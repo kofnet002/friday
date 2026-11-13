@@ -121,6 +121,7 @@ def captured(
         "current": ["k1"],
         "refs": [ScreenReference(id="r1", text="passage", image_keys=["k2"], saved_at=1.0)],
         "images": {"k1": "aW1nMQ==", "k2": "aW1nMg=="},
+        "labels": {"k2": "Figure 2 (line chart)"},
     }
 
     async def fake_stream(*a: Any, **k: Any) -> AsyncIterator[str]:
@@ -143,7 +144,11 @@ def captured(
     monkeypatch.setattr(mod, "get_screen_context", get_screen_context)
     monkeypatch.setattr(mod, "get_current_screen_images", get_current_screen_images)
     monkeypatch.setattr(mod, "get_screen_references", get_screen_references)
+    async def get_screen_image_label(_sid: str, key: str) -> str | None:
+        return screen["labels"].get(key)
+
     monkeypatch.setattr(mod, "get_screen_image", get_screen_image)
+    monkeypatch.setattr(mod, "get_screen_image_label", get_screen_image_label)
     return calls, screen
 
 
@@ -168,6 +173,7 @@ def test_screen_question_also_sends_remembered_images(
     calls, _ = captured
     _ask_once(from_screen=True)
     assert calls[0]["images"] == [b"img1", b"img2"]
+    assert calls[0]["image_labels"] == ["", "Figure 2 (line chart)"]
 
 
 def test_screen_capture_off_sends_no_images(
@@ -197,3 +203,4 @@ def test_missing_image_bytes_are_dropped(
     screen["images"] = {"k2": "aW1nMg=="}
     _ask_once(from_screen=True)
     assert calls[0]["images"] == [b"img2"]
+    assert calls[0]["image_labels"] == ["Figure 2 (line chart)"]

@@ -234,7 +234,10 @@ export async function clearScreenContext(sessionId: string): Promise<boolean> {
   }
 }
 
-export type SavedPassage = { id: string; text: string; images: string[]; saved_at: number };
+/** A kept screenshot; `label` names the figures it shows (null if unlabelled). */
+export type SavedImage = { key: string; label: string | null };
+
+export type SavedPassage = { id: string; text: string; images: SavedImage[]; saved_at: number };
 
 /** The session's remembered passages, oldest first; null when unreachable. */
 export async function fetchSavedPassages(sessionId: string): Promise<SavedPassage[] | null> {

@@ -102,14 +102,17 @@ async def run_claude_cli_with_images(
     system: str,
     model: str | None = None,
     session_id: str | None = None,
+    labels: list[str] | None = None,
 ) -> str:
     """One-shot call with one or more images: write them to a scratch dir, let
     the CLI read them (Read tool), and return the final answer text.
 
     Several images are written as screen-1.<ext> … screen-N.<ext>; a single image
-    keeps the legacy `screen.<ext>` name. `system` is APPENDED to Claude Code's
-    default prompt (so its image-reading behavior stays intact); `prompt` must
-    tell it what to do with the files. Returns the raw result text.
+    keeps the legacy `screen.<ext>` name. With `labels` (aligned with `images`)
+    the prompt lists each file with the figures it shows. `system` is APPENDED
+    to Claude Code's default prompt (so its image-reading behavior stays
+    intact); `prompt` must tell it what to do with the files. Returns the raw
+    result text.
     """
     reason = claude_cli_ready(session_id)
     if reason:
@@ -123,6 +126,12 @@ async def run_claude_cli_with_images(
     else:
         image_names = [f"screen-{i}.{_image_ext(img)}" for i, img in enumerate(images, 1)]
         read_prefix = f"Read the image files {', '.join(image_names)} in the current directory. "
+    if labels is not None:
+        listing = "\n".join(
+            f"- {name}: {(labels[i].strip() if i < len(labels) else '') or 'unlabelled'}"
+            for i, name in enumerate(image_names)
+        )
+        read_prefix += f"What each file shows:\n{listing}\n\n"
     proc: asyncio.subprocess.Process | None = None
     try:
         # Blocking write off the event loop (ASYNC230).

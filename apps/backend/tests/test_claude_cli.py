@@ -91,6 +91,23 @@ async def test_run_claude_cli_with_images_writes_all_files(monkeypatch: pytest.M
     assert not _exists(seen["cwd"])
 
 
+async def test_run_claude_cli_with_images_lists_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    _patch(monkeypatch, seen)
+
+    await claude_cli.run_claude_cli_with_images(
+        images=[JPEG, PNG],
+        prompt="Describe.",
+        system="sys",
+        labels=["Figure 1 (bar chart: Sales)", ""],
+    )
+
+    stdin = seen["proc"].stdin.data.decode()
+    assert "screen-1.jpg: Figure 1 (bar chart: Sales)" in stdin
+    assert "screen-2.png: unlabelled" in stdin
+    assert stdin.endswith("Describe.")
+
+
 async def test_vision_wrapper_keeps_single_image_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
     _patch(monkeypatch, seen)

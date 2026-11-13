@@ -185,3 +185,24 @@ def test_several_matching_reads_collapse_into_one():
     assert [r.id for r in refs] == ["old", "mid"]
     assert refs[0].text == third
     assert refs[0].image_keys == ["e", "a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_labels_are_stored_pruned_and_cleared_with_their_images(monkeypatch):
+    fake = install_fake_redis(monkeypatch)
+    sid = "s1"
+    k1, k2 = await rc.put_screen_images(sid, ["AAAA", "BBBB"], ["Figure 1 (bar chart)", ""])
+    assert await rc.get_screen_image_label(sid, k1) == "Figure 1 (bar chart)"
+    assert await rc.get_screen_image_label(sid, k2) is None
+    # A later read of the same image without a label keeps the earlier one.
+    await rc.put_screen_images(sid, ["AAAA"])
+    assert await rc.get_screen_image_label(sid, k1) == "Figure 1 (bar chart)"
+
+    await rc.prune_screen_images(sid, [k1])
+    assert await rc.get_screen_image(sid, k1) is None
+    assert await rc.get_screen_image_label(sid, k1) is None
+
+    [k3] = await rc.put_screen_images(sid, ["CCCC"], ["Figure 3"])
+    await rc.clear_screen_state(sid)
+    assert await rc.get_screen_image_label(sid, k3) is None
+    assert [key for key in fake.store if key.startswith("session:s1:")] == []

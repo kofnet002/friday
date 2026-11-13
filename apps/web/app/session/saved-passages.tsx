@@ -89,17 +89,18 @@ export function SavedPassages({ sessionId, refreshKey, onClearAll }: SavedPassag
               <Markdown text={p.text} />
               {p.images.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {p.images.map((key) => (
+                  {p.images.map(({ key, label }) => (
                     <button
                       key={key}
                       type="button"
                       onClick={() => window.open(screenImageUrl(sessionId, key))}
-                      aria-label="Open saved screenshot"
+                      aria-label={`Open saved screenshot${label ? `: ${label}` : ''}`}
+                      title={label ?? undefined}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src={screenImageUrl(sessionId, key)}
-                        alt="Saved screenshot"
+                        alt={label || 'Saved screenshot'}
                         className="h-16 rounded border border-sky-200/70 dark:border-sky-900/70"
                       />
                     </button>

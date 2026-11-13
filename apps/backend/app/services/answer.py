@@ -81,6 +81,7 @@ async def stream_answer(
     on_fallback: Callable[[Provider, Provider, str], Awaitable[None]] | None = None,
     claude_model: str | None = None,
     images: list[bytes] | None = None,
+    image_labels: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """Yield answer tokens for the given question using the selected provider.
 
@@ -99,7 +100,8 @@ async def stream_answer(
     `images` (screenshots of on-screen charts/diagrams) reach only the
     `claude` provider. Every other provider in the chain — including a
     fallback after Claude fails — is told the visuals are unavailable so it
-    flags answers that depend on them.
+    flags answers that depend on them. `image_labels` (aligned with `images`)
+    caption each screenshot with the figures it shows.
     """
     claude_system = answer_system_prompt(context)
     other_system = (
@@ -145,6 +147,7 @@ async def stream_answer(
                     context.prior_turns,
                     model=claude_model,
                     images=images or None,
+                    image_labels=image_labels,
                 )
             else:
                 base = lambda: _stream_openai(system, user, context.prior_turns)  # noqa: E731
@@ -239,6 +242,7 @@ async def _stream_anthropic(
     *,
     model: str | None = None,
     images: list[bytes] | None = None,
+    image_labels: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """Stream an answer from Claude on the transport claude_transport() picks.
 
@@ -252,7 +256,8 @@ async def _stream_anthropic(
 
     `images` go before the text on the API; the CLI can only read images
     from files in a one-shot call, so with images it yields the whole answer
-    at once instead of streaming.
+    at once instead of streaming. Each image carries its label from
+    `image_labels`: a caption block on the API, a file list on the CLI.
     """
     model = model or settings.anthropic_answer_model
     transport = claude_transport()
@@ -260,7 +265,11 @@ async def _stream_anthropic(
         from app.services.claude_cli import run_claude_cli_with_images
 
         text = await run_claude_cli_with_images(
-            images=images, prompt=threaded_user, system=system, model=model
+            images=images,
+            prompt=threaded_user,
+            system=system,
+            model=model,
+            labels=image_labels or [""] * len(images),
         )
         if text:
             yield text
@@ -289,6 +298,7 @@ async def _stream_anthropic(
         effort=settings.anthropic_effort,
         prior=((turn.role, turn.content) for turn in prior),
         image=[(b, image_media_type(b)) for b in images] if images else None,
+        image_captions=(image_labels or [""] * len(images)) if images else None,
         cache_system=True,
     ):
         yield text

@@ -18,6 +18,9 @@ class FakeRedis:
         self.store[key] = value
         return True
 
+    async def expire(self, key: str, seconds: int) -> bool:
+        return key in self.store
+
     async def delete(self, *keys: str) -> int:
         return sum(1 for k in keys if self.store.pop(k, None) is not None)
 

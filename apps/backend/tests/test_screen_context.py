@@ -185,7 +185,26 @@ def test_extraction_prompt_asks_for_tables_charts_and_visual_frames():
     assert '"visual_frames": number[]' in P
     assert "Markdown table" in P
     assert "[unreadable]" in P
-    assert CODING_EXTRACTION_VERSION == "1.7.0"
+    assert '"visual_frame_labels": string[]' in P
+    assert CODING_EXTRACTION_VERSION == "1.8.0"
+
+
+def test_visual_frame_labels_align_with_visual_frames():
+    def make(frames, labels):
+        return ExtractedProblem(
+            is_coding_problem=False,
+            confidence=0.9,
+            visual_frames=frames,
+            visual_frame_labels=labels,
+        )
+
+    assert make([0, 2], ["Figure 1"]).visual_frame_labels == ["Figure 1", ""]
+    assert make([1], ["Figure 2", "extra"]).visual_frame_labels == ["Figure 2"]
+    assert make([1], None).visual_frame_labels == [""]
+    assert make(None, None).visual_frame_labels == []
+    # Labels follow their frame through dedupe / range filtering.
+    p = make([3, 0, 0, 9], ["Fig D", "Fig A", "dup", "out"])
+    assert p.labelled_visual_frames(4) == [(0, "Fig A"), (3, "Fig D")]
 
 
 # --- passage viewer endpoints ---
@@ -217,7 +236,9 @@ def viewer(monkeypatch):
 
 def _seed(sid="s1"):
     async def go():
-        (key,) = await put_screen_images(sid, [base64.b64encode(_JPEG).decode()])
+        (key,) = await put_screen_images(
+            sid, [base64.b64encode(_JPEG).decode()], ["Figure 1 (bar chart: Sales)"]
+        )
         refs = [
             ScreenReference(id="legacy1", text="Old passage text"),
             ScreenReference(id="ref2", text="Chart passage", image_keys=[key], saved_at=5.0),
@@ -239,7 +260,10 @@ def test_list_returns_legacy_and_object_refs(viewer):
     assert [r["id"] for r in body["references"]] == ["legacy1", "ref2"]
     assert body["references"][0]["images"] == []
     assert body["references"][1] == {
-        "id": "ref2", "text": "Chart passage", "images": [key], "saved_at": 5.0
+        "id": "ref2",
+        "text": "Chart passage",
+        "images": [{"key": key, "label": "Figure 1 (bar chart: Sales)"}],
+        "saved_at": 5.0,
     }
 
 

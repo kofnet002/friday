@@ -131,3 +131,42 @@ async def test_live_answers_use_answer_model(monkeypatch: pytest.MonkeyPatch) ->
     out = [t async for t in answer_mod._stream_anthropic("sys", "q", "q", ())]
     assert out == ["ok"] and seen == ["claude-sonnet-5-5"]
     assert answer_mod.claude_answer_model() == "claude-sonnet-5-5"
+
+
+def test_content_captions_each_image_in_order() -> None:
+    from app.services.claude_api import _content
+
+    images = [(b"one", "image/png"), (b"two", "image/jpeg")]
+    blocks = _content("Question?", images, captions=["Figure 1 (bar chart)", ""])
+    assert isinstance(blocks, list)
+    assert [b["type"] for b in blocks] == ["text", "image", "text", "image", "text"]
+    assert blocks[0]["text"] == "Screenshot 1 of 2: Figure 1 (bar chart)"
+    assert blocks[2]["text"] == "Screenshot 2 of 2: unlabelled"
+    assert blocks[-1]["text"] == "Question?"
+    # No captions: images then text, as before.
+    plain = _content("Q", images)
+    assert isinstance(plain, list)
+    assert [b["type"] for b in plain] == ["image", "image", "text"]
+
+
+async def test_answer_images_reach_the_api_with_their_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import answer as answer_mod
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(**kw: object) -> AsyncIterator[str]:
+        seen.update(kw)
+        yield "ok"
+
+    _creds(monkeypatch, key="sk", token="", mode="auto")
+    monkeypatch.setattr(answer_mod, "stream_claude_api", fake_stream)
+    out = [
+        t
+        async for t in answer_mod._stream_anthropic(
+            "sys", "q", "q", (), images=[b"\x89PNG\r\n\x1a\nx"], image_labels=["Figure 2"]
+        )
+    ]
+    assert out == ["ok"]
+    assert seen["image_captions"] == ["Figure 2"]

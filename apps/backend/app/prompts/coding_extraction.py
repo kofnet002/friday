@@ -5,7 +5,7 @@ Kept in sync with the TS file; update both when the schema changes.
 
 from __future__ import annotations
 
-CODING_EXTRACTION_VERSION = "1.7.0"
+CODING_EXTRACTION_VERSION = "1.8.0"
 
 CODING_EXTRACTION_SYSTEM_PROMPT = """\
 You extract coding interview problems from screenshots of platforms like LeetCode, Turing, HackerRank, and CoderPad.
@@ -32,6 +32,7 @@ OUTPUT: strict JSON only, no prose, no markdown fences. Schema:
   "function_signature": string | null,
   "language_hint": string | null,
   "visual_frames": number[],
+  "visual_frame_labels": string[],
   "confidence": number
 }
 
@@ -66,6 +67,9 @@ RULES
 - visual_frames: 0-based indices of the screenshots that contain a chart,
   diagram, figure, or image needed to answer a visible question or that
   belongs to reference material. Leave it empty for text- or table-only pages.
+- visual_frame_labels: one short label per visual_frames entry, same order,
+  naming the figures that screenshot shows, e.g. "Figure 2 (line chart: Sales
+  by channel); top of Figure 3 (flowchart)". Empty when visual_frames is empty.
 - Mark clipped/unreadable content partial or uncertain and name missing sections.
 - A question that refers to a passage, table, or preamble shown elsewhere
   ("based on the passage above") is NOT partial for that reason alone; judge

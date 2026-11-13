@@ -57,7 +57,12 @@ def test_coding_problem_is_not_routed_as_a_written_screen_question():
 
 from app import session_bus  # noqa: E402
 from app.api import vision  # noqa: E402
-from app.redis_client import get_current_screen_images, get_screen_image, get_screen_references  # noqa: E402
+from app.redis_client import (  # noqa: E402
+    get_current_screen_images,
+    get_screen_image,
+    get_screen_image_label,
+    get_screen_references,
+)
 from app.services.screen_memory import image_key  # noqa: E402
 from tests.fake_redis import install_fake_redis  # noqa: E402
 
@@ -152,3 +157,15 @@ async def test_single_frame_data_url_is_stored_stripped(monkeypatch):
 
 def test_null_visual_frames_become_empty():
     assert _problem(visual_frames=None).visual_frames == []
+
+
+async def test_kept_frames_store_their_labels(monkeypatch):
+    imgs = _images(3)
+    _setup(
+        monkeypatch,
+        _problem(visual_frames=[2, 0], visual_frame_labels=["Figure 3 (flowchart)", "Figure 1"]),
+    )
+    await vision.extract(ExtractRequest(session_id="s", images_base64=imgs))
+    assert await get_current_screen_images("s") == [image_key(imgs[0]), image_key(imgs[2])]
+    assert await get_screen_image_label("s", image_key(imgs[0])) == "Figure 1"
+    assert await get_screen_image_label("s", image_key(imgs[2])) == "Figure 3 (flowchart)"

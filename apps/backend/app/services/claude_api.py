@@ -177,24 +177,33 @@ def image_media_type(image_bytes: bytes) -> str:
 
 
 def _content(
-    text: str, image: tuple[bytes, str] | list[tuple[bytes, str]] | None
+    text: str,
+    image: tuple[bytes, str] | list[tuple[bytes, str]] | None,
+    captions: list[str] | None = None,
 ) -> str | list[dict[str, Any]]:
+    """User content: images first, then `text`. With `captions`, each image
+    is preceded by a "Screenshot i of N: <label>" text block."""
     if image is None:
         return text
     import base64
 
     images = image if isinstance(image, list) else [image]
-    blocks = [
-        {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": media_type,
-                "data": base64.standard_b64encode(data).decode("ascii"),
-            },
-        }
-        for data, media_type in images
-    ]
+    blocks: list[dict[str, Any]] = []
+    for i, (data, media_type) in enumerate(images):
+        if captions is not None:
+            label = captions[i].strip() if i < len(captions) else ""
+            caption = f"Screenshot {i + 1} of {len(images)}: {label or 'unlabelled'}"
+            blocks.append({"type": "text", "text": caption})
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": base64.standard_b64encode(data).decode("ascii"),
+                },
+            }
+        )
     blocks.append({"type": "text", "text": text})
     return blocks
 
@@ -208,14 +217,16 @@ async def stream_claude_api(
     effort: Effort | None,
     prior: Iterable[tuple[str, str]] = (),
     image: tuple[bytes, str] | list[tuple[bytes, str]] | None = None,
+    image_captions: list[str] | None = None,
     cache_system: bool = False,
     thinking: bool = True,
 ) -> AsyncIterator[str]:
     """Stream response text from the Anthropic API.
 
     `prior` is (role, content) pairs sent as real multi-turn messages ahead of
-    `user`. `image` is (bytes, media_type), placed before the text. Thinking
-    blocks are never yielded — `text_stream` carries only the answer.
+    `user`. `image` is (bytes, media_type), placed before the text, each one
+    after its caption from `image_captions` when given. Thinking blocks are
+    never yielded — `text_stream` carries only the answer.
 
     A refusal that survives the server-side fallback raises if nothing was
     emitted yet, so the caller's provider chain can try the next provider.
@@ -224,7 +235,9 @@ async def stream_claude_api(
         {"role": role, "content": content}  # type: ignore[typeddict-item]
         for role, content in prior
     ]
-    messages.append({"role": "user", "content": _content(user, image)})  # type: ignore[typeddict-item]
+    messages.append(
+        {"role": "user", "content": _content(user, image, image_captions)}  # type: ignore[typeddict-item]
+    )
     emitted = False
     async with anthropic_client().beta.messages.stream(
         **_request_kwargs(

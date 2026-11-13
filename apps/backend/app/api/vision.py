@@ -20,6 +20,7 @@ from app.redis_client import (
     get_current_screen_images,
     get_screen_current_text,
     get_screen_image,
+    get_screen_image_label,
     get_screen_references,
     prune_screen_images,
     put_screen_images,
@@ -201,7 +202,7 @@ async def update_screen_images(
     """Keep screenshots of frames with charts/diagrams as the current screen's
     images. A text-only final read clears them; a speculative one leaves them.
     Returns the stored keys for this read."""
-    frames = problem.valid_visual_frames(len(encoded_images))
+    frames = problem.labelled_visual_frames(len(encoded_images))
     if not frames:
         if not speculative:
             old = await get_current_screen_images(sid)
@@ -209,7 +210,9 @@ async def update_screen_images(
             await prune_screen_images(sid, old)
         return []
     old = await get_current_screen_images(sid)
-    keys = await put_screen_images(sid, [encoded_images[i] for i in frames])
+    keys = await put_screen_images(
+        sid, [encoded_images[i] for i, _ in frames], [label for _, label in frames]
+    )
     await set_current_screen_images(sid, keys)
     await prune_screen_images(sid, old)
     return keys
@@ -229,7 +232,15 @@ async def list_screen_references(session_id: str) -> dict[str, Any]:
     refs = await get_screen_references(session_id)
     return {
         "references": [
-            {"id": r.id, "text": r.text, "images": list(r.image_keys), "saved_at": r.saved_at}
+            {
+                "id": r.id,
+                "text": r.text,
+                "images": [
+                    {"key": key, "label": await get_screen_image_label(session_id, key)}
+                    for key in r.image_keys
+                ],
+                "saved_at": r.saved_at,
+            }
             for r in refs
         ]
     }

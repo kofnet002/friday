@@ -168,19 +168,43 @@ def _screen_image_key(session_id: str, key: str) -> str:
     return f"session:{session_id}:screen_image:{key}"
 
 
-async def put_screen_images(session_id: str, images_b64: list[str]) -> list[str]:
-    """Store screenshots (base64 text) for this session; returns their keys."""
+def _screen_image_label_key(session_id: str, key: str) -> str:
+    return f"session:{session_id}:screen_image_label:{key}"
+
+
+async def put_screen_images(
+    session_id: str, images_b64: list[str], labels: list[str] | None = None
+) -> list[str]:
+    """Store screenshots (base64 text) for this session; returns their keys.
+    `labels` (aligned with the images) name the figures each one shows; a
+    missing or empty label keeps any label stored earlier for that image."""
     images_b64 = [strip_data_url(img) for img in images_b64]
     keys = [image_key(img) for img in images_b64]
     client = await get_redis()
     if client is None:
         return keys
-    for key, img in zip(keys, images_b64, strict=True):
+    labels = list(labels or [])
+    for i, (key, img) in enumerate(zip(keys, images_b64, strict=True)):
         await cast(
             Awaitable[Any],
             client.set(_screen_image_key(session_id, key), img, ex=QD_STATE_TTL_S),
         )
+        label = labels[i].strip() if i < len(labels) else ""
+        label_key = _screen_image_label_key(session_id, key)
+        if label:
+            await cast(Awaitable[Any], client.set(label_key, label, ex=QD_STATE_TTL_S))
+        else:
+            # Keep an earlier label alive as long as its image.
+            await cast(Awaitable[Any], client.expire(label_key, QD_STATE_TTL_S))
     return keys
+
+
+async def get_screen_image_label(session_id: str, key: str) -> str | None:
+    client = await get_redis()
+    if client is None:
+        return None
+    raw = await cast(Awaitable[str | None], client.get(_screen_image_label_key(session_id, key)))
+    return raw if isinstance(raw, str) and raw else None
 
 
 async def get_screen_image(session_id: str, key: str) -> str | None:
@@ -227,7 +251,11 @@ async def prune_screen_images(session_id: str, candidate_keys: list[str]) -> Non
     in_use = set(await get_current_screen_images(session_id))
     for ref in await get_screen_references(session_id):
         in_use.update(ref.image_keys)
-    stale = [_screen_image_key(session_id, k) for k in set(candidate_keys) - in_use]
+    stale = [
+        redis_key
+        for k in set(candidate_keys) - in_use
+        for redis_key in (_screen_image_key(session_id, k), _screen_image_label_key(session_id, k))
+    ]
     if stale:
         await cast(Awaitable[Any], client.delete(*stale))
 
@@ -243,8 +271,9 @@ async def clear_screen_state(session_id: str) -> None:
         f"session:{session_id}:screen_references",
         f"session:{session_id}:screen_images_current",
     ]
-    async for key in client.scan_iter(match=f"session:{session_id}:screen_image:*"):
-        keys.append(key)
+    for pattern in ("screen_image", "screen_image_label"):
+        async for key in client.scan_iter(match=f"session:{session_id}:{pattern}:*"):
+            keys.append(key)
     await cast(Awaitable[Any], client.delete(*keys))
 
 
