@@ -209,8 +209,10 @@ async def ws_transcribe(websocket: WebSocket, session_id: str | None = None) -> 
     async def suspend_streams() -> None:
         if nova is not None:
             await nova.start_keepalive()
+        # Not only connected streams: suspend() also cancels a handshake
+        # still in flight, which would otherwise open the stream mid-pause.
         for stream in (interviewer, candidate):
-            if stream is not None and stream.connected:
+            if stream is not None:
                 await stream.suspend()
 
     audio_frame_count = 0

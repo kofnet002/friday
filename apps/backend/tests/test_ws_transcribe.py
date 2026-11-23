@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,8 +15,15 @@ from app.settings import settings
 
 
 class _FakeFlux:
-    def __init__(self, **_: Any) -> None:
-        self.connected = True
+    instances: ClassVar[list[_FakeFlux]] = []
+    # A stream still mid-handshake (send() connects in the background).
+    start_connected: ClassVar[bool] = True
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.label = kwargs.get("label")
+        self.connected = _FakeFlux.start_connected
+        self.suspended = False
+        _FakeFlux.instances.append(self)
 
     async def connect(self) -> None:
         return None
@@ -25,7 +32,7 @@ class _FakeFlux:
         return None
 
     async def suspend(self) -> None:
-        return None
+        self.suspended = True
 
     async def finish(self) -> None:
         return None
@@ -40,6 +47,8 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(settings, "turn_engine", "flux")
     monkeypatch.setattr(settings, "session_audio_minute_limit", 120)
     monkeypatch.setattr(ws_transcribe, "FluxSession", _FakeFlux)
+    monkeypatch.setattr(_FakeFlux, "instances", [])
+    monkeypatch.setattr(_FakeFlux, "start_connected", True)
     with TestClient(app) as c:
         yield c
 
@@ -81,3 +90,20 @@ def test_usage_endpoint_includes_audio_budget(client: Any, monkeypatch: pytest.M
     body = client.get("/api/sessions/s1/usage").json()
     assert body["audio_minutes_used"] == 45.0
     assert body["audio_minutes_limit"] == 120.0
+
+
+def test_pause_suspends_streams_that_are_still_connecting(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A handshake in flight at pause must be cancelled too, or the stream
+    # opens during the pause and Deepgram bills the idle time.
+    _set_used_seconds(monkeypatch, 0)
+    monkeypatch.setattr(_FakeFlux, "start_connected", False)
+    with client.websocket_connect("/ws/transcribe?session_id=s1") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "start", "audio_format": "tagged"})
+        ws.receive_json()
+        ws.send_json({"type": "pause"})
+        ws.send_json({"type": "stop"})
+    labels = {f.label for f in _FakeFlux.instances if f.suspended}
+    assert labels == {"interviewer", "candidate"}

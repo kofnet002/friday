@@ -26,8 +26,10 @@ wire protocol directly over `websockets`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,6 +42,13 @@ from app.logging import log
 from app.settings import settings
 
 FLUX_URL = "wss://api.deepgram.com/v2/listen"
+
+# Audio arriving while a stream (re)connects is held, up to this many 100 ms
+# frames (~3 s), and sent first once the stream is up. Older frames give way.
+PENDING_AUDIO_MAX_FRAMES = 30
+# After a failed handshake, wait this long before the next attempt, so a
+# dead network isn't hammered with one handshake per audio frame.
+CONNECT_RETRY_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -116,7 +125,10 @@ def flux_query(*, keyterms: Sequence[str] = (), eager: bool = True) -> list[tupl
 class FluxSession:
     """One Flux stream (one audio source). Reconnects with backoff on
     unexpected close; `suspend()` closes deliberately (pause) and the next
-    `send()` reconnects lazily, so a paused session costs nothing."""
+    `send()` reconnects lazily, so a paused session costs nothing.
+
+    `send()` never waits on a handshake: both streams share one audio loop,
+    so a slow connect on one would otherwise freeze the other."""
 
     MAX_RETRIES = 5
     BACKOFF_BASE_S = 0.5
@@ -143,6 +155,9 @@ class FluxSession:
         self._closed = False
         self._suspended = False
         self._retries = 0
+        self._connect_task: asyncio.Task[None] | None = None
+        self._next_connect_at = 0.0
+        self._pending: deque[bytes] = deque(maxlen=PENDING_AUDIO_MAX_FRAMES)
 
     @property
     def connected(self) -> bool:
@@ -230,20 +245,36 @@ class FluxSession:
     async def send(self, audio: bytes) -> None:
         if self._closed:
             return
-        if self._ws is None:
-            # Lazy (re)connect after suspend() or a dropped socket.
-            try:
-                await self.connect()
-            except Exception as exc:  # noqa: BLE001
-                log.error("flux.connect_failed", label=self.label, error=str(exc))
-                return
         ws = self._ws
         if ws is None:
+            # Lazy (re)connect after suspend() or a dropped socket, in the
+            # background; hold the audio until the stream is up.
+            self._pending.append(audio)
+            self._start_connect()
             return
         try:
+            # Flushed here, in the caller's single audio loop, so held and
+            # live frames go out in order.
+            while self._pending:
+                await ws.send(self._pending.popleft())
             await ws.send(audio)
         except ConnectionClosed:
             pass
+
+    def _start_connect(self) -> None:
+        task = self._connect_task
+        if task is not None and not task.done():
+            return
+        if time.monotonic() < self._next_connect_at:
+            return
+        self._connect_task = asyncio.create_task(self._connect_in_background())
+
+    async def _connect_in_background(self) -> None:
+        try:
+            await self.connect()
+        except Exception as exc:
+            self._next_connect_at = time.monotonic() + CONNECT_RETRY_S
+            log.error("flux.connect_failed", label=self.label, error=str(exc))
 
     async def _send_json(self, payload: dict[str, Any]) -> None:
         ws = self._ws
@@ -270,6 +301,14 @@ class FluxSession:
         await self._close_ws()
 
     async def _close_ws(self) -> None:
+        connecting = self._connect_task
+        self._connect_task = None
+        self._pending.clear()
+        if connecting is not None and not connecting.done():
+            connecting.cancel()
+            # A cancelled or failed handshake has nothing left to clean up.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await connecting
         ws = self._ws
         if ws is not None:
             await self._send_json({"type": "CloseStream"})
